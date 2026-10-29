@@ -17,6 +17,11 @@ pub struct Line {
 
 /// Recognises `image`; lines come back in reading order with desktop coordinates.
 pub fn recognize(image: &Image) -> Result<Vec<Line>> {
+    Ok(merge(readings(image)?))
+}
+
+/// Every installed recognizer's reading; the flag marks those that read Cyrillic.
+fn readings(image: &Image) -> Result<Vec<(bool, Vec<Line>)>> {
     let max = OcrEngine::MaxImageDimension()? as i32;
     // Very large areas are scaled to the engine's limit; coordinates are mapped back.
     let (source, k) = if image.rect.width() > max || image.rect.height() > max {
@@ -64,7 +69,7 @@ pub fn recognize(image: &Image) -> Result<Vec<Line>> {
         }
         readings.push((cyrillic, out));
     }
-    Ok(merge(readings))
+    Ok(readings)
 }
 
 /// Words written wholly in one script (Cyrillic or Latin) with no digits inside: real words.
@@ -249,9 +254,31 @@ Hello Kadr 2026")).unwrap());
         assert!(all.contains("Hello") && all.contains("2026"), "{all:?}");
     }
     /// White text image via GDI, offset on the desktop to check coordinate mapping.
+    #[test]
+    fn dark_russian_with_english_words_keeps_the_cyrillic_reading() {
+        let Ok(engines) = engines() else { return };
+        if !engines.iter().any(|(c, _)| *c) {
+            return;
+        }
+        let image = render_with(
+            "Перевод починил. Изменения закоммичены, новая сборка лежит в dist/Kadr.exe, тесты (117) и
+clippy проходят. На настоящем экране не проверял, только через живые запросы к Google
+Русские строки остаются как есть. Строка считается русской, если больше половины её",
+            19,
+            true,
+        );
+        let all = text(&recognize(&image).unwrap());
+        for phrase in ["Перевод починил", "проходят", "Русские строки остаются"] {
+            assert!(all.contains(phrase), "{phrase:?} in {all:?}");
+        }
+    }
     fn render(value: &str) -> Image {
+        render_with(value, 32, false)
+    }
+    /// `px` font height; `dark` — light text on a dark background, as in a dark chat window.
+    fn render_with(value: &str, px: i32, dark: bool) -> Image {
         use windows::Win32::Graphics::Gdi::*;
-        let (w, h) = (520, 60 + 44 * value.lines().count() as i32);
+        let (w, h) = (1400, 40 + (px + px / 2) * value.lines().count() as i32);
         unsafe {
             let dc = CreateCompatibleDC(None);
             let info = BITMAPINFO {
@@ -270,8 +297,16 @@ Hello Kadr 2026")).unwrap());
             let bitmap = CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0).unwrap();
             let old = SelectObject(dc, bitmap.into());
             let all = windows::Win32::Foundation::RECT { left: 0, top: 0, right: w, bottom: h };
-            FillRect(dc, &all, HBRUSH(GetStockObject(WHITE_BRUSH).0));
-            let font = CreateFontW(-32, 0, 0, 0, 400, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, windows::core::w!("Segoe UI"));
+            if dark {
+                let brush = CreateSolidBrush(windows::Win32::Foundation::COLORREF(0x1f1f1f));
+                FillRect(dc, &all, brush);
+                let _ = DeleteObject(brush.into());
+                SetTextColor(dc, windows::Win32::Foundation::COLORREF(0xe8e8e8));
+                SetBkMode(dc, TRANSPARENT);
+            } else {
+                FillRect(dc, &all, HBRUSH(GetStockObject(WHITE_BRUSH).0));
+            }
+            let font = CreateFontW(-px, 0, 0, 0, 400, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, windows::core::w!("Segoe UI"));
             let old_font = SelectObject(dc, font.into());
             let mut wide: Vec<u16> = value.encode_utf16().collect();
             let mut r = windows::Win32::Foundation::RECT { left: 16, top: 16, right: w, bottom: h };
