@@ -43,19 +43,6 @@ impl App {
         }
         self.active.as_mut().unwrap().draft = Some(DraftState { token, document, view: None });
     }
-    pub(super) fn remember_quick(&self, image: &Arc<Image>) {
-        if !self.config.recent.enabled || self.bench_mode {
-            return;
-        }
-        let document = document(self.outputs.iter().map(Output::bounds).collect(), Some(image.rect), false);
-        let token = new_token();
-        self.recent.send(Command::Create {
-            token: token.clone(),
-            frames: vec![image.clone()],
-            document: document.clone(),
-        });
-        self.recent.send(Command::State { token, document, open: false });
-    }
     pub(super) fn schedule_draft(&self) {
         let Some(active) = &self.active else { return };
         let Some(draft) = &active.draft else { return };

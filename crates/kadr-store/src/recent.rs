@@ -87,16 +87,23 @@ impl<C: Crypto> Store<C> {
         }
         let pending = self.root.join(format!(".pending-{id}"));
         fs::create_dir(&pending)?;
-        let frames = encode_frames(frames)?;
-        write_atomic(&pending.join("frames.enc"), &self.crypto.seal(&frames)?)?;
-        // Перечитывание кадров не требуется: превью будет записано первым update из рабочего процесса.
-        write_atomic(
-            &pending.join("state.enc"),
-            &self.crypto.seal(toml::to_string(doc).map_err(io::Error::other)?.as_bytes())?,
-        )?;
-        let meta = Meta { version: 1, created_ms, open: true };
-        write_meta(&pending, &meta)?;
-        fs::rename(&pending, dir)?;
+        let written = (|| -> io::Result<()> {
+            let frames = encode_frames(frames)?;
+            write_atomic(&pending.join("frames.enc"), &self.crypto.seal(&frames)?)?;
+            // Перечитывание кадров не требуется: превью будет записано первым update из рабочего процесса.
+            write_atomic(
+                &pending.join("state.enc"),
+                &self.crypto.seal(toml::to_string(doc).map_err(io::Error::other)?.as_bytes())?,
+            )?;
+            let meta = Meta { version: 1, created_ms, open: true };
+            write_meta(&pending, &meta)?;
+            fs::rename(&pending, &dir)
+        })();
+        if let Err(e) = written {
+            // Незавершённая запись не должна копиться на диске; чужие файлы remove_files не тронет.
+            let _ = remove_files(&pending);
+            return Err(e);
+        }
         self.prune()?;
         Ok(())
     }
@@ -160,6 +167,16 @@ impl<C: Crypto> Store<C> {
     }
     /// Незавершённые сессии прежнего процесса остаются доступными, уведомление показывается один раз.
     pub fn recover(&self) -> io::Result<usize> {
+        // Первичная запись, прерванная сбоем процесса, не показывается и не нужна.
+        for entry in fs::read_dir(&self.root)?.take(1000).flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if let Some(id) = name.strip_prefix(".pending-")
+                && self.dir(id).is_ok()
+                && entry.file_type().is_ok_and(|t| t.is_dir())
+            {
+                let _ = remove_files(&entry.path());
+            }
+        }
         let mut count = 0;
         for entry in self.list()? {
             let dir = self.dir(&entry.id)?;
@@ -191,19 +208,7 @@ impl<C: Crypto> Store<C> {
         Ok(true)
     }
     fn remove(&self, id: &str) -> io::Result<()> {
-        let dir = self.dir(id)?;
-        // Никогда не удаляем каталог рекурсивно: чужие файлы/подкаталоги не затрагиваются.
-        for name in ["frames.enc", "state.enc", "preview.enc", "meta.toml"] {
-            for suffix in ["", ".part"] {
-                let path = dir.join(format!("{name}{suffix}"));
-                match fs::remove_file(path) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e),
-                }
-            }
-        }
-        fs::remove_dir(dir)
+        remove_files(&self.dir(id)?)
     }
     pub fn clear(&self) -> io::Result<()> {
         for entry in self.list()? {
@@ -233,6 +238,19 @@ pub fn to_array(r: Rect) -> [i32; 4] {
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
+/// Никогда не удаляем каталог рекурсивно: чужие файлы/подкаталоги не затрагиваются.
+fn remove_files(dir: &Path) -> io::Result<()> {
+    for name in ["frames.enc", "state.enc", "preview.enc", "meta.toml"] {
+        for suffix in ["", ".part"] {
+            match fs::remove_file(dir.join(format!("{name}{suffix}"))) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    fs::remove_dir(dir)
+}
 fn read_limited(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     if fs::symlink_metadata(path)?.file_type().is_symlink() {
         return Err(invalid("ссылка вместо файла"));
@@ -254,10 +272,14 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         return Err(invalid("остался незавершённый файл; исходный снимок не изменён"));
     }
     let mut file = fs::OpenOptions::new().create_new(true).write(true).open(&tmp)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
     drop(file);
-    fs::rename(tmp, path)
+    let result = written.and_then(|()| fs::rename(&tmp, path));
+    if result.is_err() {
+        // Иначе следующая запись этого файла упрётся в оставшийся .part до перезапуска.
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 fn write_meta(dir: &Path, meta: &Meta) -> io::Result<()> {
     write_atomic(&dir.join("meta.toml"), toml::to_string(meta).map_err(io::Error::other)?.as_bytes())

@@ -527,9 +527,9 @@ impl App {
                 }
                 match image {
                     Ok(image) => {
-                        let image = Arc::new(image);
-                        self.remember_quick(&image);
-                        self.copy_image(image);
+                        // В «Недавние» не пишем: снимок уже в буфере, а десяток быстрых снимков
+                        // вытеснил бы несохранённую ручную область, ради которой «Недавние» и есть.
+                        self.copy_image(Arc::new(image));
                         log_info!("быстрый снимок {mode:?}: {}×{}, {:.1} мс", region.width(), region.height(), perf::ms(t, perf::now()));
                     }
                     Err(e) => {

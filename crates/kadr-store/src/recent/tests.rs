@@ -136,3 +136,31 @@ fn abrupt_process_exit_leaves_recoverable_open_draft() {
     store.clear().unwrap();
     fs::remove_dir(&store.root).unwrap();
 }
+
+#[test]
+fn failed_writes_leave_no_partial_files_behind() {
+    let store = setup("failed-write");
+    // Пустой набор кадров отклоняется уже после создания .pending-каталога.
+    assert!(store.create("abc-4", 1, &[], &document()).is_err());
+    assert!(!store.root.join(".pending-abc-4").exists());
+    // Каталог на месте файла: rename падает, а .part не должен блокировать следующую запись.
+    let target = store.root.join("blocked.enc");
+    fs::create_dir(&target).unwrap();
+    assert!(write_atomic(&target, b"data").is_err());
+    assert!(!store.root.join("blocked.enc.part").exists());
+    fs::remove_dir(&target).unwrap();
+    fs::remove_dir(&store.root).unwrap();
+}
+
+#[test]
+fn recover_removes_pending_writes_of_a_crashed_process_but_not_foreign_files() {
+    let store = setup("pending");
+    fs::create_dir(store.root.join(".pending-abc-5")).unwrap();
+    fs::write(store.root.join(".pending-abc-5/frames.enc"), b"half").unwrap();
+    fs::create_dir(store.root.join(".pending-abc-6")).unwrap();
+    fs::write(store.root.join(".pending-abc-6/notes.txt"), b"keep").unwrap();
+    assert_eq!(store.recover().unwrap(), 0);
+    assert!(!store.root.join(".pending-abc-5").exists());
+    assert!(store.root.join(".pending-abc-6/notes.txt").exists());
+    fs::remove_dir_all(&store.root).unwrap();
+}

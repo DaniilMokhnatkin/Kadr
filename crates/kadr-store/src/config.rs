@@ -48,6 +48,11 @@ impl Config {
     pub fn parse(text: &str) -> Result<Self, String> {
         let config: Self = toml::from_str(text).map_err(|e| e.to_string())?;
         if !(1..=10).contains(&config.recent.max) { return Err("recent.max должен быть от 1 до 10".into()); }
+        // Относительный путь считался бы от текущей папки процесса, а при автозапуске она случайна.
+        let folder = config.save.folder.trim();
+        if !folder.is_empty() && !Path::new(folder).is_absolute() {
+            return Err(format!("save.folder: нужен полный путь, например C:\\Снимки, а не «{folder}»"));
+        }
         let mut seen = Vec::new();
         for (name, text) in config.hotkeys.entries() {
             if let Some(key) = crate::hotkey::parse(text).map_err(|e| format!("hotkeys.{name}: {e}"))? {
@@ -167,6 +172,15 @@ mod tests {
         let config = Config::parse("[hotkeys]\nfullscreen = ''\nwindow = 'Alt+F9'").unwrap();
         assert!(config.hotkeys.fullscreen.is_empty());
         assert_eq!(config.hotkeys.window, "Alt+F9");
+    }
+
+    #[test]
+    fn save_folder_must_be_absolute_or_empty() {
+        assert!(Config::parse("[save]\nfolder = 'Снимки'").is_err());
+        assert!(Config::parse("[save]\nfolder = '\\Снимки'").is_err());
+        assert!(Config::parse("[save]\nfolder = 'D:\\Снимки'").is_ok());
+        assert!(Config::parse("[save]\nfolder = '\\\\nas\\shots'").is_ok());
+        assert!(Config::parse("[save]\nfolder = ''").is_ok());
     }
 
     #[test]
