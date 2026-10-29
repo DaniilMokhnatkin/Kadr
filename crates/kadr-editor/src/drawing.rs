@@ -14,6 +14,8 @@ pub struct Drawing {
     pending: Option<Annotation>,
     edit: Option<Edit>,
     pub selected: Option<usize>,
+    /// The shape just drawn: changing colour or width right after drawing restyles it, as in Markup.
+    last: Option<u64>,
     text: Option<usize>,
     text_before: Option<Arc<Vec<Annotation>>>,
     text_input: TextInput,
@@ -39,6 +41,7 @@ impl Default for Drawing {
             pending: None,
             edit: None,
             selected: None,
+            last: None,
             text: None,
             text_before: None,
             text_input: TextInput::default(),
@@ -132,30 +135,43 @@ impl Drawing {
         self.cancel_drag();
         self.tool = tool;
         self.selected = None;
+        self.last = None;
+    }
+    /// What a style change applies to: the text being typed, else the selected shape, else the one
+    /// just drawn. The new value also becomes the default for the next shape.
+    fn target(&self) -> Option<usize> {
+        self.text
+            .or(self.selected)
+            .or_else(|| self.last.and_then(|id| self.shapes.iter().position(|s| s.id == id)))
+            .filter(|i| *i < self.shapes.len())
+    }
+    fn restyle(&mut self, apply: impl Fn(&mut Annotation) -> bool) {
+        let Some(i) = self.target() else { return };
+        if self.text.is_some() {
+            // Typing is one history step: the whole edit, style included, is recorded when it ends.
+            if apply(&mut self.shapes[i]) {
+                self.revision += 1;
+            }
+            return;
+        }
+        let before = self.snapshot();
+        apply(&mut self.shapes[i]);
+        self.record(before);
     }
     pub fn set_color(&mut self, index: usize) {
         self.color = index.min(COLORS.len() - 1);
-        let before = self.snapshot();
-        if let Some(i) = self.selected {
-            self.shapes[i].color = COLORS[self.color];
-        }
-        self.record(before);
+        let color = COLORS[self.color];
+        self.restyle(|s| !s.tool.is_blur() && std::mem::replace(&mut s.color, color) != color);
     }
     pub fn set_width(&mut self, width: u32) {
         self.width = width.clamp(1, 12);
-        let before = self.snapshot();
-        if let Some(i) = self.selected {
-            self.shapes[i].width = self.width;
-        }
-        self.record(before);
+        let width = self.width;
+        self.restyle(|s| std::mem::replace(&mut s.width, width) != width);
     }
     pub fn set_strength(&mut self, strength: u8) {
         self.strength = strength.min(2);
-        let before = self.snapshot();
-        if let Some(i) = self.selected {
-            self.shapes[i].strength = self.strength;
-        }
-        self.record(before);
+        let strength = self.strength;
+        self.restyle(|s| s.tool.is_blur() && std::mem::replace(&mut s.strength, strength) != strength);
     }
     /// Возвращает true, когда событие принадлежит слою рисования, иначе рамке захвата.
     pub fn down(&mut self, p: Point, crop: Rect, seed: u64) -> bool {
@@ -172,6 +188,7 @@ impl Drawing {
                 self.shapes.iter().rposition(|s| s.hit(p))
             };
             self.selected = index;
+            self.last = None;
             if let Some(i) = index {
                 self.color = COLORS
                     .iter()
@@ -210,11 +227,13 @@ impl Drawing {
                 .unwrap_or(0)
                 .saturating_add(1)
                 .min(9999);
+            self.last = Some(shape.id);
             let before = self.snapshot();
             self.shapes.push(shape);
             self.record(before);
         } else if self.tool == Tool::Text {
             let before = self.snapshot();
+            self.last = Some(shape.id);
             let i = self.shapes.len();
             self.shapes.push(shape);
             self.text = Some(i);
@@ -296,6 +315,7 @@ impl Drawing {
     pub fn finish_gesture(&mut self) -> bool {
         if let Some(shape) = self.pending.take() {
             let before = self.snapshot();
+            self.last = Some(shape.id);
             self.shapes.push(shape);
             self.record(before);
             return true;
@@ -476,6 +496,46 @@ mod tests {
         d.down(Point::new(0, 20), C, 2);
         d.up(Point::new(20, 20), C, false);
         assert!(!d.can_redo());
+    }
+    #[test]
+    fn colour_change_restyles_text_being_typed_and_the_shape_just_drawn() {
+        let mut d = Drawing::default();
+        d.set_tool(Tool::Text);
+        d.down(Point::new(0, 10), C, 1);
+        for c in "Hi".chars() {
+            d.text_char(c);
+        }
+        d.set_color(3);
+        d.finish_text();
+        assert_eq!(d.shapes()[0].color, COLORS[3]);
+        // Typing plus its colour is one step.
+        d.undo();
+        assert!(d.shapes().is_empty());
+        d.redo();
+
+        d.set_tool(Tool::Rectangle);
+        d.down(Point::new(10, 50), C, 2);
+        d.up(Point::new(80, 90), C, false);
+        d.set_color(1);
+        d.set_width(7);
+        assert_eq!((d.shapes()[1].color, d.shapes()[1].width), (COLORS[1], 7));
+        assert_eq!(d.shapes()[0].color, COLORS[3], "earlier shapes keep their colour");
+        d.undo();
+        assert_eq!(d.shapes()[1].width, 3);
+        assert_eq!(d.shapes()[1].color, COLORS[1]);
+
+        // A new tool starts fresh: the next colour is for the next shape only.
+        d.set_tool(Tool::Arrow);
+        d.set_color(2);
+        assert_eq!(d.shapes()[1].color, COLORS[1]);
+        // Blur takes strength, never a colour.
+        d.set_tool(Tool::Blur);
+        d.down(Point::new(100, 100), C, 3);
+        d.up(Point::new(200, 150), C, false);
+        let blur = d.shapes()[2].clone();
+        d.set_color(4);
+        d.set_strength(2);
+        assert_eq!((d.shapes()[2].color, d.shapes()[2].strength), (blur.color, 2));
     }
     #[test]
     fn unicode_text_is_one_operation_and_escape_reverts_edit() {
