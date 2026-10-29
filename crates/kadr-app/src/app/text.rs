@@ -6,7 +6,7 @@ use crate::bubble::{self, Content};
 
 pub(super) enum TextResult {
     Copied(String),
-    Translated { text: String, from: String, anchor: Option<DocRect> },
+    Translated { text: String, from: String, to: String, anchor: Option<DocRect> },
     Failed(String),
 }
 
@@ -76,8 +76,8 @@ impl App {
                 Ok(match job {
                     Job::Copy => TextResult::Copied(text),
                     Job::Translate => {
-                        let t = crate::translate::translate(&text, "ru")?;
-                        TextResult::Translated { text: t.text, from: t.from, anchor: click.map(|_| rect) }
+                        let t = crate::translate::for_reader(&text)?;
+                        TextResult::Translated { text: t.text, from: t.from, to: t.to, anchor: click.map(|_| rect) }
                     }
                 })
             })()
@@ -100,9 +100,9 @@ impl App {
                     log_info!("распознано и скопировано: {} символов", text.chars().count());
                     (Content::Copied(text), None)
                 }
-                TextResult::Translated { text, from, anchor } => {
+                TextResult::Translated { text, from, to, anchor } => {
                     log_info!("перевод с «{from}»: {} символов", text.chars().count());
-                    (Content::Translated { text, from }, anchor)
+                    (Content::Translated { text, from, to }, anchor)
                 }
                 TextResult::Failed(e) => {
                     log_warn!("текст с экрана: {e}");

@@ -8,6 +8,62 @@ pub struct Translation {
     pub text: String,
     /// Detected source language, e.g. "en".
     pub from: String,
+    /// Target language, "ru" or "en".
+    pub to: String,
+}
+
+/// What a reader on a Russian system wants: foreign lines in Russian, Russian lines untouched.
+/// Text that is all Russian goes to English instead, so the button still does something useful.
+pub fn for_reader(text: &str) -> Result<Translation, String> {
+    plan_and_translate(text, translate)
+}
+
+/// A line is Russian when most of its words are written wholly in Cyrillic.
+fn russian(line: &str) -> bool {
+    let words: Vec<&str> =
+        line.split(|c: char| !c.is_alphanumeric()).filter(|w| w.chars().any(char::is_alphabetic)).collect();
+    let cyrillic = |c: char| {
+        let c = c.to_lowercase().next().unwrap_or(c);
+        ('а'..='я').contains(&c) || "ёєіїўђћјљњџ".contains(c)
+    };
+    let whole = words.iter().filter(|w| w.chars().all(|c| c.is_alphabetic() && cyrillic(c))).count();
+    !words.is_empty() && whole * 2 > words.len()
+}
+
+fn plan_and_translate(
+    text: &str,
+    translate: impl Fn(&str, &str) -> Result<Translation, String>,
+) -> Result<Translation, String> {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let foreign = |l: &str| l.chars().any(char::is_alphabetic) && !russian(l);
+    if !lines.iter().any(|l| foreign(l)) {
+        return translate(text, "en");
+    }
+    // Runs of foreign lines go to the translator together (context helps); the rest stays as is.
+    let mut out = Vec::new();
+    let mut from = String::new();
+    let mut run: Vec<&str> = Vec::new();
+    let mut flush = |run: &mut Vec<&str>, out: &mut Vec<String>| -> Result<(), String> {
+        if !run.is_empty() {
+            let t = translate(&run.join("\n"), "ru")?;
+            if from.is_empty() {
+                from = t.from;
+            }
+            out.push(t.text);
+            run.clear();
+        }
+        Ok(())
+    };
+    for line in lines {
+        if foreign(line) {
+            run.push(line);
+        } else {
+            flush(&mut run, &mut out)?;
+            out.push(line.to_string());
+        }
+    }
+    flush(&mut run, &mut out)?;
+    Ok(Translation { text: out.join("\n"), from, to: "ru".into() })
 }
 
 /// Blocking: call from a worker thread. `to` is a language code such as "ru".
@@ -15,7 +71,9 @@ pub fn translate(text: &str, to: &str) -> Result<Translation, String> {
     let body = format!("q={}", encode(text));
     let path = kadr_win::wide(&format!("/translate_a/single?client=gtx&sl=auto&tl={to}&dt=t&ie=UTF-8&oe=UTF-8"));
     let response = post("translate.googleapis.com", &path, body.as_bytes())?;
-    parse(&response).ok_or_else(|| "Переводчик вернул непонятный ответ".to_string())
+    let mut t = parse(&response).ok_or_else(|| "Переводчик вернул непонятный ответ".to_string())?;
+    t.to = to.into();
+    Ok(t)
 }
 
 struct Handle(*mut c_void);
@@ -141,7 +199,7 @@ fn parse(body: &str) -> Option<Translation> {
         Some(Json::Str(lang)) => lang.clone(),
         _ => String::new(),
     };
-    (!text.is_empty()).then_some(Translation { text, from })
+    (!text.is_empty()).then_some(Translation { text, from, to: String::new() })
 }
 
 fn value(c: &mut std::iter::Peekable<std::str::Chars>) -> Option<Json> {
@@ -245,6 +303,36 @@ mod tests {
         assert!(parse("<html>blocked</html>").is_none());
         assert!(parse("[]").is_none());
     }
+    /// Stand-in translator: tags what it got, records calls.
+    fn fake(calls: &std::cell::RefCell<Vec<(String, String)>>) -> impl Fn(&str, &str) -> Result<Translation, String> + '_ {
+        move |text, to| {
+            calls.borrow_mut().push((text.to_string(), to.to_string()));
+            Ok(Translation { text: format!("[{to}] {text}"), from: if to == "en" { "ru" } else { "en" }.into(), to: to.into() })
+        }
+    }
+    #[test]
+    fn russian_lines_stay_and_only_foreign_runs_are_translated() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let text = "Заголовок на русском\nThe quick fox\njumps over\n\nЕщё строка по-русски\nSee you";
+        let t = plan_and_translate(text, fake(&calls)).unwrap();
+        assert_eq!(
+            t.text,
+            "Заголовок на русском\n[ru] The quick fox\njumps over\n\nЕщё строка по-русски\n[ru] See you"
+        );
+        assert_eq!((t.from.as_str(), t.to.as_str()), ("en", "ru"));
+        assert_eq!(calls.borrow().len(), 2, "one request per foreign run");
+    }
+    #[test]
+    fn all_russian_text_goes_to_english_and_a_mostly_russian_line_is_russian() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let t = plan_and_translate("Привет, мир\nНажмите кнопку Copy", fake(&calls)).unwrap();
+        assert_eq!(t.to, "en");
+        assert_eq!(calls.borrow()[0], ("Привет, мир\nНажмите кнопку Copy".to_string(), "en".to_string()));
+        assert!(russian("если там есть хоть чуток русского OK"));
+        assert!(!russian("Click Отмена to close the dialog"));
+        assert!(!russian("CKonhp0BaTb TeKCT"));
+        assert!(!russian("2026 · 12:30"));
+    }
     #[test]
     #[ignore = "network: run with --ignored"]
     fn live_google_translates_to_russian() {
@@ -252,6 +340,21 @@ mod tests {
         assert_eq!(t.from, "en");
         assert!(t.text.chars().any(|c| ('а'..='я').contains(&c)), "{}", t.text);
         println!("{}", t.text);
+    }
+    #[test]
+    #[ignore = "network: run with --ignored"]
+    fn live_reader_translation_keeps_russian_and_turns_all_russian_into_english() {
+        let mixed = for_reader("Сохранить как
+The file was saved.").unwrap();
+        assert!(mixed.text.starts_with("Сохранить как
+"), "{}", mixed.text);
+        assert_eq!(mixed.to, "ru");
+        let russian = for_reader("Погода сегодня хорошая.").unwrap();
+        assert_eq!((russian.from.as_str(), russian.to.as_str()), ("ru", "en"));
+        assert!(russian.text.to_lowercase().contains("weather"), "{}", russian.text);
+        println!("{}
+---
+{}", mixed.text, russian.text);
     }
     #[test]
     fn form_encoding_keeps_unicode_and_reserved_characters_safe() {

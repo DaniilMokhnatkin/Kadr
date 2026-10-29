@@ -24,7 +24,7 @@ use windows::core::{PCWSTR, w};
 #[derive(Clone)]
 pub enum Content {
     Working(&'static str),
-    Translated { text: String, from: String },
+    Translated { text: String, from: String, to: String },
     Copied(String),
     Failed(String),
 }
@@ -83,7 +83,7 @@ fn language(code: &str) -> String {
 fn header(content: &Content) -> String {
     match content {
         Content::Working(what) => (*what).into(),
-        Content::Translated { from, .. } => format!("{} → Русский", language(from)),
+        Content::Translated { from, to, .. } => format!("{} → {}", language(from), language(to)),
         Content::Copied(_) => "Текст скопирован".into(),
         Content::Failed(_) => "Не получилось".into(),
     }
@@ -536,8 +536,9 @@ mod tests {
     use super::*;
     #[test]
     fn header_names_the_language_and_the_state() {
-        assert_eq!(header(&Content::Translated { text: "x".into(), from: "en".into() }), "Английский → Русский");
-        assert_eq!(header(&Content::Translated { text: "x".into(), from: "zh-CN".into() }), "Китайский → Русский");
+        assert_eq!(header(&Content::Translated { text: "x".into(), from: "en".into(), to: "ru".into() }), "Английский → Русский");
+        assert_eq!(header(&Content::Translated { text: "x".into(), from: "zh-CN".into(), to: "ru".into() }), "Китайский → Русский");
+        assert_eq!(header(&Content::Translated { text: "x".into(), from: "ru".into(), to: "en".into() }), "Русский → Английский");
         assert_eq!(header(&Content::Copied("x".into())), "Текст скопирован");
         assert_eq!(body(&Content::Working("Перевожу")), "");
     }
