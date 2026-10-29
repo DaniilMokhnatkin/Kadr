@@ -77,6 +77,8 @@ const WM_APP_PIN: u32 = WM_APP + 8;
 const WM_APP_THUMB: u32 = WM_APP + 9;
 /// Text recognition or translation finished on its worker.
 const WM_APP_TEXT: u32 = WM_APP + 10;
+/// The settings window has changes or wants hotkeys paused.
+const WM_APP_SETTINGS: u32 = WM_APP + 11;
 const TIMER_HOOK_CHECK: usize = 1;
 const TIMER_DRAFT: usize = 2;
 
@@ -604,19 +606,7 @@ impl App {
             CMD_CAPTURE => self.open_session("трей", 0, "—"),
             CMD_FULLSCREEN => self.capture_mode(Mode::Fullscreen, 0, "трей"),
             CMD_LAST_REGION => self.capture_mode(Mode::LastRegion, 0, "трей"),
-            CMD_CONFIG => {
-                let path = wide(&format!("\"{}\"", self.config_path.display()));
-                unsafe {
-                    ShellExecuteW(
-                        None,
-                        w!("open"),
-                        w!("notepad.exe"),
-                        PCWSTR(path.as_ptr()),
-                        PCWSTR::null(),
-                        SW_SHOWNORMAL,
-                    );
-                }
-            }
+            CMD_CONFIG => crate::settings_window::show(self.instance, self.hwnd, WM_APP_SETTINGS, &self.config),
             CMD_WARM => {
                 self.set_warm(!self.warm);
                 log_info!("дубликатор: {}", self.mode());
@@ -1495,6 +1485,7 @@ unsafe extern "system" fn host_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         WM_APP_RECENT_UI => with_app(App::on_recent_ui),
         WM_APP_THUMB => with_app(App::on_thumbnail),
         WM_APP_TEXT => with_app(App::on_text_result),
+        WM_APP_SETTINGS => with_app(App::on_settings_window),
         WM_APP_PIN => with_app(App::on_pin),
         WM_RENDERFORMAT => with_app(|app| {
             if let Some(image) = &app.clipboard {

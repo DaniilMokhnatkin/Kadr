@@ -128,6 +128,57 @@ enabled = true  # сохранять несохранённые снимки з�
 max = 10        # от 1 до 10; старые записи вытесняются
 "#;
 
+/// The file as the settings window writes it: the template's layout and comments with these values.
+pub fn render(c: &Config) -> String {
+    let quoted = |s: &str| {
+        if s.is_empty() {
+            "\"\"".to_string()
+        } else if !s.contains('\'') && !s.chars().any(char::is_control) {
+            // Literal string: Windows paths keep their backslashes as typed.
+            format!("'{s}'")
+        } else {
+            format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+        }
+    };
+    let basic = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+    let key = |name: &str, value: &str, comment: &str| format!("{name:<11} = {:<26}# {comment}\n", basic(value));
+    let h = &c.hotkeys;
+    let mut out = String::from("# Настройки Kadr. Изменения применяются сразу после сохранения файла.\n\n[hotkeys]\n");
+    out.push_str("# Пустая строка выключает хоткей. Модификаторы: Ctrl, Alt, Shift, Win.\n");
+    out.push_str(&key("region", &h.region, "выделить область"));
+    out.push_str(&key("fullscreen", &h.fullscreen, "монитор под курсором — сразу в буфер"));
+    out.push_str(&key("window", &h.window, "активное окно — сразу в буфер"));
+    out.push_str(&key("last_region", &h.last_region, "та же область, что в прошлый раз"));
+    out.push_str(&key("recent", &h.recent, "вернуть несохранённый снимок"));
+    out.push_str(&format!(
+        "\n[capture]\nwarm = {:<7}# держать захват наготове: ~8 мс вместо ~23 мс\n",
+        c.capture.warm
+    ));
+    out.push_str(&format!(
+        "\n[save]\nfolder = {:<7}# пусто — «Изображения\\Screenshots»\nnotify = {:<7}# уведомление после сохранения\nthumbnail = {:<6}# миниатюра в углу: перетащите в чат, клик — открыть\n",
+        quoted(&c.save.folder),
+        c.save.notify,
+        c.save.thumbnail
+    ));
+    out.push_str(&format!(
+        "\n[recent]\nenabled = {:<6}# сохранять несохранённые снимки зашифрованно\nmax = {:<10}# от 1 до 10; старые записи вытесняются\n",
+        c.recent.enabled, c.recent.max
+    ));
+    out
+}
+
+/// Validates and writes atomically; the file watcher then applies it like a hand edit.
+pub fn save(path: &Path, c: &Config) -> Result<(), String> {
+    let text = render(c);
+    Config::parse(&text)?;
+    let part = path.with_extension("toml.part");
+    std::fs::write(&part, &text).map_err(|e| e.to_string())?;
+    std::fs::rename(&part, path).map_err(|e| {
+        let _ = std::fs::remove_file(&part);
+        e.to_string()
+    })
+}
+
 pub fn path() -> PathBuf {
     PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default()).join("Kadr").join("config.toml")
 }
@@ -175,6 +226,22 @@ mod tests {
         let config = Config::parse("[hotkeys]\nfullscreen = ''\nwindow = 'Alt+F9'").unwrap();
         assert!(config.hotkeys.fullscreen.is_empty());
         assert_eq!(config.hotkeys.window, "Alt+F9");
+    }
+
+    #[test]
+    fn rendered_file_matches_the_template_and_round_trips() {
+        assert_eq!(render(&Config::default()), TEMPLATE.replace("\r\n", "\n"));
+        let mut c = Config::default();
+        c.hotkeys.region = "Ctrl+Alt+Shift+Win+F12".into();
+        c.hotkeys.window = String::new();
+        c.save.folder = r#"D:\Снимки\It's "here""#.into();
+        c.save.thumbnail = false;
+        c.capture.warm = false;
+        c.recent.max = 3;
+        assert_eq!(Config::parse(&render(&c)).unwrap(), c);
+        c.save.folder = r"C:\Users\me\Pictures".into();
+        assert!(render(&c).contains(r"folder = 'C:\Users\me\Pictures'"));
+        assert_eq!(Config::parse(&render(&c)).unwrap(), c);
     }
 
     #[test]

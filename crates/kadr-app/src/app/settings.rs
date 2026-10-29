@@ -73,12 +73,39 @@ impl App {
                     "Настройки не применены",
                     &format!("Хоткей занят: {}. Сохранены прежние настройки.", conflicts.join(", ")),
                 );
+                crate::settings_window::refresh(&self.config);
                 return;
             }
         }
         self.set_warm(self.warm_override.unwrap_or(self.config.capture.warm));
         self.recent.send(crate::recent_worker::Command::Limit(self.config.recent.max));
+        crate::settings_window::refresh(&self.config);
         log_info!("настройки применены: {}", self.config_path.display());
+    }
+
+    /// Changes from the settings window go through config.toml, so the watcher applies them
+    /// exactly like a hand edit.
+    pub(super) fn on_settings_window(&mut self) {
+        for request in crate::settings_window::take_requests() {
+            match request {
+                crate::settings_window::Request::Save(config) => {
+                    if let Err(e) = kadr_store::config::save(&self.config_path, &config) {
+                        log_warn!("настройки не записаны: {e}");
+                        self.notify("Настройки не сохранены", &e);
+                    }
+                }
+                crate::settings_window::Request::Suspend(true) => self.unregister_hotkeys(),
+                crate::settings_window::Request::Suspend(false) => {
+                    let _ = self.register_hotkeys();
+                }
+                crate::settings_window::Request::OpenFile => {
+                    let path = wide(&format!("\"{}\"", self.config_path.display()));
+                    unsafe {
+                        ShellExecuteW(None, w!("open"), w!("notepad.exe"), PCWSTR(path.as_ptr()), PCWSTR::null(), SW_SHOWNORMAL);
+                    }
+                }
+            }
+        }
     }
 
     pub(super) fn set_warm(&mut self, warm: bool) {
