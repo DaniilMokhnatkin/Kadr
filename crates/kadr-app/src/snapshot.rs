@@ -114,7 +114,7 @@ fn run_tool(
                 glide: false,
                 exit: exit.unwrap_or(0.0),
                 flash: exit.is_some(),
-                hint: !editor,
+                hint: (!editor).then_some(scene::HintKind::Translate),
                 smart: editor.then_some(scene::SmartFx { scanning: false, areas: &smart_areas }),
             },
         };

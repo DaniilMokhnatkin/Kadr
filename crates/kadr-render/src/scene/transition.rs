@@ -133,6 +133,7 @@ fn code(b: ToolbarButton) -> usize {
         ToolbarButton::Text => 7,
         ToolbarButton::Translate => 8,
         ToolbarButton::Smart => 9,
+        ToolbarButton::Scroll => 10,
         ToolbarButton::Tool(t) => 16 + t as usize,
         ToolbarButton::Color(i) => 40 + i,
         ToolbarButton::Width => 48,
@@ -451,28 +452,38 @@ impl Chrome {
     }
 }
 
-/// The «Alt + click» hint: appears after the pointer has rested a moment, leaves at once.
+/// The hint card: appears after the pointer has rested a moment, leaves at once. A new kind
+/// (no selection → selection) first lets the old card go, then brings the new one.
 #[derive(Default)]
 pub(super) struct Hint {
     shown: Option<Spring>,
+    kind: Option<HintKind>,
 }
 impl Hint {
     pub fn clear(&mut self) {
-        self.shown = None;
+        *self = Self::default();
     }
     pub fn active(&self, now: f64) -> bool {
         self.shown.is_some_and(|s| s.active(now))
     }
-    pub fn sample(&mut self, on: bool, now: f64, animate: bool) -> f32 {
+    /// Opacity and which card to draw.
+    pub fn sample(&mut self, want: Option<HintKind>, now: f64, animate: bool) -> (f32, Option<HintKind>) {
         if !animate {
-            return f32::from(on);
+            return (f32::from(want.is_some()), want);
         }
         let s = self.shown.get_or_insert_with(|| Spring::with(0.0, Curve::FADE).precise(0.002));
-        if on && s.goal() < 0.5 {
-            s.target_at(1.0, now, now + 0.45);
-        } else if !on && s.goal() > 0.5 {
+        if want != self.kind && s.value(now) <= 0.002 {
+            // The previous card is gone: switch, and wait a moment before the next one.
+            self.kind = want;
+            s.snap(0.0);
+            if want.is_some() {
+                s.target_at(1.0, now, now + 0.45);
+            }
+        } else if want != self.kind || want.is_none() {
             s.target_with(0.0, Curve::FADE_OUT, now);
+        } else if s.goal() < 0.5 {
+            s.target_at(1.0, now, now + 0.45);
         }
-        s.value(now)
+        (s.value(now), self.kind)
     }
 }

@@ -166,6 +166,12 @@ pub(super) fn draw(gpu: &Gpu, button: ToolbarButton, r: D2D_RECT_F, ink: D2D1_CO
             ellipse(13.0, 13.0, 8.0, 8.0);
             path(&[(13.0, 8.0), (13.0, 13.0), (17.0, 15.0)]);
         }
+        // A page taller than its frame, with an arrow going down it.
+        ToolbarButton::Scroll => {
+            box_(5.0, 3.0, 19.0, 21.0);
+            line(12.0, 7.0, 12.0, 16.0);
+            path(&[(8.5, 12.5), (12.0, 16.0), (15.5, 12.5)]);
+        }
         // An eye under a stroke: «hide what should not be seen».
         ToolbarButton::Smart => {
             path(&[(3.0, 12.0), (7.0, 7.5), (12.0, 6.0), (17.0, 7.5), (21.0, 12.0), (17.0, 16.5), (12.0, 18.0), (7.0, 16.5), (3.0, 12.0)]);

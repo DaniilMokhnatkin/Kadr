@@ -172,6 +172,8 @@ pub enum ToolbarButton {
     Translate,
     /// Find and blur personal data in the selection; again to take the blur away.
     Smart,
+    /// Long screenshot: frame the selection and glue it while the page scrolls.
+    Scroll,
     Close,
     Tool(Tool),
     Color(usize),
@@ -204,6 +206,7 @@ impl ToolbarButton {
             Self::Text => "Скопировать текст",
             Self::Translate => "Перевести",
             Self::Smart => "Скрыть данные",
+            Self::Scroll => "Длинный снимок",
             Self::Close => "Закрыть",
             Self::Tool(tool) => tool.label(),
             Self::Color(_) => "Цвет",
@@ -230,6 +233,15 @@ pub struct EditorBar {
     pub undo: bool,
     pub redo: bool,
     pub smart: SmartUi,
+}
+
+/// Which gesture the hint card teaches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HintKind {
+    /// Nothing selected yet: Alt+click translates a paragraph.
+    Translate,
+    /// An area is selected: scrolling inside it makes a long screenshot.
+    Scroll,
 }
 
 /// Per found area: screen rect, how much of the original still shows over the blur (1 → 0 as it
@@ -264,8 +276,8 @@ pub struct Marks<'a> {
     pub drawing: Option<View<'a>>,
     /// The highlight is a hovered window, not a selection: let it glide between windows.
     pub glide: bool,
-    /// Show the «Alt + click» hint on this surface (pointer here, nothing selected yet).
-    pub hint: bool,
+    /// Hint card at the top of this surface (the one under the pointer).
+    pub hint: Option<HintKind>,
     /// «Скрыть данные» in motion: the search sweep, and blurs dissolving in or out.
     pub smart: Option<SmartFx<'a>>,
     /// Closing motion, eased 0 → 1: chrome and dimming fade, the toolbar folds into the selection.
@@ -424,9 +436,12 @@ pub fn draw(
     if let Some(magnifier) = scene.marks.magnifier {
         draw_magnifier(gpu, shared, text, theme, scene, magnifier)?;
     }
-    let hint = text.hint.borrow_mut().sample(scene.marks.hint && leave >= 1.0, now, animate);
-    if hint > 0.002 {
-        draw_hint(gpu, shared, text, theme, scene, hint)?;
+    let kind = scene.marks.hint.filter(|_| leave >= 1.0);
+    let (hint, shown) = text.hint.borrow_mut().sample(kind, now, animate);
+    if hint > 0.002
+        && let Some(shown) = shown
+    {
+        draw_hint(gpu, shared, text, theme, scene, shown, hint)?;
     }
     Ok(())
 }
@@ -489,7 +504,7 @@ fn build_toolbar_layout(
     let pad = 12.0 * s;
     let gap = 4.0 * s;
     let side = 40.0 * s;
-    let panel_w = (if editor.is_some() { 712.0 } else { 544.0 } * s).min((w - 16.0 * s).max(1.0));
+    let panel_w = (if editor.is_some() { 760.0 } else { 544.0 } * s).min((w - 16.0 * s).max(1.0));
     let content_w = (panel_w - 2.0 * pad).max(side);
     let mut buttons = Vec::new();
     let empty = measure(shared, &text.button, "")?;
@@ -569,6 +584,7 @@ fn build_toolbar_layout(
             ToolbarButton::Pin,
             ToolbarButton::Text,
             ToolbarButton::Translate,
+            ToolbarButton::Scroll,
             ToolbarButton::SaveAs,
             ToolbarButton::Save,
             ToolbarButton::Close,
@@ -581,6 +597,7 @@ fn build_toolbar_layout(
             ToolbarButton::Pin,
             ToolbarButton::Text,
             ToolbarButton::Translate,
+            ToolbarButton::Scroll,
             ToolbarButton::SaveAs,
             ToolbarButton::Save,
             ToolbarButton::Close,
@@ -890,6 +907,7 @@ fn draw_toolbar(
             ToolbarButton::Text => "Скопировать текст · Ctrl+Shift+C".into(),
             ToolbarButton::Translate => "Перевести на русский · Ctrl+T".into(),
             ToolbarButton::Smart => "Найти и размыть почту, телефоны, карты, IP и ключи".into(),
+            ToolbarButton::Scroll => "Длинный снимок · или колесо внутри рамки".into(),
             ToolbarButton::Recent => "Недавние · Ctrl+H".into(),
             ToolbarButton::Close => "Закрыть · Esc".into(),
             ToolbarButton::Width => "Толщина · [ / ] · колесо".into(),
@@ -1216,10 +1234,23 @@ fn draw_magnifier(
 
 /// «[Alt] + клик по тексту — перевод»: a quiet card at the top of the screen under the pointer,
 /// so the gesture can be discovered without reading anything elsewhere.
-fn draw_hint(gpu: &Gpu, shared: &Shared, text: &TextStyles, theme: &Theme, scene: &Scene, a: f32) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+fn draw_hint(
+    gpu: &Gpu,
+    shared: &Shared,
+    text: &TextStyles,
+    theme: &Theme,
+    scene: &Scene,
+    kind: HintKind,
+    a: f32,
+) -> Result<()> {
     let s = scene.scale;
-    let key = measure(shared, &text.label, "Alt")?;
-    let rest = measure(shared, &text.label, "+ клик по тексту — перевод")?;
+    let (key, rest) = match kind {
+        HintKind::Translate => ("Alt", "+ клик по тексту — перевод"),
+        HintKind::Scroll => ("Колесо", "внутри рамки — длинный снимок"),
+    };
+    let key = measure(shared, &text.label, key)?;
+    let rest = measure(shared, &text.label, rest)?;
     let (pad, gap) = (12.0 * s, 7.0 * s);
     let key_w = key.w + 12.0 * s;
     let h = (rest.h + 16.0 * s).max(key.h + 14.0 * s);

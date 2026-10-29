@@ -25,6 +25,7 @@ mod pin_window;
 mod recent_window;
 mod recent_worker;
 mod sensitive;
+mod scroll_window;
 mod settings_window;
 mod snapshot;
 mod thumbnail;
