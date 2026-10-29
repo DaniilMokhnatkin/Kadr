@@ -1,4 +1,4 @@
-//! Оркестрация спайка M0: скрытое окно (хоткеи, трей, широковещательные сообщения),
+//! Резидентное приложение: скрытое окно (хоткеи, трей, широковещательные сообщения),
 //! сессия захвата и ввод в оверлеях. Всё живёт в UI-потоке, поэтому в состоянии нет мьютексов.
 
 use std::cell::RefCell;
@@ -18,8 +18,8 @@ use windows::Win32::UI::HiDpi::{
     AreDpiAwarenessContextsEqual, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetThreadDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey, ReleaseCapture, SetCapture, UnregisterHotKey,
-    VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_F12, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SNAPSHOT,
+    GetKeyState, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey, ReleaseCapture, SetCapture, UnregisterHotKey,
+    VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SNAPSHOT,
     VK_SPACE, VK_UP,
 };
 use windows::Win32::UI::Shell::{
@@ -37,19 +37,27 @@ use kadr_export::{clipboard, file};
 use kadr_render::gpu::{Gpu, Shared};
 use kadr_render::scene::{Hud, HudRow, Magnifier, Marks, Toolbar, ToolbarButton};
 use kadr_render::theme::{Theme, dip};
+use kadr_store::{config::{self, Config}, hotkey};
 use kadr_win::perf::{self, Stats, Timing};
 use kadr_win::privileges::{self, ProcessInfo};
 use kadr_win::{log, log_info, log_warn, wide};
+use crate::{capture_mode::Mode, config_watch::Watcher};
+
+mod settings;
 
 const HK_PRTSC: i32 = 1;
 const HK_BACKUP: i32 = 2;
 const HK_ESC: i32 = 3;
+const HK_FULLSCREEN: i32 = 4;
+const HK_WINDOW: i32 = 5;
+const HK_LAST_REGION: i32 = 6;
 
 const WM_APP_TRAY: u32 = WM_APP + 1;
 const WM_APP_HOOK: u32 = WM_APP + 2;
 const WM_APP_BENCH: u32 = WM_APP + 3;
 /// Фоновое сохранение закончилось — результат ждёт в канале.
 const WM_APP_SAVED: u32 = WM_APP + 4;
+const WM_APP_CONFIG: u32 = WM_APP + 5;
 const TIMER_HOOK_CHECK: usize = 1;
 
 const CMD_CAPTURE: usize = 10;
@@ -57,6 +65,9 @@ const CMD_WARM: usize = 11;
 const CMD_HOOK: usize = 12;
 const CMD_LOG: usize = 13;
 const CMD_EXIT: usize = 14;
+const CMD_FULLSCREEN: usize = 15;
+const CMD_LAST_REGION: usize = 16;
+const CMD_CONFIG: usize = 17;
 
 const HOST_CLASS: PCWSTR = w!("KadrHost");
 
@@ -102,6 +113,13 @@ pub struct App {
     saved_tx: Sender<Saved>,
     saved_rx: Receiver<Saved>,
     last_saved: Option<PathBuf>,
+    config: Config,
+    config_path: PathBuf,
+    watcher: Watcher,
+    pending_config: Option<Config>,
+    warm_override: Option<bool>,
+    /// Последняя вручную выделенная область; быстрый снимок монитора её не заменяет.
+    last_region: Option<DocRect>,
 }
 
 /// Итог фонового сохранения: путь или путь с текстом ошибки.
@@ -114,7 +132,7 @@ enum Export {
 }
 
 /// `bench` — сделать столько захватов подряд, записать p50/p95 в лог и выйти.
-pub fn run(warm: bool, perf_hud: bool, bench: Option<u32>) -> Result<()> {
+pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> Result<()> {
     // Бенчмарку единственный экземпляр не нужен: он работает рядом с установленным Kadr.
     let _instance_lock = match (bench, single_instance()) {
         (None, None) => {
@@ -148,6 +166,10 @@ pub fn run(warm: bool, perf_hud: bool, bench: Option<u32>) -> Result<()> {
         TASKBAR_CREATED.store(RegisterWindowMessageW(w!("TaskbarCreated")), Relaxed);
 
         let (saved_tx, saved_rx) = channel();
+        let config_path = config::path();
+        let (config, config_error) = config::load(&config_path);
+        let warm = warm_override.unwrap_or(config.capture.warm);
+        let watcher = Watcher::start(config_path.clone(), hwnd, WM_APP_CONFIG);
         let mut app = App {
             hwnd,
             instance,
@@ -169,12 +191,24 @@ pub fn run(warm: bool, perf_hud: bool, bench: Option<u32>) -> Result<()> {
             saved_tx,
             saved_rx,
             last_saved: None,
+            config,
+            config_path,
+            watcher,
+            pending_config: None,
+            warm_override,
+            last_region: None,
         };
         app.build_outputs();
         app.log_startup();
-        app.register_hotkeys();
+        let conflicts = app.register_hotkeys();
         app.set_hook(true);
         app.add_tray_icon();
+        if let Some(error) = config_error {
+            log_warn!("конфиг: {error}");
+            app.notify("Не удалось загрузить настройки", &error);
+        } else if !conflicts.is_empty() {
+            app.notify("Некоторые хоткеи заняты", &format!("{}\nОбласть: Ctrl+Shift+F12 или значок Kadr в трее", conflicts.join("; ")));
+        }
         APP.with(|cell| *cell.borrow_mut() = Some(app));
         if let Some(count) = bench {
             let _ = PostMessageW(Some(hwnd), WM_APP_BENCH, WPARAM(count as usize), LPARAM(0));
@@ -248,7 +282,7 @@ impl App {
         }
         .as_bool();
         log_info!(
-            "Kadr M0 запущен: целостность {}, uiAccess {}, админ {}, PerMonitorV2 {}, дубликатор {}",
+            "Kadr M1 запущен: целостность {}, uiAccess {}, админ {}, PerMonitorV2 {}, дубликатор {}",
             p.integrity,
             yes(p.ui_access),
             yes(p.elevated),
@@ -283,19 +317,6 @@ impl App {
         }
     }
 
-    fn register_hotkeys(&self) {
-        let keys = [
-            (HK_PRTSC, MOD_NOREPEAT, VK_SNAPSHOT, "PrtSc"),
-            (HK_BACKUP, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, VK_F12, "Ctrl+Shift+F12"),
-        ];
-        for (id, modifiers, key, name) in keys {
-            match unsafe { RegisterHotKey(Some(self.hwnd), id, modifiers, u32::from(key.0)) } {
-                Ok(()) => log_info!("хоткей {name}: зарегистрирован"),
-                Err(e) => log_warn!("хоткей {name}: не удалось зарегистрировать ({e})"),
-            }
-        }
-    }
-
     /// LL-хук только наблюдает: пишет в лог, видит ли он PrtSc. Скрин запускает WM_HOTKEY.
     fn set_hook(&mut self, on: bool) {
         match (on, self.hook.take()) {
@@ -319,7 +340,7 @@ impl App {
         data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
         data.uCallbackMessage = WM_APP_TRAY;
         data.hIcon = unsafe { LoadIconW(None, IDI_APPLICATION) }.unwrap_or_default();
-        let tip = wide("Kadr M0 — PrtSc: скрин, правый клик: меню");
+        let tip = wide("Kadr — снимки экрана; правый клик: меню");
         data.szTip[..tip.len()].copy_from_slice(&tip);
         if !unsafe { Shell_NotifyIconW(NIM_ADD, &data) }.as_bool() {
             log_warn!("иконка в трее не добавилась");
@@ -329,11 +350,19 @@ impl App {
     fn on_hotkey(&mut self, id: i32, queue_ms: u32) {
         match id {
             HK_ESC => self.close_session(),
-            HK_PRTSC | HK_BACKUP => {
+            HK_PRTSC | HK_BACKUP | HK_FULLSCREEN | HK_WINDOW | HK_LAST_REGION => {
                 let foreground = privileges::foreground_exe();
-                let source = if id == HK_PRTSC { "PrtSc" } else { "Ctrl+Shift+F12" };
-                self.open_session(source, queue_ms, &foreground);
-                if id == HK_PRTSC {
+                let mode = match id { HK_FULLSCREEN => Mode::Fullscreen, HK_WINDOW => Mode::Window,
+                    HK_LAST_REGION => Mode::LastRegion, _ => Mode::Region };
+                self.capture_mode(mode, queue_ms, &foreground);
+                let printscreen = match id {
+                    HK_PRTSC => &self.config.hotkeys.region,
+                    HK_FULLSCREEN => &self.config.hotkeys.fullscreen,
+                    HK_WINDOW => &self.config.hotkeys.window,
+                    HK_LAST_REGION => &self.config.hotkeys.last_region,
+                    _ => "",
+                };
+                if hotkey::parse(printscreen).ok().flatten().is_some_and(|key| key.vk == VK_SNAPSHOT.0) {
                     self.log_prtsc(&foreground);
                 }
             }
@@ -386,7 +415,14 @@ impl App {
         let check = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
         let command = unsafe {
             let Ok(menu) = CreatePopupMenu() else { return };
-            let _ = AppendMenuW(menu, MF_STRING, CMD_CAPTURE, w!("Сделать скрин\tPrtSc"));
+            let label = wide(&format!("Выделить область\t{}", self.config.hotkeys.region));
+            let _ = AppendMenuW(menu, MF_STRING, CMD_CAPTURE, PCWSTR(label.as_ptr()));
+            let label = wide(&format!("Монитор под курсором\t{}", self.config.hotkeys.fullscreen));
+            let _ = AppendMenuW(menu, MF_STRING, CMD_FULLSCREEN, PCWSTR(label.as_ptr()));
+            let label = wide(&format!("Повторить область\t{}", self.config.hotkeys.last_region));
+            let enabled = if self.last_region.is_some() { MF_ENABLED } else { MF_GRAYED };
+            let _ = AppendMenuW(menu, MF_STRING | enabled, CMD_LAST_REGION, PCWSTR(label.as_ptr()));
+            let _ = AppendMenuW(menu, MF_STRING, CMD_CONFIG, w!("Настройки…"));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(menu, MF_STRING | check(self.warm), CMD_WARM, w!("Прогретый дубликатор"));
             let _ = AppendMenuW(menu, MF_STRING | check(self.hook.is_some()), CMD_HOOK, w!("Наблюдатель LL-хука"));
@@ -403,14 +439,14 @@ impl App {
         };
         match command {
             CMD_CAPTURE => self.open_session("трей", 0, "—"),
+            CMD_FULLSCREEN => self.capture_mode(Mode::Fullscreen, 0, "трей"),
+            CMD_LAST_REGION => self.capture_mode(Mode::LastRegion, 0, "трей"),
+            CMD_CONFIG => {
+                let path = wide(&format!("\"{}\"", self.config_path.display()));
+                unsafe { ShellExecuteW(None, w!("open"), w!("notepad.exe"), PCWSTR(path.as_ptr()), PCWSTR::null(), SW_SHOWNORMAL); }
+            }
             CMD_WARM => {
-                self.warm = !self.warm;
-                if !self.warm {
-                    for out in &mut self.outputs {
-                        out.release_duplication();
-                        out.release_frame();
-                    }
-                }
+                self.set_warm(!self.warm);
                 log_info!("дубликатор: {}", self.mode());
             }
             CMD_HOOK => {
@@ -428,6 +464,45 @@ impl App {
             CMD_EXIT => unsafe { PostQuitMessage(0) },
             _ => {}
         }
+    }
+
+    fn capture_mode(&mut self, mode: Mode, queue_ms: u32, foreground: &str) {
+        if self.active.is_some() { return; }
+        let monitors: Vec<_> = self.outputs.iter().map(Output::bounds).collect();
+        let region = mode.region(&monitors, doc_point(cursor_pos()), capture::foreground_window(), self.last_region);
+        match region {
+            Ok(None) => self.open_session("область", queue_ms, foreground),
+            Ok(Some(region)) => {
+                let t = perf::now();
+                let image = self.capture_image(region);
+                if !self.warm {
+                    for out in &mut self.outputs { out.release_duplication(); out.release_frame(); }
+                }
+                match image {
+                    Ok(image) => {
+                        self.copy_image(image);
+                        log_info!("быстрый снимок {mode:?}: {}×{}, {:.1} мс", region.width(), region.height(), perf::ms(t, perf::now()));
+                    }
+                    Err(e) => {
+                        log_warn!("быстрый снимок: {e}");
+                        self.notify("Не удалось сделать снимок", &e.message());
+                    }
+                }
+            }
+            Err(error) => self.notify("Не удалось сделать снимок", error),
+        }
+    }
+
+    /// Быстрые режимы снимают пиксели до любых оверлеев и не меняют фокус окна.
+    fn capture_image(&mut self, region: DocRect) -> Result<Image> {
+        let mut frames = Vec::new();
+        for out in &mut self.outputs {
+            if out.bounds().intersect(&region).is_none() { continue; }
+            let gpu = &self.gpus[out.gpu];
+            out.capture(&gpu.device, &gpu.context)?;
+            frames.push(out.read_pixels(&gpu.device, &gpu.context)?);
+        }
+        Ok(Image::compose(&frames, region))
     }
 
     /// Горячий путь: захват → рендер в замаскированные окна → снятие маскировки.
@@ -527,9 +602,8 @@ impl App {
     }
 
     fn close_session(&mut self) {
-        if self.active.take().is_none() {
-            return;
-        }
+        let Some(active) = self.active.take() else { return };
+        if let Some(selection) = active.session.selection() { self.last_region = Some(selection); }
         unsafe {
             let _ = UnregisterHotKey(Some(self.hwnd), HK_ESC);
             let _ = ReleaseCapture();
@@ -543,6 +617,7 @@ impl App {
                 out.release_frame();
             }
         }
+        self.apply_pending_config();
     }
 
     /// После показа: копии кадров в память (лупа, экспорт) и окна для подсветки. Горячий путь их не ждёт.
@@ -598,7 +673,7 @@ impl App {
     fn hud(&self) -> Hud {
         let p = &self.process;
         let ui_access = if p.ui_access { " · uiAccess" } else { "" };
-        let scope = format!("M0 · {} · {}{ui_access} · {}", self.source, p.integrity, self.mode());
+        let scope = format!("M1 · {} · {}{ui_access} · {}", self.source, p.integrity, self.mode());
         let ms = |label: &str, v: f64| HudRow::new(label, format!("{v:.1}"), "мс");
         let (lead, groups) = match &self.last {
             None => (None, Vec::new()),
@@ -687,25 +762,34 @@ impl App {
         let Some(image) = self.selected_image() else { return };
         self.close_session();
         match how {
-            Export::Copy => match clipboard::put_image(self.hwnd, &image) {
-                Ok(()) => {
-                    log_info!("в буфере обмена: {}×{}", image.width(), image.height());
-                    self.clipboard = Some(image);
-                }
-                Err(e) => {
-                    log_warn!("буфер обмена: {e}");
-                    self.notify("Не удалось скопировать", &e.message());
-                }
-            },
+            Export::Copy => self.copy_image(image),
             Export::Save => {
-                let path = file::unique_path(&file::default_folder(), &file::timestamp_name());
+                let path = file::unique_path(&self.save_folder(), &file::timestamp_name());
                 self.save(path, image);
             }
-            Export::SaveAs => match file::ask_path(&file::default_folder(), &file::timestamp_name()) {
+            Export::SaveAs => match file::ask_path(&self.save_folder(), &file::timestamp_name()) {
                 Ok(Some(path)) => self.save(path, image),
                 Ok(None) => {}
                 Err(e) => log_warn!("диалог «Сохранить как»: {e}"),
             },
+        }
+    }
+
+    fn save_folder(&self) -> PathBuf {
+        let folder = self.config.save.folder.trim();
+        if folder.is_empty() { file::default_folder() } else { PathBuf::from(folder) }
+    }
+
+    fn copy_image(&mut self, image: Image) {
+        match clipboard::put_image(self.hwnd, &image) {
+            Ok(()) => {
+                log_info!("в буфере обмена: {}×{}", image.width(), image.height());
+                self.clipboard = Some(image);
+            }
+            Err(e) => {
+                log_warn!("буфер обмена: {e}");
+                self.notify("Не удалось скопировать", &e.message());
+            }
         }
     }
 
@@ -737,7 +821,9 @@ impl App {
                 Ok(path) => {
                     log_info!("сохранено: {}", path.display());
                     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    self.notify("Снимок сохранён", &format!("{name}\nНажмите, чтобы открыть папку"));
+                    if self.config.save.notify {
+                        self.notify("Снимок сохранён", &format!("{name}\nНажмите, чтобы открыть папку"));
+                    }
                     self.last_saved = Some(path);
                 }
                 Err((path, e)) => {
@@ -891,12 +977,11 @@ impl Drop for App {
     fn drop(&mut self) {
         self.close_session();
         self.set_hook(false);
+        self.unregister_hotkeys();
         unsafe {
-            let _ = UnregisterHotKey(Some(self.hwnd), HK_PRTSC);
-            let _ = UnregisterHotKey(Some(self.hwnd), HK_BACKUP);
             let _ = Shell_NotifyIconW(NIM_DELETE, &self.tray_data());
         }
-        log_info!("Kadr M0 завершён");
+        log_info!("Kadr M1 завершён");
     }
 }
 
@@ -920,6 +1005,7 @@ unsafe extern "system" fn host_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         WM_APP_HOOK => with_app(App::on_hook_seen),
         WM_APP_BENCH => with_app(|app| app.run_bench(wp.0 as u32)),
         WM_APP_SAVED => with_app(App::on_saved),
+        WM_APP_CONFIG => with_app(App::on_config),
         WM_RENDERFORMAT => with_app(|app| {
             if let Some(image) = &app.clipboard {
                 clipboard::render(wp.0 as u32, image);

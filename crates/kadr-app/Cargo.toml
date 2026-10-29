@@ -21,5 +21,6 @@ kadr-capture.workspace = true
 kadr-render.workspace = true
 kadr-editor.workspace = true
 kadr-export.workspace = true
+kadr-store.workspace = true
 png.workspace = true
 windows.workspace = true

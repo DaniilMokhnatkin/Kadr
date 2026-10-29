@@ -15,6 +15,7 @@ kadr-capture = { path = "crates/kadr-capture" }
 kadr-render = { path = "crates/kadr-render" }
 kadr-editor = { path = "crates/kadr-editor" }
 kadr-export = { path = "crates/kadr-export" }
+kadr-store = { path = "crates/kadr-store" }
 png = "0.18.1"
 windows-numerics = "0.3.1"
 # Один набор фич на весь workspace: cargo всё равно объединяет их в одну сборку крейта.
@@ -31,6 +32,7 @@ windows = { version = "0.62.2", features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Win32_Security",
+    "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_DataExchange",
     "Win32_System_LibraryLoader",

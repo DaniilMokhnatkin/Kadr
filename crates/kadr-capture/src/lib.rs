@@ -7,7 +7,7 @@
 
 mod windows_list;
 
-pub use windows_list::top_level_windows;
+pub use windows_list::{foreground_window, top_level_windows};
 
 use windows::Win32::Foundation::{E_FAIL, RECT};
 use windows::Win32::Graphics::Gdi::HMONITOR;

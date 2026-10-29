@@ -80,6 +80,7 @@ dependencies = [
  "kadr-editor",
  "kadr-export",
  "kadr-render",
+ "kadr-store",
  "kadr-win",
  "png",
  "windows",

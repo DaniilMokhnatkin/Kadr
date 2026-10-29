@@ -1,9 +1,8 @@
-//! Kadr — спайк M0: хоткей → DXGI-захват → замороженные оверлеи на всех мониторах, perf-HUD и
-//! эксперимент с элевированными окнами. См. ARCHITECTURE.md, §15.
+//! Kadr — M1: выделение, экспорт PNG, быстрые режимы захвата и конфиг. См. STATUS.md.
 //!
 //! Запуск:
 //!   kadr                     — резидентный режим (трей), PrtSc или Ctrl+Shift+F12 — скрин
-//!   kadr --warm              — то же, дубликатор держится прогретым
+//!   kadr --warm / --cold     — переопределить capture.warm из конфига
 //!   kadr --perf-hud          — показывать панель замеров на оверлее
 //!   kadr --bench [N]         — N захватов подряд (по умолчанию 20), p50/p95 в лог, выход
 //!   kadr --snapshot [a.png] [--scale 1.5] — сцена оверлея в PNG для ревью дизайна
@@ -11,6 +10,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod capture_mode;
+mod config_watch;
 mod snapshot;
 
 use std::error::Error;
@@ -34,7 +35,9 @@ fn main() {
         }
         None => {
             let bench = flag("--bench").map(|i| args.get(i + 1).and_then(|n| n.parse().ok()).unwrap_or(20));
-            app::run(flag("--warm").is_some(), flag("--perf-hud").is_some(), bench).map_err(Into::into)
+            let warm = if flag("--cold").is_some() { Some(false) }
+                else { flag("--warm").map(|_| true) };
+            app::run(warm, flag("--perf-hud").is_some(), bench).map_err(Into::into)
         }
     };
     if let Err(e) = result {
