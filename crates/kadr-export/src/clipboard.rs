@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
 use windows::Win32::Graphics::Gdi::{BI_RGB, BITMAPINFOHEADER};
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, GetClipboardOwner, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+    CloseClipboard, EmptyClipboard, GetClipboardOwner, IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
 };
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::core::{Error, Result, w};
@@ -29,7 +29,12 @@ pub fn put_image(owner: HWND, image: &Image) -> Result<()> {
     with_clipboard(owner, || unsafe {
         set(CF_DIB, dib(image)?)?;
         // Отложенный рендеринг: данных пока нет, система попросит их через WM_RENDERFORMAT.
-        SetClipboardData(png_format(), None)?;
+        let format = png_format();
+        if let Err(error) = SetClipboardData(format, None) {
+            // При hMem=NULL успешный результат тоже NULL. windows-rs считает его ошибкой;
+            // проверяем, объявлен ли формат, пока буфер всё ещё принадлежит нам и открыт.
+            IsClipboardFormatAvailable(format).map_err(|_| error)?;
+        }
         Ok(())
     })
 }
@@ -109,7 +114,11 @@ fn dib(image: &Image) -> Result<HGLOBAL> {
             let _ = GlobalFree(Some(memory));
             return Err(Error::from_thread());
         }
-        std::ptr::copy_nonoverlapping(&header as *const BITMAPINFOHEADER as *const u8, ptr, size_of::<BITMAPINFOHEADER>());
+        std::ptr::copy_nonoverlapping(
+            &header as *const BITMAPINFOHEADER as *const u8,
+            ptr,
+            size_of::<BITMAPINFOHEADER>(),
+        );
         let mut at = ptr.add(size_of::<BITMAPINFOHEADER>());
         for line in image.bgra.chunks_exact(row).rev() {
             std::ptr::copy_nonoverlapping(line.as_ptr(), at, row);
@@ -131,5 +140,47 @@ unsafe fn global(bytes: &[u8]) -> Result<HGLOBAL> {
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
         let _ = GlobalUnlock(memory);
         Ok(memory)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::System::DataExchange::GetClipboardData;
+    use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_POPUP};
+
+    /// Нужен обычный интерактивный рабочий стол Windows (не Low-integrity sandbox).
+    #[test]
+    fn copies_dib_and_advertises_delayed_png_without_reporting_failure() {
+        let owner = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("STATIC"),
+                w!("Kadr clipboard test"),
+                WS_POPUP,
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .unwrap();
+        let image = Image::new(kadr_doc::Rect::new(0, 0, 2, 2), vec![255; 16]);
+        let result = put_image(owner, &image);
+        let dib_available = unsafe { IsClipboardFormatAvailable(CF_DIB) }.is_ok();
+        let png_available = unsafe { IsClipboardFormatAvailable(png_format()) }.is_ok();
+        render_all(owner, &image);
+        unsafe { OpenClipboard(Some(owner)).unwrap(); }
+        let png_rendered = unsafe { GetClipboardData(png_format()) }.is_ok();
+        unsafe { CloseClipboard().unwrap(); }
+        unsafe {
+            DestroyWindow(owner).unwrap();
+        }
+        assert!(result.is_ok(), "копирование завершилось ошибкой: {result:?}");
+        assert!(dib_available && png_available && png_rendered);
     }
 }
