@@ -1,7 +1,7 @@
 //! Text bubble next to the recognised text: the translation (or the copied text) on acrylic,
 //! with a copy button. It opens with a soft pop, waits with breathing dots, and closes on Esc,
 //! on × or as soon as the user clicks elsewhere.
-use crate::glass::{self, Device, Surface, client_size, fade, fill, inflate, inside, mix, rect, rgb, scaled_about, text};
+use crate::glass::{self, Device, Surface, client_size, fade, fill, inflate, inside, mix, rect, scaled_about, text};
 use kadr_doc::Rect;
 use kadr_render::motion::{Curve, Spring};
 use kadr_render::theme::Theme;
@@ -264,6 +264,7 @@ pub fn open(instance: HINSTANCE, anchor: Rect, content: Content) {
         st.appear.target(1.0, now);
         place(st);
         unsafe {
+            glass::match_appearance(st.hwnd);
             let _ = ShowWindow(st.hwnd, SW_SHOW);
             let _ = SetForegroundWindow(st.hwnd);
             let _ = InvalidateRect(Some(st.hwnd), None, false);
@@ -342,14 +343,14 @@ fn paint(device: &Device, st: &State) -> bool {
     let mut breathing = false;
     let appear = sample(&st.appear);
     let full = rect(0.0, 0.0, w, h);
-    fill(gpu, rgb(0xffffff, 0.5), full, 0.0);
+    fill(gpu, theme.wash, full, 0.0);
     unsafe {
         gpu.d2d.SetTransform(&scaled_about(full, 0.97 + 0.03 * appear, 0.0, (1.0 - appear) * 4.0 * s));
     }
     let a = appear.clamp(0.0, 1.0);
     let (copy, close) = layout(w, s);
     let tone = match st.content {
-        Content::Failed(_) => rgb(0xc4161c, 1.0),
+        Content::Failed(_) => glass::error_ink(&theme),
         _ => theme.text_muted,
     };
     text(gpu, &f.header, &header(&st.content), rect(PAD * s, 10.0 * s, copy.left - 8.0 * s, 34.0 * s), fade(tone, a));
@@ -384,13 +385,13 @@ fn paint(device: &Device, st: &State) -> bool {
     // Copy: only when there is something to copy; turns into a confirmation for a moment.
     if matches!(st.content, Content::Translated { .. } | Content::Copied(_)) {
         let hover = sample(&st.hover_copy);
-        fill(gpu, fade(mix(rgb(0x000000, 0.06), rgb(0x000000, 0.11), hover), a), copy, 8.0 * s);
+        fill(gpu, fade(mix(theme.tint, theme.tint_strong, hover), a), copy, 8.0 * s);
         let label = if st.copied { "Скопировано" } else { "Копировать" };
         let ink = if st.copied { theme.on_selected } else { theme.text };
         text(gpu, &f.button, label, copy, fade(ink, a));
     }
     let hover = sample(&st.hover_close);
-    fill(gpu, fade(rgb(0x000000, 0.08 * hover), a), inflate(close, -1.0), 12.0 * s);
+    fill(gpu, fade(theme.tint, a * hover), inflate(close, -1.0), 12.0 * s);
     let (cx, cy, k) = ((close.left + close.right) / 2.0, (close.top + close.bottom) / 2.0, 4.0 * s);
     unsafe {
         gpu.brush.SetColor(&fade(mix(theme.text_muted, theme.text, hover), a));

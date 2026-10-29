@@ -247,10 +247,29 @@ pub fn rounded_image(
     );
     unsafe {
         ctx.PushLayer(&params, None::<&ID2D1Layer>);
-        fill(&device.gpu, rgb(0xe9e9ee, 1.0), r, 0.0);
+        fill(&device.gpu, kadr_render::theme::Theme::current().tile, r, 0.0);
         ctx.DrawBitmap(bitmap, Some(&raw const dest), 1.0, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, None, None);
         ctx.PopLayer();
         ManuallyDrop::drop(&mut params.geometricMask);
         ManuallyDrop::drop(&mut params.opacityBrush);
+    }
+}
+
+/// Error text that stays readable on either appearance.
+pub fn error_ink(theme: &kadr_render::theme::Theme) -> D2D1_COLOR_F {
+    if theme.dark { rgb(0xff6961, 1.0) } else { rgb(0xc4161c, 1.0) }
+}
+
+/// Dark windows get the dark acrylic/Mica from DWM; called on every show, so a theme switch
+/// while the app runs is picked up the next time the window opens.
+pub fn match_appearance(hwnd: HWND) {
+    let dark = windows::core::BOOL::from(kadr_render::theme::Theme::current().dark);
+    unsafe {
+        let _ = windows::Win32::Graphics::Dwm::DwmSetWindowAttribute(
+            hwnd,
+            windows::Win32::Graphics::Dwm::DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &dark as *const _ as *const _,
+            size_of_val(&dark) as u32,
+        );
     }
 }

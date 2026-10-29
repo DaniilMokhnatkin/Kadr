@@ -397,6 +397,7 @@ impl Window {
         });
         self.fit(true);
         unsafe {
+            glass::match_appearance(self.hwnd);
             let _ = ShowWindow(self.hwnd, SW_SHOW);
             let _ = SetForegroundWindow(self.hwnd);
             let _ = InvalidateRect(Some(self.hwnd), None, false);
@@ -593,15 +594,15 @@ fn paint(ui: &Ui, st: &State, size: (f32, f32), now: f64, opaque: bool) -> bool 
     };
     let full = rect(0.0, 0.0, size.0, size.1);
     if opaque || theme.glass.a >= 1.0 {
-        fill(gpu, rgb(0xf3f3f6, 1.0), full, 0.0);
+        fill(gpu, if theme.dark { rgb(0x202022, 1.0) } else { rgb(0xf3f3f6, 1.0) }, full, 0.0);
     }
     // A light wash over the acrylic keeps text contrast steady whatever is behind the window.
-    fill(gpu, rgb(0xffffff, 0.42), full, 0.0);
+    fill(gpu, theme.wash, full, 0.0);
 
     // Header.
     text(gpu, &ui.fonts.title, "Недавние", rect(PAD * s, 20.0 * s, size.0 / 2.0, 52.0 * s), theme.text);
     let (subtitle, tone) = match (&st.error, st.loading, st.cards.len()) {
-        (Some(e), _, _) => (e.clone(), rgb(0xc4161c, 1.0)),
+        (Some(e), _, _) => (e.clone(), glass::error_ink(&theme)),
         (None, true, 0) => ("Загрузка…".into(), theme.text_muted),
         (None, _, 0) => ("Несохранённых снимков нет".into(), theme.text_muted),
         (None, _, n) if !st.enabled => (format!("{} · новые снимки не сохраняются", count_label(n)), theme.text_muted),
@@ -615,7 +616,7 @@ fn paint(ui: &Ui, st: &State, size: (f32, f32), now: f64, opaque: bool) -> bool 
     unsafe {
         ctx.SetTransform(&scaled_about(c, 1.0 - 0.08 * press, 0.0, 0.0));
     }
-    fill(gpu, fade(rgb(0x000000, 0.07), hover), inflate(c, -2.0 * s), 14.0 * s);
+    fill(gpu, fade(theme.tint, hover), inflate(c, -2.0 * s), 14.0 * s);
     let (cx, cy, k) = ((c.left + c.right) / 2.0, (c.top + c.bottom) / 2.0, 5.0 * s);
     unsafe {
         gpu.brush.SetColor(&mix(theme.text_muted, theme.text, hover));
@@ -653,7 +654,7 @@ fn paint(ui: &Ui, st: &State, size: (f32, f32), now: f64, opaque: bool) -> bool 
     unsafe {
         ctx.SetTransform(&scaled_about(b, 1.0 - 0.04 * press, 0.0, 0.0));
     }
-    let neutral = mix(rgb(0x000000, 0.06), rgb(0x000000, 0.10), hover);
+    let neutral = mix(theme.tint, theme.tint_strong, hover);
     fill(gpu, mix(neutral, rgb(0xd70015, 1.0), danger), b, 9.0 * s);
     let ink = if can_clear { mix(theme.text, theme.on_accent, danger) } else { theme.disabled };
     let label = if st.confirming { "Удалить все?" } else { "Очистить" };
@@ -685,9 +686,9 @@ fn paint(ui: &Ui, st: &State, size: (f32, f32), now: f64, opaque: bool) -> bool 
         match &card.bitmap {
             // Fill the tile; the preview is already the selected area, so cropping edges is fine.
             Some((bitmap, w, h)) => glass::rounded_image(&ui.device, bitmap, (*w, *h), *r, radius, opacity, true),
-            None => fill(gpu, fade(rgb(0xe9e9ee, 1.0), opacity), *r, radius),
+            None => fill(gpu, fade(theme.tile, opacity), *r, radius),
         }
-        stroke(gpu, fade(rgb(0x000000, 0.10), opacity), inflate(*r, -0.5), radius, 1.0);
+        stroke(gpu, fade(theme.hairline, opacity), inflate(*r, -0.5), radius, 1.0);
         unsafe {
             ctx.SetTransform(&scaled_about(*r, 1.0, 0.0, rise));
         }

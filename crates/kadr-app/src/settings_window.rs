@@ -398,6 +398,7 @@ pub fn show(instance: HINSTANCE, host: HWND, message: u32, config: &Config) {
                 h,
                 SWP_NOZORDER,
             );
+            glass::match_appearance(st.hwnd);
             let _ = ShowWindow(st.hwnd, SW_SHOW);
             let _ = SetForegroundWindow(st.hwnd);
             let _ = InvalidateRect(Some(st.hwnd), None, false);
@@ -480,12 +481,12 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
     let l = layout(w, s);
     let mut moving = st.glow.iter().any(|(_, sp)| sp.active(now));
     let glow = |hit: Hit| st.glow.iter().find(|(k, _)| *k == hit).map_or(0.0, |(_, sp)| sp.value(now));
-    fill(gpu, rgb(0xffffff, 0.45), rect(0.0, 0.0, w, h), 0.0);
+    fill(gpu, theme.wash, rect(0.0, 0.0, w, h), 0.0);
     text(gpu, &f.title, "Настройки", rect(PAD * s, 22.0 * s, w / 2.0, 56.0 * s), theme.text);
     // Close.
     let c = l.close;
     let hover = glow(Hit::Close);
-    fill(gpu, rgb(0x000000, 0.07 * hover), inflate(c, -2.0 * s), 14.0 * s);
+    fill(gpu, fade(theme.tint, hover), inflate(c, -2.0 * s), 14.0 * s);
     let (cx, cy, k) = ((c.left + c.right) / 2.0, (c.top + c.bottom) / 2.0, 5.0 * s);
     unsafe {
         gpu.brush.SetColor(&mix(theme.text_muted, theme.text, hover));
@@ -504,10 +505,10 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
         let y = l.sections[i];
         text(gpu, &f.section, title, rect(PAD * s + 12.0 * s, y + 8.0 * s, w, y + SECTION * s - 4.0 * s), theme.text_muted);
         let g = l.groups[i];
-        fill(gpu, rgb(0xffffff, 0.78), g, 12.0 * s);
-        stroke(gpu, rgb(0x000000, 0.08), inflate(g, -0.5), 12.0 * s, 1.0);
+        fill(gpu, theme.group, g, 12.0 * s);
+        stroke(gpu, fade(theme.hairline, 0.7), inflate(g, -0.5), 12.0 * s, 1.0);
     }
-    let separator = |r: D2D_RECT_F| fill(gpu, rgb(0x000000, 0.07), rect(r.left + 16.0 * s, r.top, r.right, r.top + 1.0), 0.0);
+    let separator = |r: D2D_RECT_F| fill(gpu, fade(theme.hairline, 0.6), rect(r.left + 16.0 * s, r.top, r.right, r.top + 1.0), 0.0);
     let label_rect = |r: D2D_RECT_F, right: f32| rect(r.left + 16.0 * s, r.top, right, r.bottom);
     // Switches.
     for (i, r) in l.toggles.iter().enumerate() {
@@ -515,7 +516,7 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
             separator(*r);
         }
         let hover = glow(Hit::Toggle(i));
-        fill(gpu, rgb(0x000000, 0.035 * hover), inflate(*r, -3.0 * s), 9.0 * s);
+        fill(gpu, fade(theme.tint, 0.6 * hover), inflate(*r, -3.0 * s), 9.0 * s);
         let hint = TOGGLE_HINTS[i];
         if hint.is_empty() {
             text(gpu, &f.label, TOGGLES[i], label_rect(*r, r.right - 80.0 * s), theme.text);
@@ -528,7 +529,7 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
         let on = st.knobs[i].value(now);
         moving |= st.knobs[i].active(now);
         let track = rect(r.right - 60.0 * s, r.top + (ROW - 24.0) / 2.0 * s, r.right - 16.0 * s, r.top + (ROW + 24.0) / 2.0 * s);
-        fill(gpu, mix(rgb(0x787880, 0.32), theme.accent, on.clamp(0.0, 1.0)), track, 12.0 * s);
+        fill(gpu, mix(theme.track, theme.accent, on.clamp(0.0, 1.0)), track, 12.0 * s);
         let d = 20.0 * s;
         let x = track.left + 2.0 * s + (track.right - track.left - d - 4.0 * s) * on;
         let knob = rect(x, track.top + 2.0 * s, x + d, track.top + 2.0 * s + d);
@@ -543,7 +544,7 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
     text(gpu, &f.label, &folder, label_rect(r, edge - 12.0 * s), theme.text);
     let button = |b: D2D_RECT_F, hit: Hit, label: &str| {
         let hover = glow(hit);
-        fill(gpu, mix(rgb(0x000000, 0.06), rgb(0x000000, 0.11), hover), b, 8.0 * s);
+        fill(gpu, mix(theme.tint, theme.tint_strong, hover), b, 8.0 * s);
         text(gpu, &f.chip, label, b, theme.text);
     };
     button(l.folder_button, Hit::Folder, "Изменить…");
@@ -568,7 +569,7 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
             stroke(gpu, fade(theme.accent, pulse), inflate(chip, -0.75 * s), 8.0 * s, 1.5 * s);
             text(gpu, &f.chip, &value, chip, theme.on_selected);
         } else {
-            fill(gpu, mix(rgb(0x000000, 0.05), rgb(0x000000, 0.10), hover), chip, 8.0 * s);
+            fill(gpu, mix(theme.tint, theme.tint_strong, hover), chip, 8.0 * s);
             let ink = if key_text(&st.config, i).trim().is_empty() { theme.text_muted } else { theme.text };
             text(gpu, &f.chip, &value, chip, ink);
         }
@@ -578,7 +579,7 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
     text(gpu, &f.hint, "Открыть config.toml", l.open_file, mix(theme.accent, theme.on_selected, hover));
     let footer = rect(l.open_file.right + 12.0 * s, l.open_file.top, w - PAD * s, l.open_file.bottom);
     if let Some(e) = &st.error {
-        text(gpu, &f.hint, e, footer, rgb(0xc4161c, 1.0));
+        text(gpu, &f.hint, e, footer, glass::error_ink(&theme));
     } else if st.capturing.is_some() {
         text(gpu, &f.hint, "Esc — отмена · Backspace — выключить", footer, theme.text_muted);
     }
@@ -858,7 +859,7 @@ pub fn preview(scale: f32) -> windows::core::Result<kadr_doc::Image> {
     let h = layout(w, scale).height.round();
     let device = st.device.as_ref().unwrap();
     glass::render_offscreen(device, w as u32, h as u32, || {
-        fill(&device.gpu, rgb(0xeef0f4, 1.0), rect(0.0, 0.0, w, h), 0.0);
+        fill(&device.gpu, if Theme::current().dark { rgb(0x202022, 1.0) } else { rgb(0xeef0f4, 1.0) }, rect(0.0, 0.0, w, h), 0.0);
         paint(device, &st, (w as u32, h as u32));
     })
 }
