@@ -31,7 +31,8 @@ impl Default for Drawing {
             tool: Tool::Select,
             color: 0,
             width: 3,
-            strength: 1,
+            // Soft by default: text keeps its outline but cannot be read; stronger levels are one wheel step away.
+            strength: 0,
             shapes: Vec::new(),
             undo: Vec::new(),
             redo: Vec::new(),

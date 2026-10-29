@@ -64,7 +64,10 @@ pub fn draw(gpu: &Gpu, shared: &Shared, origin: Point, view: View, cache: &mut C
                     let area = if shape.tool == Tool::Spotlight {
                         Some(view.crop)
                     } else {
-                        shape.bounds().intersect(&view.crop)
+                        // The soft edge lies outside the shape: give the blur room for it.
+                        let b = shape.bounds();
+                        let d = kadr_doc::privacy::reach(shape);
+                        kadr_doc::Rect::new(b.left - d, b.top - d, b.right + d, b.bottom + d).intersect(&view.crop)
                     };
                     if let Some(area) = area {
                         let source = Image::compose([&base], area);

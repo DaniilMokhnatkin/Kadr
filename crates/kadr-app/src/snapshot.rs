@@ -22,10 +22,16 @@ use kadr_render::theme::Theme;
 
 const BANDS: [u32; 5] = [0xffffff, 0xd4d4d8, 0x777777, 0x5e6ad2, 0x000000];
 
-pub fn run(path: &str, scale: f32, editor: bool) -> Result<(), Box<dyn Error>> {
-    run_tool(path, scale, editor, kadr_doc::annotation::Tool::Arrow)
+pub fn run(path: &str, scale: f32, editor: bool, exit: Option<f32>) -> Result<(), Box<dyn Error>> {
+    run_tool(path, scale, editor, kadr_doc::annotation::Tool::Arrow, exit)
 }
-fn run_tool(path: &str, scale: f32, editor: bool, tool: kadr_doc::annotation::Tool) -> Result<(), Box<dyn Error>> {
+fn run_tool(
+    path: &str,
+    scale: f32,
+    editor: bool,
+    tool: kadr_doc::annotation::Tool,
+    exit: Option<f32>,
+) -> Result<(), Box<dyn Error>> {
     if !(0.5..=3.0).contains(&scale) {
         return Err("масштаб должен быть от 0.5 до 3".into());
     }
@@ -99,6 +105,8 @@ fn run_tool(path: &str, scale: f32, editor: bool, tool: kadr_doc::annotation::To
                     text_edit: None,
                 }),
                 glide: false,
+                exit: exit.unwrap_or(0.0),
+                flash: exit.is_some(),
             },
         };
         ctx.SetTarget(&target);
@@ -174,6 +182,7 @@ pub fn design_set(dir: &str) -> Result<(), Box<dyn Error>> {
                 scale,
                 true,
                 tool,
+                None,
             )?;
         }
         for (name, n, loading, error) in [

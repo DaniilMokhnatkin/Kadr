@@ -68,7 +68,9 @@ fn main() {
                 .and_then(|i| args.get(i + 1))
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(1.0);
-            snapshot::run(path, scale, flag("--editor-snapshot").is_some())
+            // `--exit 0.5`: a pose of the closing motion, with the export flash.
+            let exit = flag("--exit").and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok());
+            snapshot::run(path, scale, flag("--editor-snapshot").is_some(), exit)
         }
         None => {
             let bench = flag("--bench").map(|i| args.get(i + 1).and_then(|n| n.parse().ok()).unwrap_or(20));

@@ -49,6 +49,7 @@ use kadr_win::privileges::{self, ProcessInfo};
 use kadr_win::{log, log_info, log_warn, wide};
 
 mod drafts;
+mod exit;
 mod editor_input;
 mod pacing;
 mod pins;
@@ -148,6 +149,8 @@ pub struct App {
     icons: crate::icons::Icons,
     pointer_history: kadr_editor::pointer::History,
     frames: RefCell<kadr_editor::pacing::Frames>,
+    /// Overlay is playing its closing motion; input is ignored until it is gone.
+    exit: Option<exit::Exit>,
 }
 
 /// Итог фонового сохранения: путь или путь с текстом ошибки.
@@ -246,6 +249,7 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
             paused: None,
             pointer_history: Default::default(),
             frames: Default::default(),
+            exit: None,
         };
         app.build_outputs();
         app.log_startup();
@@ -333,6 +337,7 @@ impl App {
                 hud: Some(&hud),
                 drawing: None,
                 glide: false,
+                ..Default::default()
             };
             if let Err(e) = overlay.present(gpu, &self.shared, &self.theme, marks) {
                 log_warn!("прогрев рендера: {e}");
@@ -434,6 +439,13 @@ impl App {
     }
 
     fn on_hotkey(&mut self, id: i32, queue_ms: u32) {
+        // Esc skips the closing motion; a new capture finishes it first.
+        if self.exit.is_some() {
+            self.finish_exit();
+            if id == HK_ESC {
+                return;
+            }
+        }
         match id {
             HK_RECENT => self.show_recent(),
             HK_ESC => self.on_key(VK_ESCAPE.0, true),
@@ -793,6 +805,7 @@ impl App {
     }
 
     fn close_session(&mut self) {
+        self.exit = None;
         self.frames.borrow_mut().clear();
         self.shared.clear_annotation_cache();
         self.flush_draft(false);
@@ -871,6 +884,8 @@ impl App {
                 .map(|[b, g, r, _]| [r, g, b]);
             Magnifier { at: (at.x, at.y), rgb }
         });
+        let exit_pose = self.exit_pose();
+        let (magnifier, hud) = if exit_pose.is_some() { (None, None) } else { (magnifier, hud) };
         let selection = session.highlight().map(win_rect);
         for (i, overlay) in self.overlays.iter().enumerate() {
             if only.is_some_and(|index| index != i) {
@@ -897,6 +912,8 @@ impl App {
                     text_edit: active.drawing.text_selection(),
                 }),
                 glide: session.selection().is_none(),
+                exit: exit_pose.map_or(0.0, |(e, _)| e),
+                flash: exit_pose.is_some_and(|(_, f)| f),
             };
             let result = if nonblocking {
                 overlay.try_present(gpu, &self.shared, &self.theme, marks)
@@ -1026,7 +1043,7 @@ impl App {
         match action {
             Action::None => {}
             Action::Redraw => self.request_redraw(),
-            Action::Close => self.close_session(),
+            Action::Close => self.begin_exit(false, None),
             Action::Copy => self.export(Export::Copy),
             Action::Save => self.export(Export::Save),
             Action::SaveAs => self.export(Export::SaveAs),
@@ -1049,18 +1066,26 @@ impl App {
             .active
             .as_ref()
             .and_then(|a| a.draft.as_ref().map(|d| d.token.clone()));
-        self.close_session();
+        // The result is ready at once; the overlay then plays its short closing motion.
         match how {
-            Export::Copy => self.copy_image(Arc::new(image)),
+            Export::Copy => {
+                self.copy_image(Arc::new(image));
+                self.begin_exit(true, None);
+            }
             Export::Save => {
                 let path = file::unique_path(&self.save_folder(), &file::timestamp_name());
                 self.save(path, image, draft);
+                self.begin_exit(true, None);
             }
-            Export::SaveAs => match file::ask_path(&self.save_folder(), &file::timestamp_name()) {
-                Ok(Some(path)) => self.save(path, image, draft),
-                Ok(None) => {}
-                Err(e) => log_warn!("диалог «Сохранить как»: {e}"),
-            },
+            Export::SaveAs => self.begin_exit(false, Some((image, draft))),
+        }
+    }
+
+    fn ask_save_as(&mut self, image: Image, draft: Option<crate::recent_worker::Token>) {
+        match file::ask_path(&self.save_folder(), &file::timestamp_name()) {
+            Ok(Some(path)) => self.save(path, image, draft),
+            Ok(None) => {}
+            Err(e) => log_warn!("диалог «Сохранить как»: {e}"),
         }
     }
 
@@ -1205,7 +1230,7 @@ impl App {
             ToolbarButton::Copy => self.export(Export::Copy),
             ToolbarButton::Save => self.export(Export::Save),
             ToolbarButton::SaveAs => self.export(Export::SaveAs),
-            ToolbarButton::Close => self.close_session(),
+            ToolbarButton::Close => self.begin_exit(false, None),
             ToolbarButton::Pin => self.pin(),
             ToolbarButton::Recent => self.show_recent(),
             _ => self.editor_button(button),
@@ -1404,6 +1429,25 @@ unsafe extern "system" fn host_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
 }
 
 unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    // The closing motion is not interactive: a stray click must not start a new selection.
+    if matches!(
+        msg,
+        WM_LBUTTONDOWN
+            | WM_LBUTTONUP
+            | WM_MOUSEMOVE
+            | WM_RBUTTONUP
+            | WM_LBUTTONDBLCLK
+            | WM_MOUSEWHEEL
+            | WM_KEYDOWN
+            | WM_KEYUP
+            | WM_CHAR
+    ) {
+        let mut leaving = false;
+        with_app(|app| leaving = app.is_leaving());
+        if leaving {
+            return LRESULT(0);
+        }
+    }
     let handled = match msg {
         WM_LBUTTONDOWN | WM_LBUTTONUP | WM_MOUSEMOVE => {
             let mut origin = POINT::default();

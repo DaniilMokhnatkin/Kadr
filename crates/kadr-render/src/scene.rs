@@ -229,6 +229,10 @@ pub struct Marks<'a> {
     pub drawing: Option<View<'a>>,
     /// The highlight is a hovered window, not a selection: let it glide between windows.
     pub glide: bool,
+    /// Closing motion, eased 0 → 1: chrome and dimming fade, the toolbar folds into the selection.
+    pub exit: f32,
+    /// The capture was exported: the selection flashes once as the overlay leaves.
+    pub flash: bool,
 }
 
 pub struct Scene<'a> {
@@ -254,7 +258,10 @@ pub fn draw(
     let now = text.animation_time();
     let animate = text.animate.get();
     let dim = text.chrome.borrow_mut().dim(now, animate);
-    let scrim = fade(theme.scrim, dim);
+    let leave = 1.0 - scene.marks.exit.clamp(0.0, 1.0);
+    let scrim = fade(theme.scrim, dim * leave);
+    // Selection chrome fades with the dimming while the overlay leaves.
+    let ui = &fading(theme, leave);
     let full = rect(0.0, 0.0, scene.size.0 as f32, scene.size.1 as f32);
     unsafe {
         match scene.frame {
@@ -282,13 +289,37 @@ pub fn draw(
         )
         .is_some()
     {
-        annotations::draw(
+        // Leaving: the marks fade with the dimming, so hiding the windows at the end shows no jump.
+        let fading_marks = leave < 1.0;
+        if fading_marks {
+            let mut params = D2D1_LAYER_PARAMETERS1 {
+                contentBounds: full,
+                geometricMask: ManuallyDrop::new(None),
+                maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                maskTransform: Matrix3x2::identity(),
+                opacity: leave,
+                opacityBrush: ManuallyDrop::new(None),
+                layerOptions: D2D1_LAYER_OPTIONS1_NONE,
+            };
+            unsafe {
+                gpu.d2d.PushLayer(&params, None::<&ID2D1Layer>);
+                ManuallyDrop::drop(&mut params.geometricMask);
+                ManuallyDrop::drop(&mut params.opacityBrush);
+            }
+        }
+        let drawn = annotations::draw(
             gpu,
             shared,
             kadr_doc::Point::new(scene.origin.0, scene.origin.1),
             drawing,
             cache,
-        )?;
+        );
+        if fading_marks {
+            unsafe {
+                gpu.d2d.PopLayer();
+            }
+        }
+        drawn?;
     }
 
     let (ox, oy) = (scene.origin.0, scene.origin.1);
@@ -312,14 +343,21 @@ pub fn draw(
         }
     }
 
+    // Shutter: a soft white glow over what was just captured, gone as the overlay finishes leaving.
+    if scene.marks.flash
+        && let Some(c) = selection.and_then(|s| intersect(s, full))
+    {
+        fill(gpu, D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.22 * leave * leave }, c);
+    }
+
     if let (Some(sel), Some(screen)) = (selection, scene.marks.selection) {
         let line = px(dip::FRAME, scene.scale);
         let outline = px(dip::FRAME_OUTLINE, scene.scale);
         // Рамка лежит снаружи выделения и не закрывает выбранные пиксели.
-        ring(gpu, theme.frame_outline, inflate(sel, line), outline);
-        ring(gpu, theme.frame, sel, line);
+        ring(gpu, ui.frame_outline, inflate(sel, line), outline);
+        ring(gpu, ui.frame, sel, line);
         if scene.marks.handles {
-            draw_handles(gpu, theme, sel, line, scene.scale);
+            draw_handles(gpu, ui, sel, line, scene.scale);
         }
         if let Some(bounds) = scene.marks.drawing.and_then(|v| v.selected) {
             let selected = rect(
@@ -328,11 +366,11 @@ pub fn draw(
                 (bounds.right - ox) as f32,
                 (bounds.bottom - oy) as f32,
             );
-            ring(gpu, theme.frame, selected, line);
-            draw_handles(gpu, theme, selected, line, scene.scale);
+            ring(gpu, ui.frame, selected, line);
+            draw_handles(gpu, ui, selected, line, scene.scale);
         }
         let label = format!("{} × {}", screen.right - screen.left, screen.bottom - screen.top);
-        size_label(gpu, shared, text, theme, scene, sel, line + outline, &label)?;
+        size_label(gpu, shared, text, ui, scene, sel, line + outline, &label)?;
         if let Some(toolbar) = scene.marks.toolbar {
             draw_toolbar(gpu, shared, text, theme, scene, sel, toolbar, scrim)?;
         }
@@ -614,9 +652,10 @@ fn draw_toolbar(
     };
     let s = scene.scale;
     let layout = text.displayed(&target, toolbar.editor, Some(toolbar.hovered), s);
-    let a0 = layout.opacity;
+    // Leaving: the panel is gone in the first two thirds and shrinks back toward the selection.
+    let a0 = layout.opacity * (1.0 - scene.marks.exit * 1.5).clamp(0.0, 1.0);
     let (ax, ay) = layout.anchor;
-    let k = layout.scale;
+    let k = layout.scale * (1.0 - 0.06 * scene.marks.exit);
     let mut previous = Matrix3x2::default();
     unsafe {
         gpu.d2d.GetTransform(&mut previous);
@@ -922,6 +961,24 @@ fn edge(gpu: &Gpu, theme: &Theme, r: D2D_RECT_F, radius: f32, s: f32, opacity: f
             None::<&ID2D1StrokeStyle>,
         );
     }
+}
+
+/// The same roles at a lower opacity, for chrome that fades as a whole.
+fn fading(theme: &Theme, a: f32) -> Theme {
+    let mut t = *theme;
+    for c in [
+        &mut t.frame,
+        &mut t.frame_outline,
+        &mut t.surface,
+        &mut t.border,
+        &mut t.hairline,
+        &mut t.sheen,
+        &mut t.text,
+        &mut t.text_muted,
+    ] {
+        *c = fade(*c, a);
+    }
+    t
 }
 
 fn fade(mut c: D2D1_COLOR_F, a: f32) -> D2D1_COLOR_F {
