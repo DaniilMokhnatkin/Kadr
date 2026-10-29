@@ -1,5 +1,6 @@
 //! Finds what should not leave the computer in a screenshot: e-mail addresses, phone numbers, card
-//! numbers (Luhn-checked), IP addresses, IBANs and key- or token-like strings. Works on recognised
+//! numbers (Luhn-checked), passport, SNILS and INN numbers (checksums), IPv4/IPv6 addresses, IBANs,
+//! key- or token-like strings and the value after «Пароль:», «PIN:», «token=» and the like. Works on recognised
 //! words, so the result is the exact boxes to blur. A helper, not a guarantee: the user sees and
 //! can undo every blur.
 use crate::ocr::Line;
@@ -13,6 +14,11 @@ pub enum Kind {
     Ip,
     Iban,
     Secret,
+    Passport,
+    Snils,
+    Inn,
+    /// The value written after a label such as «Пароль:».
+    Password,
 }
 
 /// Boxes to blur, one per finding, slightly padded so glyph edges are covered too.
@@ -42,12 +48,9 @@ pub fn find(lines: &[Line]) -> Vec<(Kind, Rect)> {
                     break;
                 }
                 digits.extend(w.chars().filter(char::is_ascii_digit));
-                let groups = &words[i..=j];
-                let plain = groups.iter().all(|(w, _)| w.chars().all(|c| c.is_ascii_digit() || c == '-'));
-                if plain && (13..=19).contains(&digits.len()) && luhn(&digits) {
-                    best = Some((j + 1, Kind::Card));
-                } else if phone(groups.iter().map(|(w, _)| w.as_str()), &digits) {
-                    best = Some((j + 1, Kind::Phone));
+                let groups: Vec<&str> = words[i..=j].iter().map(|(w, _)| w.as_str()).collect();
+                if let Some(kind) = number(&groups, &digits) {
+                    best = Some((j + 1, kind));
                 }
             }
             match best {
@@ -75,13 +78,33 @@ pub fn find(lines: &[Line]) -> Vec<(Kind, Rect)> {
                 }
             }
         }
+        // The value after a label. Raw words: trimming above would lose the colon.
+        let raw: Vec<&str> = line.words.iter().map(|(w, _)| w.as_str()).collect();
+        for i in 0..raw.len() {
+            if taken[i] {
+                continue;
+            }
+            match label(raw[i], raw.get(i + 1).copied()) {
+                Some(Label::Inline) => mark(i, i + 1, Kind::Password, &mut taken, &mut out),
+                Some(Label::Next) => {
+                    let mut j = i + 1;
+                    if raw.get(j).is_some_and(|w| matches!(*w, ":" | "=")) {
+                        j += 1;
+                    }
+                    if j < raw.len() && !taken[j] {
+                        mark(j, j + 1, Kind::Password, &mut taken, &mut out);
+                    }
+                }
+                None => {}
+            }
+        }
         for (i, (w, _)) in words.iter().enumerate() {
             if taken[i] {
                 continue;
             }
             let kind = if email(w) {
                 Some(Kind::Email)
-            } else if ip(w) {
+            } else if ip(w) || ipv6(w) {
                 Some(Kind::Ip)
             } else if secret(w) {
                 Some(Kind::Secret)
@@ -94,6 +117,89 @@ pub fn find(lines: &[Line]) -> Vec<(Kind, Rect)> {
         }
     }
     out
+}
+
+/// What a run of digit groups is, most specific first: checksums beat shapes.
+fn number(groups: &[&str], digits: &str) -> Option<Kind> {
+    let digits_only = |w: &&str| w.chars().all(|c| c.is_ascii_digit());
+    let plain = groups.iter().all(|w| w.chars().all(|c| c.is_ascii_digit() || c == '-'));
+    if plain && (13..=19).contains(&digits.len()) && luhn(digits) {
+        return Some(Kind::Card);
+    }
+    if plain && digits.len() == 11 && snils(digits) {
+        return Some(Kind::Snils);
+    }
+    if groups.len() == 1 && digits_only(&groups[0]) && matches!(digits.len(), 10 | 12) && inn(digits) {
+        return Some(Kind::Inn);
+    }
+    // Russian passport: «4510 123456» or «45 10 123456».
+    let lens: Vec<usize> = groups.iter().map(|w| w.len()).collect();
+    if groups.iter().all(digits_only) && (lens == [4, 6] || lens == [2, 2, 6]) {
+        return Some(Kind::Passport);
+    }
+    phone(groups, digits).then_some(Kind::Phone)
+}
+
+/// SNILS control number: weights 9..1 over the first nine digits, modulo 101.
+fn snils(d: &str) -> bool {
+    let n: Vec<u32> = d.bytes().map(|b| (b - b'0') as u32).collect();
+    let sum: u32 = n[..9].iter().zip((1..=9).rev()).map(|(d, w)| d * w).sum();
+    let control = match sum {
+        s if s < 100 => s,
+        100 | 101 => 0,
+        s => match s % 101 {
+            100 => 0,
+            r => r,
+        },
+    };
+    control == n[9] * 10 + n[10]
+}
+
+/// INN (10 digits for companies, 12 for people) with its control digits.
+fn inn(d: &str) -> bool {
+    let n: Vec<u32> = d.bytes().map(|b| (b - b'0') as u32).collect();
+    let check = |weights: &[u32], len: usize| weights.iter().zip(&n[..len]).map(|(w, d)| w * d).sum::<u32>() % 11 % 10;
+    match n.len() {
+        10 => check(&[2, 4, 10, 3, 5, 9, 4, 6, 8], 9) == n[9],
+        12 => {
+            check(&[7, 2, 4, 10, 3, 5, 9, 4, 6, 8], 10) == n[10]
+                && check(&[3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8], 11) == n[11]
+        }
+        _ => false,
+    }
+}
+
+/// «2001:db8::1», «fe80:0:0:0:200:f8ff:fe21:67cf». Times («12:30:45») have too few groups.
+fn ipv6(w: &str) -> bool {
+    let groups: Vec<&str> = w.split(':').collect();
+    let compressed = w.contains("::");
+    let valid = groups.iter().all(|g| g.len() <= 4 && g.chars().all(|c| c.is_ascii_hexdigit()));
+    valid && groups.len() <= 9 && (compressed && groups.len() >= 3 || groups.len() >= 6)
+}
+
+/// Labels whose value is a secret; the value is the next word, or the rest of «pin=1234».
+const LABELS: [&str; 20] = [
+    "пароль", "password", "passwd", "pass", "pwd", "пин", "pin", "пин-код", "pin-код", "код", "otp", "token", "токен",
+    "secret", "секрет", "ключ", "key", "apikey", "api_key", "api-key",
+];
+
+enum Label {
+    /// «password=hunter2»: the word itself holds the value.
+    Inline,
+    /// «Пароль:» or «Пароль :»: the value is the next word.
+    Next,
+}
+
+fn label(word: &str, next: Option<&str>) -> Option<Label> {
+    let lower = word.to_lowercase();
+    if let Some(k) = lower.find([':', '=']) {
+        let head = lower[..k].trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '_');
+        if !LABELS.contains(&head) {
+            return None;
+        }
+        return Some(if lower[k + 1..].trim().is_empty() { Label::Next } else { Label::Inline });
+    }
+    (LABELS.contains(&lower.as_str()) && matches!(next, Some(":" | "="))).then_some(Label::Next)
 }
 
 fn luhn(digits: &str) -> bool {
@@ -109,14 +215,15 @@ fn luhn(digits: &str) -> bool {
     sum.is_multiple_of(10)
 }
 
-/// «+7 912 345-67-89», «8 (912) 345 67 89», «+1-202-555-0143». Dates and times use other separators.
-fn phone<'a>(groups: impl Iterator<Item = &'a str> + Clone, digits: &str) -> bool {
-    let text: String = groups.clone().collect::<Vec<_>>().join(" ");
-    let separated = groups.count() > 1 || text.contains(['-', '(', '+']);
+/// «+7 912 345-67-89», «8 (912) 345 67 89», «89123456789», «+1-202-555-0143». Dates and times
+/// use other separators.
+fn phone(groups: &[&str], digits: &str) -> bool {
+    let text = groups.join(" ");
     let international = text.starts_with('+') && (10..=15).contains(&digits.len());
     let national = (text.starts_with('8') || text.starts_with('7')) && digits.len() == 11;
     let punctuated = (text.contains('-') || text.contains('(')) && (10..=12).contains(&digits.len());
-    separated && (international || national || punctuated)
+    // «89123456789» in one run counts too: 11 digits after 8 or 7 is a Russian number.
+    international || national || punctuated
 }
 
 fn email(w: &str) -> bool {
@@ -197,6 +304,21 @@ mod tests {
         assert_eq!(kinds("IBAN DE89 3704 0044 0532 0130 00"), [Kind::Iban]);
         assert_eq!(kinds("key sk-proj-4f9aZ81kLq0x77Y2bN token"), [Kind::Secret]);
         assert_eq!(kinds("ghp_16C7e42F292c6912E7710c838347Ae178B4a"), [Kind::Secret]);
+        assert_eq!(kinds("Звоните 89123456789 вечером"), [Kind::Phone]);
+        assert_eq!(kinds("Паспорт 4510 123456 выдан"), [Kind::Passport]);
+        assert_eq!(kinds("Паспорт 45 10 123456"), [Kind::Passport]);
+        assert_eq!(kinds("СНИЛС 112-233-445 95"), [Kind::Snils]);
+        assert_eq!(kinds("ИНН 7707083893 КПП"), [Kind::Inn]);
+        assert_eq!(kinds("ИНН 500100732259"), [Kind::Inn]);
+        assert_eq!(kinds("host 2001:db8::1 up"), [Kind::Ip]);
+        assert_eq!(kinds("mac fe80:0:0:0:200:f8ff:fe21:67cf"), [Kind::Ip]);
+        assert_eq!(kinds("Пароль: qwerty123 потом"), [Kind::Password]);
+        assert_eq!(kinds("Password : hunter2"), [Kind::Password]);
+        assert_eq!(kinds("pin=4815 ok"), [Kind::Password]);
+        assert_eq!(kinds("Код: 573 920"), [Kind::Password]);
+        // The value is blurred, not the label.
+        let (_, r) = find(&[line("Пароль: секрет")])[0];
+        assert!(r.left >= 70, "{r:?}");
         let found = find(&[line("Email me: a@b.co now")]);
         let (_, r) = found[0];
         // «Email» and «me:» are 0..50 and 60..90; the address is 100..160, padded by 3.
@@ -212,6 +334,11 @@ mod tests {
             "Internationalization and localization",
             "Card 4111 1111 1111 1112 is not Luhn-valid",
             "Заказ №12345 на 3 400 ₽",
+            "Пароль изменён вчера",
+            "Ключевые слова: скриншот",
+            "Время 12:30:45 и 09:15",
+            "Номер 1234567890 не ИНН",
+            "Версия 4510 сборка 1234567",
         ] {
             assert!(kinds(text).is_empty(), "{text}: {:?}", kinds(text));
         }
