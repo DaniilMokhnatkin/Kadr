@@ -14,6 +14,8 @@ pub(super) struct Scroll {
     region: DocRect,
     stitcher: Stitcher,
     status: Status,
+    /// Steps by kind (grew, same, back, lost) for the log: tells a still page from a lost match.
+    steps: [usize; 4],
 }
 
 impl App {
@@ -29,6 +31,12 @@ impl App {
 
     pub(super) fn start_pending_scroll(&mut self) {
         let Some(region) = self.scroll_pending.take() else { return };
+        // The editor has only just been hidden: let two compositions pass so the first frame is
+        // the page itself and not the editor's last faded picture.
+        unsafe {
+            let _ = DwmFlush();
+            let _ = DwmFlush();
+        }
         let first = match self.capture_image(region) {
             Ok(image) => image,
             Err(e) => {
@@ -37,7 +45,7 @@ impl App {
                 return;
             }
         };
-        self.scroll = Some(Scroll { region, stitcher: Stitcher::new(&first), status: Status::Scrolling });
+        self.scroll = Some(Scroll { region, stitcher: Stitcher::new(&first), status: Status::Scrolling, steps: [0; 4] });
         scroll_window::open(self.instance, self.hwnd, WM_APP_SCROLL, region);
         unsafe {
             SetTimer(Some(self.hwnd), TIMER_SCROLL, PERIOD_MS, None);
@@ -58,11 +66,14 @@ impl App {
             }
         };
         let Some(scroll) = &mut self.scroll else { return };
-        let status = match scroll.stitcher.push(&frame) {
-            Step::Grew(_) | Step::Same | Step::Back => Status::Scrolling,
-            Step::Lost => Status::Lost,
-            Step::Full => Status::Full,
+        let (kind, status) = match scroll.stitcher.push(&frame) {
+            Step::Grew(_) => (0, Status::Scrolling),
+            Step::Same => (1, Status::Scrolling),
+            Step::Back => (2, Status::Scrolling),
+            Step::Lost => (3, Status::Lost),
+            Step::Full => (0, Status::Full),
         };
+        scroll.steps[kind] += 1;
         scroll.status = status;
         scroll_window::update(scroll.stitcher.height(), status);
     }
@@ -100,6 +111,8 @@ impl App {
             let _ = UnregisterHotKey(Some(self.hwnd), HK_SCROLL_CANCEL);
         }
         scroll_window::close();
+        let [grew, same, back, lost] = scroll.steps;
+        log_info!("длинный снимок, шаги: выросло {grew}, на месте {same}, назад {back}, сбился {lost}");
         if !self.warm {
             for out in &mut self.outputs {
                 out.release_duplication();

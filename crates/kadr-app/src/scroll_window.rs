@@ -34,7 +34,7 @@ pub enum Request {
 
 /// Frame margin around the area, panel size and gap, in DIPs.
 const MARGIN: f32 = 6.0;
-const PANEL_W: f32 = 380.0;
+const PANEL_W: f32 = 460.0;
 const PANEL_H: f32 = 48.0;
 const GAP: f32 = 10.0;
 
@@ -50,6 +50,8 @@ struct State {
     area: D2D_RECT_F,
     above: bool,
     height: usize,
+    /// Height of the area alone: until the result outgrows it, the panel says what to do.
+    start: usize,
     status: Status,
     epoch: Instant,
     appear: Spring,
@@ -119,6 +121,7 @@ pub fn open(instance: HINSTANCE, host: HWND, message: u32, area: Rect) {
                 area: rect(0.0, 0.0, 1.0, 1.0),
                 above: false,
                 height: 0,
+                start: 0,
                 status: Status::Scrolling,
                 epoch: Instant::now(),
                 appear: spring(Curve::POP),
@@ -161,6 +164,7 @@ pub fn open(instance: HINSTANCE, host: HWND, message: u32, area: Rect) {
             (area.bottom - top) as f32,
         );
         st.height = area.height() as usize;
+        st.start = st.height;
         st.status = Status::Scrolling;
         let now = st.epoch.elapsed().as_secs_f64();
         st.appear.snap(0.0);
@@ -298,9 +302,10 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
     stroke(gpu, fade(theme.hairline, a), p, 14.0 * s, 1.0);
     let (cancel, done) = buttons(p, s);
     let (label, tone) = match st.status {
-        Status::Scrolling => (format!("Прокручивайте вниз · {} px", group(st.height)), theme.text),
-        Status::Lost => ("Слишком быстро — прокрутите чуть назад".to_string(), glass::error_ink(&theme)),
-        Status::Full => (format!("Готово к сохранению · {} px", group(st.height)), theme.text),
+        Status::Scrolling if st.height <= st.start => ("Крутите колесо над страницей".to_string(), theme.text),
+        Status::Scrolling => (format!("Склеено {} px — крутите ещё", group(st.height)), theme.text),
+        Status::Lost => ("Сбился — прокрутите чуть назад".to_string(), glass::error_ink(&theme)),
+        Status::Full => (format!("Это предел · {} px", group(st.height)), theme.text),
     };
     text(gpu, label_font, &label, rect(p.left + 16.0 * s, p.top, cancel.left - 8.0 * s, p.bottom), fade(tone, a));
     let hc = st.hover[0].value(now);

@@ -32,6 +32,10 @@ pub struct Stitcher {
     /// Rows at the bottom that stayed put between frames: appended once at the end.
     footer: usize,
     height: usize,
+    /// Nothing glued yet: the first frame may still be stale.
+    fresh: bool,
+    /// The last frame that matched nothing, while nothing is glued yet.
+    unmatched: Option<Image>,
 }
 
 fn fingerprints(bgra: &[u8], width: usize) -> Vec<u64> {
@@ -59,6 +63,8 @@ impl Stitcher {
             last_rows: fingerprints(&first.bgra, width),
             footer: 0,
             height: first.height() as usize,
+            fresh: true,
+            unmatched: None,
         }
     }
 
@@ -116,14 +122,34 @@ impl Stitcher {
                 let from = (h - bottom - d) * stride;
                 self.body.extend_from_slice(&frame.bgra[from..(h - bottom) * stride]);
                 self.height += d;
+                self.fresh = false;
                 Step::Grew(d)
             }
             // The reference stays the lowest frame reached, or rows would be glued twice.
             None if best(new, old).is_some() => return Step::Back,
-            None => return Step::Lost,
+            None => {
+                // Nothing glued yet and the first frame matches nothing: it may have been caught
+                // mid-change. If this frame follows the previous unmatched one (still or scrolled),
+                // that one is the real start.
+                if self.fresh
+                    && let Some(prev) = self.unmatched.take()
+                {
+                    let mut restart = Self::new(&prev);
+                    let step = restart.push(frame);
+                    if !matches!(step, Step::Lost) {
+                        *self = restart;
+                        return step;
+                    }
+                }
+                if self.fresh {
+                    self.unmatched = Some(frame.clone());
+                }
+                return Step::Lost;
+            }
         };
         self.last.copy_from_slice(&frame.bgra);
         self.last_rows = rows;
+        self.unmatched = None;
         step
     }
 
@@ -202,5 +228,31 @@ mod tests {
         assert!(matches!(s.push(&view(&content, 20, h, 0, 0, w)), Step::Grew(10)));
         let rows = column(&s.finish());
         assert_eq!(rows, content[..20 + h]);
+    }
+    #[test]
+    fn a_first_frame_caught_mid_fade_is_replaced_once_the_screen_holds_still() {
+        let (w, h) = (48, 50);
+        let content = page(500);
+        // The editor's last faded frame: every pixel a shade off.
+        let mut stale = view(&content, 0, h, 0, 0, w);
+        stale.bgra.iter_mut().for_each(|b| *b = b.saturating_sub(3));
+        let mut s = Stitcher::new(&stale);
+        assert!(matches!(s.push(&view(&content, 0, h, 0, 0, w)), Step::Lost));
+        assert!(matches!(s.push(&view(&content, 0, h, 0, 0, w)), Step::Same));
+        assert!(matches!(s.push(&view(&content, 15, h, 0, 0, w)), Step::Grew(15)));
+        assert!(matches!(s.push(&view(&content, 32, h, 0, 0, w)), Step::Grew(17)));
+        assert_eq!(column(&s.finish()), content[..32 + h]);
+    }
+    #[test]
+    fn a_stale_first_frame_is_replaced_even_when_scrolling_starts_at_once() {
+        let (w, h) = (48, 50);
+        let content = page(500);
+        let mut stale = view(&content, 0, h, 0, 0, w);
+        stale.bgra.iter_mut().for_each(|b| *b = b.saturating_add(2));
+        let mut s = Stitcher::new(&stale);
+        assert!(matches!(s.push(&view(&content, 10, h, 0, 0, w)), Step::Lost));
+        assert!(matches!(s.push(&view(&content, 22, h, 0, 0, w)), Step::Grew(12)));
+        assert!(matches!(s.push(&view(&content, 40, h, 0, 0, w)), Step::Grew(18)));
+        assert_eq!(column(&s.finish()), content[10..40 + h]);
     }
 }
