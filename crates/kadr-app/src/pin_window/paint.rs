@@ -78,7 +78,7 @@ pub(super) fn buttons(r: RECT, scale: f32) -> Vec<RECT> {
         .collect()
 }
 #[allow(clippy::too_many_arguments)]
-pub(super) fn button(dc: HDC, r: RECT, id: usize, pin: &Pin, font: HFONT, focused: bool, pressed: bool, hovered: bool) {
+pub(super) fn button(dc: HDC, r: RECT, id: usize, pin: &Pin, font: HFONT, focused: bool, pressed: bool, hovered: f32) {
     let t = Theme::current();
     fill(dc, r, color(t.surface));
     let fg = crate::chrome::button(
@@ -180,7 +180,7 @@ pub(super) fn preview(image: &Image, scale: f32) -> Result<Image> {
         let pin = Pin::new(image.width(), image.height(), (w, h - footer(scale)));
         draw(dc, r, image, &pin, scale);
         for (id, r) in ACTIONS.into_iter().zip(buttons(r, scale)) {
-            button(dc, r, id, &pin, font, id == COPY, false, false);
+            button(dc, r, id, &pin, font, id == COPY, false, 0.0);
         }
         let _ = GdiFlush();
         let mut pixels = std::slice::from_raw_parts(bits as *const u8, (w * h * 4) as usize).to_vec();

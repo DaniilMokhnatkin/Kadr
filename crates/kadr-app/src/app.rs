@@ -466,6 +466,10 @@ impl App {
 
     fn on_theme_change(&mut self) {
         self.theme = Theme::current();
+        for overlay in &self.overlays {
+            overlay.update_motion_preference();
+        }
+        self.request_redraw();
         let mut data = self.tray_data();
         data.uFlags = NIF_ICON;
         data.hIcon = self.icons.tray();
@@ -845,6 +849,10 @@ impl App {
     fn render_all(&self) {
         self.frames.borrow_mut().clear();
         self.render_scene(None, false);
+        // Automatic window/monitor capture can reveal the toolbar without any following mouse event.
+        if self.overlays.iter().any(Overlay::animations_pending) {
+            self.request_redraw();
+        }
     }
     fn render_scene(&self, only: Option<usize>, nonblocking: bool) -> bool {
         let Some(active) = &self.active else { return true };
@@ -873,7 +881,7 @@ impl App {
                 handles: session.show_handles()
                     && active.drawing.tool == kadr_doc::annotation::Tool::Select
                     && active.drawing.selected.is_none(),
-                toolbar: (session.show_toolbar() && !active.drawing.busy()).then_some(Toolbar {
+                toolbar: session.show_toolbar().then_some(Toolbar {
                     hovered: active.hovered,
                     editor: Some(editor_bar(&active.drawing)),
                 }),

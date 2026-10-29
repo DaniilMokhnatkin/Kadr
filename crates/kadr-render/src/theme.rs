@@ -148,6 +148,20 @@ fn high_contrast_on() -> bool {
     ok && hc.dwFlags.contains(HCF_HIGHCONTRASTON)
 }
 
+/// Windows "Animation effects" preference. A changed preference snaps to the semantic state.
+pub fn motion_enabled() -> bool {
+    let mut enabled = windows::core::BOOL(1);
+    let _ = unsafe {
+        SystemParametersInfoW(
+            windows::Win32::UI::WindowsAndMessaging::SPI_GETCLIENTAREAANIMATION,
+            0,
+            Some(&mut enabled as *mut _ as *mut c_void),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    };
+    enabled.as_bool() && !high_contrast_on()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

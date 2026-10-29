@@ -686,13 +686,13 @@ fn draw_button(item: &DRAWITEMSTRUCT, d: &Data) {
     let focused = item.itemState.0 & ODS_FOCUS.0 != 0;
     fill(item.hDC, r, color(t.surface));
     let is_action = item.CtlID as usize == CLEAR || item.CtlID as usize == BACK;
-    let hover = crate::chrome::hovered(item.hwndItem);
+    let hover = crate::chrome::progress(item.hwndItem, crate::chrome::hovered(item.hwndItem));
     let bg = if item.itemState.0 & ODS_SELECTED.0 != 0 {
         t.selected
-    } else if focused || hover {
+    } else if focused {
         t.control
     } else {
-        t.surface
+        crate::chrome::mix(t.surface, t.control, hover)
     };
     if !is_action {
         crate::chrome::round(

@@ -11,6 +11,8 @@ use windows::Win32::{
     },
 };
 use windows::core::BOOL;
+mod motion;
+pub use motion::{progress, tick, timer_available};
 
 pub fn color(c: windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F) -> COLORREF {
     COLORREF((c.r * 255.0).round() as u32 | ((c.g * 255.0).round() as u32) << 8 | ((c.b * 255.0).round() as u32) << 16)
@@ -28,14 +30,14 @@ pub fn round(dc: HDC, r: RECT, bg: COLORREF, edge: COLORREF, radius: i32, stroke
         let _ = DeleteObject(brush.into());
     }
 }
-pub fn button(dc: HDC, r: RECT, primary: bool, focused: bool, pressed: bool, hovered: bool, scale: f32) -> COLORREF {
+pub fn button(dc: HDC, r: RECT, primary: bool, focused: bool, pressed: bool, hover: f32, scale: f32) -> COLORREF {
     let t = Theme::current();
     let bg = if primary {
         t.accent
-    } else if pressed || hovered {
+    } else if pressed {
         t.selected
     } else {
-        t.control
+        mix(t.control, t.selected, hover)
     };
     let edge = if focused { t.accent } else { bg };
     round(
@@ -64,11 +66,24 @@ pub fn button(dc: HDC, r: RECT, primary: bool, focused: bool, pressed: bool, hov
     }
     color(if primary {
         t.on_accent
-    } else if pressed || hovered {
+    } else if pressed {
         t.on_selected
     } else {
-        t.text
+        mix(t.text, t.on_selected, hover)
     })
+}
+pub fn mix(
+    a: windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F,
+    b: windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F,
+    t: f32,
+) -> windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F {
+    let t = t.clamp(0.0, 1.0);
+    windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F {
+        r: a.r + (b.r - a.r) * t,
+        g: a.g + (b.g - a.g) * t,
+        b: a.b + (b.b - a.b) * t,
+        a: a.a + (b.a - a.a) * t,
+    }
 }
 pub fn hovered(hwnd: HWND) -> bool {
     unsafe {
@@ -147,13 +162,12 @@ unsafe extern "system" fn hover_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
         };
         unsafe {
             let _ = TrackMouseEvent(&mut track);
-            let _ = InvalidateRect(Some(hwnd), None, false);
         }
+        motion::begin(hwnd, true);
     } else if msg == WM_MOUSELEAVE {
-        unsafe {
-            let _ = InvalidateRect(Some(hwnd), None, false);
-        }
+        motion::begin(hwnd, false);
     } else if msg == WM_NCDESTROY {
+        motion::remove(hwnd);
         unsafe {
             let _: BOOL = RemoveWindowSubclass(hwnd, Some(hover_proc), id);
         }

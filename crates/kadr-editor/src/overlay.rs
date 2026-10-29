@@ -128,12 +128,14 @@ impl Overlay {
             gpu.dcomp.Commit()?;
 
             let scale = monitor_scale(monitor);
+            let text = TextStyles::new(shared, scale)?;
+            text.enable_motion(kadr_render::theme::motion_enabled());
             Ok(Self {
                 hwnd,
                 output,
                 rect: r,
                 scale,
-                text: TextStyles::new(shared, scale)?,
+                text,
                 frame: None,
                 swapchain,
                 target,
@@ -156,6 +158,7 @@ impl Overlay {
     }
 
     pub fn clear_frame(&mut self) {
+        self.text.reset_motion();
         self.frame = None;
         *self.annotation_cache.borrow_mut() = Cache::default();
     }
@@ -198,6 +201,12 @@ impl Overlay {
     }
     pub fn needs_retry(&self) -> bool {
         self.retry_present.get()
+    }
+    pub fn animations_pending(&self) -> bool {
+        self.text.animations_pending()
+    }
+    pub fn update_motion_preference(&self) {
+        self.text.enable_motion(kadr_render::theme::motion_enabled());
     }
     pub fn try_present(&self, gpu: &Gpu, shared: &Shared, theme: &Theme, marks: Marks) -> Result<bool> {
         self.paint(gpu, shared, theme, marks, true)

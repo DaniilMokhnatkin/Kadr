@@ -1,5 +1,38 @@
 use super::*;
 use windows::Win32::Foundation::WAIT_OBJECT_0;
+struct NativeTimer(Option<HANDLE>);
+impl NativeTimer {
+    fn new() -> Self {
+        use windows::Win32::System::Threading::*;
+        let h = unsafe {
+            CreateWaitableTimerExW(
+                None,
+                windows::core::PCWSTR::null(),
+                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                TIMER_ALL_ACCESS.0,
+            )
+        }
+        .ok();
+        crate::chrome::timer_available(h.is_some());
+        Self(h)
+    }
+    fn arm(&self, delay: std::time::Duration) -> Option<HANDLE> {
+        let h = self.0?;
+        let due = -((delay.as_nanos() / 100).max(1).min(i64::MAX as u128) as i64);
+        unsafe { windows::Win32::System::Threading::SetWaitableTimer(h, &due, 0, None, None, false) }
+            .ok()
+            .map(|()| h)
+    }
+}
+impl Drop for NativeTimer {
+    fn drop(&mut self) {
+        if let Some(h) = self.0 {
+            unsafe {
+                let _ = windows::Win32::Foundation::CloseHandle(h);
+            }
+        }
+    }
+}
 impl App {
     pub(super) fn request_redraw(&self) {
         if self.active.is_some() {
@@ -19,7 +52,10 @@ impl App {
             if (overlay.latency_handle().is_some() && overlay.latency_handle() == woken || overlay.ready())
                 && self.render_scene(Some(index), true)
             {
-                self.frames.borrow_mut().complete(index);
+                // An animated surface asks for its own next GPU slot; no 16 ms / 60 Hz timer.
+                if !overlay.animations_pending() {
+                    self.frames.borrow_mut().complete(index);
+                }
             }
         }
     }
@@ -41,6 +77,7 @@ impl App {
 pub(super) unsafe fn message_loop() {
     unsafe {
         let mut woken = None;
+        let native_timer = NativeTimer::new();
         'messages: loop {
             let mut msg = MSG::default();
             for _ in 0..64 {
@@ -61,6 +98,11 @@ pub(super) unsafe fn message_loop() {
                 a.draw_ready(woken.take());
                 waits = a.frame_waits();
             });
+            if let Some(delay) = crate::chrome::tick()
+                && let Some(h) = native_timer.arm(delay)
+            {
+                waits.0.push(h);
+            }
             let result = MsgWaitForMultipleObjectsEx(
                 Some(&waits.0),
                 if waits.1 { 1 } else { u32::MAX },
@@ -72,5 +114,22 @@ pub(super) unsafe fn message_loop() {
                 woken = Some(waits.0[index]);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn native_animation_deadline_is_a_waitable_signal_without_a_global_timer_resolution_change() {
+        let before = unsafe { GetForegroundWindow() };
+        let timer = NativeTimer::new();
+        if let Some(h) = timer.arm(std::time::Duration::from_millis(2)) {
+            assert_eq!(
+                unsafe { windows::Win32::System::Threading::WaitForSingleObject(h, 100) },
+                WAIT_OBJECT_0
+            );
+        }
+        assert_eq!(unsafe { GetForegroundWindow() }, before);
     }
 }

@@ -20,6 +20,7 @@ use crate::gpu::{Gpu, Shared};
 use crate::theme::{Theme, dip};
 use kadr_doc::annotation::{COLORS, Tool};
 mod glyphs;
+mod transition;
 
 struct Style {
     format: IDWriteTextFormat,
@@ -35,6 +36,10 @@ pub struct TextStyles {
     lead: Style,
     button: Style,
     toolbar: std::cell::RefCell<Option<(ToolbarKey, Option<ToolbarLayout>)>>,
+    motion: std::cell::RefCell<transition::State>,
+    animate: std::cell::Cell<bool>,
+    epoch: std::time::Instant,
+    time_override: std::cell::Cell<Option<f64>>,
 }
 
 impl TextStyles {
@@ -52,7 +57,42 @@ impl TextStyles {
             lead: style(DWRITE_FONT_WEIGHT_REGULAR, dip::LEAD, true)?,
             button: style(DWRITE_FONT_WEIGHT_REGULAR, dip::TITLE, false)?,
             toolbar: Default::default(),
+            motion: Default::default(),
+            animate: std::cell::Cell::new(false),
+            epoch: std::time::Instant::now(),
+            time_override: std::cell::Cell::new(None),
         })
+    }
+    /// Static by default for exports/fixtures; only interactive surfaces enable motion.
+    pub fn enable_motion(&self, enabled: bool) {
+        if self.animate.replace(enabled) != enabled {
+            self.reset_motion();
+        }
+    }
+    pub fn reset_motion(&self) {
+        self.motion.borrow_mut().clear();
+    }
+    pub fn animations_pending(&self) -> bool {
+        self.animate.get() && self.motion.borrow().active(self.animation_time())
+    }
+    pub fn set_animation_time(&self, seconds: Option<f64>) {
+        self.time_override.set(seconds);
+    }
+    fn animation_time(&self) -> f64 {
+        self.time_override
+            .get()
+            .unwrap_or_else(|| self.epoch.elapsed().as_secs_f64())
+    }
+    fn displayed(
+        &self,
+        target: &ToolbarLayout,
+        e: Option<EditorBar>,
+        hover: Option<Option<ToolbarButton>>,
+        s: f32,
+    ) -> transition::Layout {
+        self.motion
+            .borrow_mut()
+            .sample(target, e, hover, self.animation_time(), s, self.animate.get())
     }
 }
 
@@ -190,6 +230,9 @@ pub fn draw(
     scene: &Scene,
     cache: &mut Cache,
 ) -> Result<()> {
+    if scene.marks.toolbar.is_none() {
+        text.reset_motion();
+    }
     let full = rect(0.0, 0.0, scene.size.0 as f32, scene.size.1 as f32);
     unsafe {
         match scene.frame {
@@ -502,19 +545,23 @@ pub fn toolbar_hit(
         (selection.right - ox) as f32,
         (selection.bottom - oy) as f32,
     );
-    let layout = toolbar_layout(shared, text, size, scale, sel, editor).ok()??;
+    let target = toolbar_layout(shared, text, size, scale, sel, editor).ok()??;
+    let layout = text.displayed(&target, editor, None, scale);
     let (x, y) = ((at.0 - ox) as f32, (at.1 - oy) as f32);
-    if let Some((button, _, _)) = layout
-        .buttons
-        .iter()
-        .find(|(_, r, _)| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
-    {
-        let disabled = editor.is_some_and(|e| match button {
-            ToolbarButton::Undo => !e.undo,
-            ToolbarButton::Redo => !e.redo,
-            _ => false,
+    let clip = layout.property_clip();
+    if let Some(c) = layout.buttons.iter().rev().find(|c| {
+        c.opacity > 0.02
+            && (!c.property || clip.is_some_and(|r| x >= r.left && x < r.right && y >= r.top && y < r.bottom))
+            && x >= c.rect.left
+            && x < c.rect.right
+            && y >= c.rect.top
+            && y < c.rect.bottom
+    }) {
+        return Some(if c.live && c.enabled {
+            c.button
+        } else {
+            ToolbarButton::Surface
         });
-        return Some(if disabled { ToolbarButton::Surface } else { *button });
     }
     let r = layout.panel;
     (x >= r.left && x < r.right && y >= r.top && y < r.bottom).then_some(ToolbarButton::Surface)
@@ -533,28 +580,49 @@ fn draw_toolbar(
 ) -> Result<()> {
     let size = (scene.size.0 as f32, scene.size.1 as f32);
     let Some(layout) = toolbar_layout(shared, text, size, scene.scale, sel, toolbar.editor)? else {
+        text.reset_motion();
         return Ok(());
     };
     let s = scene.scale;
-    panel(gpu, theme, layout.panel, dip::RADIUS_MD * s, s);
-    for (button, r, label) in &layout.buttons {
-        let hovered = toolbar.hovered == Some(*button);
-        let enabled = toolbar.editor.is_none_or(|e| match button {
-            ToolbarButton::Undo => e.undo,
-            ToolbarButton::Redo => e.redo,
-            _ => true,
-        });
-        let selected = matches!(button, ToolbarButton::Tool(tool) if toolbar.editor.is_some_and(|e| e.tool==*tool || (*tool==Tool::Blur && e.tool.is_blur() && (r.top-layout.panel.top-12.0*s).abs()<0.1)));
-        if let ToolbarButton::Color(i) = button {
-            let c = COLORS[*i];
-            let ink = D2D1_COLOR_F {
-                r: c[0] as f32 / 255.0,
-                g: c[1] as f32 / 255.0,
-                b: c[2] as f32 / 255.0,
-                a: 1.0,
+    let layout = text.displayed(&layout, toolbar.editor, Some(toolbar.hovered), s);
+    let mut material = *theme;
+    material.surface = fade(theme.surface, layout.opacity);
+    material.border = fade(theme.border, layout.opacity);
+    panel(gpu, &material, layout.panel, dip::RADIUS_MD * s, s);
+    unsafe {
+        gpu.d2d.PushAxisAlignedClip(
+            &layout.panel,
+            windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+        );
+    }
+    let property_clip = layout.property_clip();
+    for c in &layout.buttons {
+        let (button, r, label) = (&c.button, &c.rect, &c.label);
+        let a = layout.opacity * c.opacity;
+        if a < 0.001 {
+            continue;
+        }
+        if c.property {
+            let Some(clip) = property_clip else {
+                continue;
             };
-            if hovered || toolbar.editor.is_some_and(|e| e.color == *i) {
-                fill_rounded(gpu, theme.control, *r, 8.0 * s);
+            unsafe {
+                gpu.d2d.PushAxisAlignedClip(
+                    &clip,
+                    windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                );
+            }
+        }
+        if let ToolbarButton::Color(i) = button {
+            let rgb = COLORS[*i];
+            let ink = D2D1_COLOR_F {
+                r: rgb[0] as f32 / 255.0,
+                g: rgb[1] as f32 / 255.0,
+                b: rgb[2] as f32 / 255.0,
+                a,
+            };
+            if c.hover > 0.01 || c.selected > 0.01 {
+                fill_rounded(gpu, fade(theme.control, a * c.hover.max(c.selected)), *r, 8.0 * s);
             }
             let cx = (r.left + r.right) / 2.0;
             let cy = (r.top + r.bottom) / 2.0;
@@ -566,46 +634,51 @@ fn draw_toolbar(
                 };
                 gpu.brush.SetColor(&ink);
                 gpu.d2d.FillEllipse(&e, &gpu.brush);
-                gpu.brush.SetColor(&theme.text_muted);
+                gpu.brush.SetColor(&fade(theme.text_muted, a));
                 gpu.d2d.DrawEllipse(&e, &gpu.brush, 0.7 * s, None::<&ID2D1StrokeStyle>);
-                if toolbar.editor.is_some_and(|e| e.color == *i) {
+                if c.selected > 0.01 {
                     let e = windows::Win32::Graphics::Direct2D::D2D1_ELLIPSE {
                         radiusX: 12.0 * s,
                         radiusY: 12.0 * s,
                         ..e
                     };
-                    gpu.brush.SetColor(&theme.text);
+                    gpu.brush.SetColor(&fade(theme.text, a * c.selected));
                     gpu.d2d.DrawEllipse(&e, &gpu.brush, 1.5 * s, None::<&ID2D1StrokeStyle>);
+                }
+            }
+            if c.property {
+                unsafe {
+                    gpu.d2d.PopAxisAlignedClip();
                 }
             }
             continue;
         }
-        let ink = if !enabled {
-            theme.disabled
+        let ink = if !c.enabled {
+            fade(theme.disabled, a)
         } else if *button == ToolbarButton::Copy {
-            fill_rounded(gpu, theme.accent, *r, 10.0 * s);
-            theme.on_accent
-        } else if selected {
-            fill_rounded(gpu, theme.selected, *r, 8.0 * s);
-            unsafe {
-                gpu.brush.SetColor(&theme.on_selected);
-                gpu.d2d.DrawRoundedRectangle(
-                    &D2D1_ROUNDED_RECT {
-                        rect: inflate(*r, -s),
-                        radiusX: 7.0 * s,
-                        radiusY: 7.0 * s,
-                    },
-                    &gpu.brush,
-                    1.0 * s,
-                    None::<&ID2D1StrokeStyle>,
-                );
-            }
-            theme.on_selected
+            fill_rounded(gpu, fade(theme.accent, a), *r, 10.0 * s);
+            fade(theme.on_accent, a)
         } else {
-            if hovered {
-                fill_rounded(gpu, theme.control, *r, 8.0 * s);
+            if c.hover > 0.01 {
+                fill_rounded(gpu, fade(theme.control, a * c.hover), *r, 8.0 * s);
             }
-            theme.text
+            if c.selected > 0.01 {
+                fill_rounded(gpu, fade(theme.selected, a * c.selected), *r, 8.0 * s);
+                unsafe {
+                    gpu.brush.SetColor(&fade(theme.on_selected, a * c.selected));
+                    gpu.d2d.DrawRoundedRectangle(
+                        &D2D1_ROUNDED_RECT {
+                            rect: inflate(*r, -s),
+                            radiusX: 7.0 * s,
+                            radiusY: 7.0 * s,
+                        },
+                        &gpu.brush,
+                        s,
+                        None::<&ID2D1StrokeStyle>,
+                    );
+                }
+            }
+            fade(mix(theme.text, theme.on_selected, c.selected), a)
         };
         if label.w > 0.0 {
             draw_text(
@@ -618,34 +691,53 @@ fn draw_toolbar(
         } else {
             glyphs::draw(gpu, *button, *r, ink, s);
         }
+        if c.property {
+            unsafe {
+                gpu.d2d.PopAxisAlignedClip();
+            }
+        }
     }
-    if let Some(context) = &layout.context {
+    if let Some(context) = &layout.context
+        && let Some(clip) = property_clip
+    {
         let properties: Vec<_> = layout
             .buttons
             .iter()
-            .filter(|(b, _, _)| {
-                matches!(
-                    b,
-                    ToolbarButton::Color(_) | ToolbarButton::Width | ToolbarButton::Strength
-                )
+            .filter(|c| {
+                c.live
+                    && matches!(
+                        c.button,
+                        ToolbarButton::Color(_) | ToolbarButton::Width | ToolbarButton::Strength
+                    )
             })
             .collect();
-        if let Some((_, r, _)) = properties.first() {
-            let end = properties.iter().map(|(_, r, _)| r.right).fold(0.0, f32::max);
+        if let Some(c) = properties.first() {
+            let end = properties.iter().map(|c| c.rect.right).fold(0.0, f32::max);
             let x = layout.panel.right - 16.0 * s - context.w;
-            if x > end + 16.0 * s {
+            let context_opacity = properties.iter().map(|c| c.opacity).fold(1.0, f32::min);
+            if x > end + 16.0 * s && clip.bottom - clip.top > context.h + 8.0 * s {
                 draw_text(
                     gpu,
                     context,
                     x,
-                    r.top + (r.bottom - r.top - context.h) / 2.0,
-                    theme.text_muted,
+                    c.rect.top + (c.rect.bottom - c.rect.top - context.h) / 2.0,
+                    fade(theme.text_muted, layout.opacity * context_opacity),
                 );
             }
         }
     }
-    // Reveal the control name and shortcut on demand; no permanent wall of instructions.
-    if let Some(hovered) = toolbar.hovered.filter(|b| *b != ToolbarButton::Surface) {
+    unsafe {
+        gpu.d2d.PopAxisAlignedClip();
+    }
+    // Tooltip comes in after the hover highlight and fades as the pointer moves away.
+    if let Some(control) = layout
+        .buttons
+        .iter()
+        .filter(|c| c.live && c.enabled && c.hover > 0.6)
+        .max_by(|a, b| a.hover.total_cmp(&b.hover))
+    {
+        let hovered = control.button;
+        let tip_opacity = layout.opacity * control.opacity * ((control.hover - 0.6) / 0.4).clamp(0.0, 1.0);
         let value = match hovered {
             ToolbarButton::Copy => "Копировать · Enter / Ctrl+C".into(),
             ToolbarButton::Save => "Сохранить · Ctrl+S".into(),
@@ -661,10 +753,7 @@ fn draw_toolbar(
         let tip = measure(shared, &text.label, &value)?;
         let rw = tip.w + 24.0 * s;
         let rh = tip.h + 16.0 * s;
-        // A keyboard tool change can remove the previously hovered property before the mouse moves.
-        let Some((_, target, _)) = layout.buttons.iter().find(|b| b.0 == hovered) else {
-            return Ok(());
-        };
+        let target = control.rect;
         let x = ((target.left + target.right - rw) / 2.0).clamp(8.0 * s, (size.0 - rw - 8.0 * s).max(8.0 * s));
         let y = if layout.panel.top > rh + 16.0 * s {
             layout.panel.top - rh - 8.0 * s
@@ -672,11 +761,29 @@ fn draw_toolbar(
             layout.panel.bottom + 8.0 * s
         };
         if y + rh <= size.1 {
-            panel(gpu, theme, rect(x, y, x + rw, y + rh), 8.0 * s, s);
-            draw_text(gpu, &tip, x + 12.0 * s, y + 8.0 * s, theme.text);
+            let y = y + 4.0 * s * (1.0 - tip_opacity);
+            let mut tip_theme = *theme;
+            tip_theme.surface = fade(theme.surface, tip_opacity);
+            tip_theme.border = fade(theme.border, tip_opacity);
+            panel(gpu, &tip_theme, rect(x, y, x + rw, y + rh), 8.0 * s, s);
+            draw_text(gpu, &tip, x + 12.0 * s, y + 8.0 * s, fade(theme.text, tip_opacity));
         }
     }
     Ok(())
+}
+
+fn fade(mut c: D2D1_COLOR_F, a: f32) -> D2D1_COLOR_F {
+    c.a *= a.clamp(0.0, 1.0);
+    c
+}
+fn mix(a: D2D1_COLOR_F, b: D2D1_COLOR_F, t: f32) -> D2D1_COLOR_F {
+    let t = t.clamp(0.0, 1.0);
+    D2D1_COLOR_F {
+        r: a.r + (b.r - a.r) * t,
+        g: a.g + (b.g - a.g) * t,
+        b: a.b + (b.b - a.b) * t,
+        a: a.a + (b.a - a.a) * t,
+    }
 }
 
 fn fill_rounded(gpu: &Gpu, color: D2D1_COLOR_F, r: D2D_RECT_F, radius: f32) {
@@ -1174,6 +1281,115 @@ fn intersect(a: D2D_RECT_F, b: D2D_RECT_F) -> Option<D2D_RECT_F> {
 #[cfg(test)]
 mod toolbar_tests {
     use super::*;
+    #[test]
+    fn replacing_palette_with_blur_controls_does_not_ghost_two_different_glyphs() {
+        let shared = Shared::new().unwrap();
+        let text = TextStyles::new(&shared, 1.0).unwrap();
+        text.enable_motion(true);
+        let e = EditorBar {
+            tool: Tool::Rectangle,
+            color: 0,
+            width: 3,
+            strength: 1,
+            undo: true,
+            redo: false,
+        };
+        let sel = rect(100.0, 100.0, 900.0, 500.0);
+        let palette = toolbar_layout(&shared, &text, (1280.0, 720.0), 1.0, sel, Some(e))
+            .unwrap()
+            .unwrap();
+        text.set_animation_time(Some(0.0));
+        text.displayed(&palette, Some(e), Some(None), 1.0);
+        text.set_animation_time(Some(0.7));
+        text.displayed(&palette, Some(e), Some(None), 1.0);
+        let next_e = EditorBar {
+            tool: Tool::BlurBrush,
+            ..e
+        };
+        let blur = toolbar_layout(&shared, &text, (1280.0, 720.0), 1.0, sel, Some(next_e))
+            .unwrap()
+            .unwrap();
+        for i in 0..40 {
+            text.set_animation_time(Some(1.0 + i as f64 / 170.0));
+            let pose = text.displayed(&blur, Some(next_e), Some(None), 1.0);
+            let old = pose
+                .buttons
+                .iter()
+                .any(|c| matches!(c.button, ToolbarButton::Color(_)) && c.opacity > 0.02);
+            let new = pose
+                .buttons
+                .iter()
+                .any(|c| c.button == ToolbarButton::Tool(Tool::BlurBrush) && c.opacity > 0.02);
+            assert!(!(old && new), "unrelated property controls overlap on frame {i}");
+        }
+    }
+    #[test]
+    fn animated_panel_opens_between_frames_and_hit_testing_uses_its_visible_buttons() {
+        let shared = Shared::new().unwrap();
+        let text = TextStyles::new(&shared, 1.0).unwrap();
+        text.enable_motion(true);
+        let sel = rect(100.0, 100.0, 900.0, 500.0);
+        let e = EditorBar {
+            tool: Tool::Select,
+            color: 0,
+            width: 3,
+            strength: 1,
+            undo: true,
+            redo: false,
+        };
+        let first = toolbar_layout(&shared, &text, (1280.0, 720.0), 1.0, sel, Some(e))
+            .unwrap()
+            .unwrap();
+        text.set_animation_time(Some(0.0));
+        text.displayed(&first, Some(e), Some(None), 1.0);
+        text.set_animation_time(Some(0.7));
+        let before = text.displayed(&first, Some(e), Some(None), 1.0);
+        let next_e = EditorBar {
+            tool: Tool::Rectangle,
+            ..e
+        };
+        let next = toolbar_layout(&shared, &text, (1280.0, 720.0), 1.0, sel, Some(next_e))
+            .unwrap()
+            .unwrap();
+        text.set_animation_time(Some(1.0));
+        let start = text.displayed(&next, Some(next_e), Some(None), 1.0);
+        assert!((start.panel.bottom - before.panel.bottom).abs() < 0.01);
+        text.set_animation_time(Some(1.0 + 1.0 / 170.0));
+        let moving = text.displayed(&next, Some(next_e), Some(None), 1.0);
+        assert!(moving.panel.bottom > before.panel.bottom && moving.panel.bottom < next.panel.bottom);
+        let copy = moving
+            .buttons
+            .iter()
+            .find(|c| c.button == ToolbarButton::Copy)
+            .unwrap()
+            .rect;
+        assert_eq!(
+            toolbar_hit(
+                &shared,
+                &text,
+                RECT {
+                    left: 0,
+                    top: 0,
+                    right: 1280,
+                    bottom: 720
+                },
+                1.0,
+                RECT {
+                    left: 100,
+                    top: 100,
+                    right: 900,
+                    bottom: 500
+                },
+                ((copy.left + copy.right) as i32 / 2, (copy.top + copy.bottom) as i32 / 2),
+                Some(next_e)
+            ),
+            Some(ToolbarButton::Copy)
+        );
+        text.enable_motion(false);
+        let reduced = text.displayed(&next, Some(next_e), Some(None), 1.0);
+        assert_eq!(reduced.panel.bottom, next.panel.bottom);
+        assert!(!text.animations_pending());
+    }
     #[test]
     fn changing_tool_while_a_property_is_hovered_does_not_crash_the_next_frame() {
         use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
