@@ -36,6 +36,8 @@ pub struct Save {
     /// Пусто — «Изображения\Screenshots».
     pub folder: String,
     pub notify: bool,
+    /// Floating thumbnail in the corner after a capture.
+    pub thumbnail: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -98,7 +100,7 @@ impl Default for Capture {
 
 impl Default for Save {
     fn default() -> Self {
-        Self { folder: String::new(), notify: true }
+        Self { folder: String::new(), notify: true, thumbnail: true }
     }
 }
 
@@ -119,6 +121,7 @@ warm = true   # держать захват наготове: ~8 мс вмест
 [save]
 folder = ""     # пусто — «Изображения\Screenshots»
 notify = true   # уведомление после сохранения
+thumbnail = true  # миниатюра в углу: перетащите в чат, клик — открыть
 
 [recent]
 enabled = true  # сохранять несохранённые снимки зашифрованно

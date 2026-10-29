@@ -72,6 +72,8 @@ const WM_APP_CONFIG: u32 = WM_APP + 5;
 const WM_APP_RECENT: u32 = WM_APP + 6;
 const WM_APP_RECENT_UI: u32 = WM_APP + 7;
 const WM_APP_PIN: u32 = WM_APP + 8;
+/// The corner thumbnail asked to reopen a capture or reveal its file.
+const WM_APP_THUMB: u32 = WM_APP + 9;
 const TIMER_HOOK_CHECK: usize = 1;
 const TIMER_DRAFT: usize = 2;
 
@@ -136,6 +138,8 @@ pub struct App {
     config_path: PathBuf,
     watcher: Watcher,
     pending_config: Option<Config>,
+    /// Thumbnail waiting for the overlay to finish its closing motion.
+    thumb_pending: Option<crate::thumbnail::Shot>,
     warm_override: Option<bool>,
     /// Последняя вручную выделенная область; быстрый снимок монитора её не заменяет.
     last_region: Option<DocRect>,
@@ -237,6 +241,7 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
             config_path,
             watcher,
             pending_config: None,
+            thumb_pending: None,
             warm_override,
             last_region: None,
             recent,
@@ -663,13 +668,16 @@ impl App {
                     Ok(image) => {
                         // В «Недавние» не пишем: снимок уже в буфере, а десяток быстрых снимков
                         // вытеснил бы несохранённую ручную область, ради которой «Недавние» и есть.
-                        self.copy_image(Arc::new(image));
+                        let image = Arc::new(image);
+                        self.copy_image(image.clone());
                         log_info!(
                             "быстрый снимок {mode:?}: {}×{}, {:.1} мс",
                             region.width(),
                             region.height(),
                             perf::ms(t, perf::now())
                         );
+                        let anchor = ((region.left + region.right) / 2, (region.top + region.bottom) / 2);
+                        self.offer_thumbnail(image, None, None, anchor);
                     }
                     Err(e) => {
                         log_warn!("быстрый снимок: {e}");
@@ -1066,26 +1074,80 @@ impl App {
             .active
             .as_ref()
             .and_then(|a| a.draft.as_ref().map(|d| d.token.clone()));
+        // The thumbnail appears on the monitor the capture came from.
+        let anchor = self
+            .active
+            .as_ref()
+            .and_then(|a| a.session.selection())
+            .map_or((0, 0), |r| ((r.left + r.right) / 2, (r.top + r.bottom) / 2));
+        let image = Arc::new(image);
         // The result is ready at once; the overlay then plays its short closing motion.
         match how {
             Export::Copy => {
-                self.copy_image(Arc::new(image));
+                self.copy_image(image.clone());
                 self.begin_exit(true, None);
+                self.offer_thumbnail(image, None, draft.map(|d| d.id), anchor);
             }
             Export::Save => {
                 let path = file::unique_path(&self.save_folder(), &file::timestamp_name());
-                self.save(path, image, draft);
+                self.save(path.clone(), image.clone(), draft);
                 self.begin_exit(true, None);
+                self.offer_thumbnail(image, Some(path), None, anchor);
             }
-            Export::SaveAs => self.begin_exit(false, Some((image, draft))),
+            Export::SaveAs => self.begin_exit(false, Some((image, draft, anchor))),
         }
     }
 
-    fn ask_save_as(&mut self, image: Image, draft: Option<crate::recent_worker::Token>) {
+    pub(super) fn ask_save_as(
+        &mut self,
+        image: Arc<Image>,
+        draft: Option<crate::recent_worker::Token>,
+        anchor: (i32, i32),
+    ) {
         match file::ask_path(&self.save_folder(), &file::timestamp_name()) {
-            Ok(Some(path)) => self.save(path, image, draft),
+            Ok(Some(path)) => {
+                self.save(path.clone(), image.clone(), draft);
+                self.offer_thumbnail(image, Some(path), None, anchor);
+            }
             Ok(None) => {}
             Err(e) => log_warn!("диалог «Сохранить как»: {e}"),
+        }
+    }
+
+    /// Shows the corner thumbnail now, or once the overlay has finished leaving.
+    fn offer_thumbnail(&mut self, image: Arc<Image>, path: Option<PathBuf>, draft: Option<String>, anchor: (i32, i32)) {
+        if !self.config.save.thumbnail || self.bench_mode {
+            return;
+        }
+        let shot = crate::thumbnail::Shot { image, path, draft, anchor };
+        if self.exit.is_some() {
+            self.thumb_pending = Some(shot);
+        } else {
+            crate::thumbnail::show(self.instance, self.hwnd, WM_APP_THUMB, shot);
+        }
+    }
+
+    pub(super) fn show_pending_thumbnail(&mut self) {
+        if let Some(shot) = self.thumb_pending.take() {
+            crate::thumbnail::show(self.instance, self.hwnd, WM_APP_THUMB, shot);
+        }
+    }
+
+    fn on_thumbnail(&mut self) {
+        match crate::thumbnail::take_request() {
+            Some(crate::thumbnail::Request::Edit(id)) => {
+                if self.active.is_none() && !self.loading_recent {
+                    self.loading_recent = true;
+                    if !self.recent.send(crate::recent_worker::Command::Load(id)) {
+                        self.loading_recent = false;
+                    }
+                }
+            }
+            Some(crate::thumbnail::Request::Reveal(path)) => {
+                self.last_saved = Some(path);
+                self.open_last_saved();
+            }
+            None => {}
         }
     }
 
@@ -1130,7 +1192,7 @@ impl App {
     }
 
     /// Кодирование и запись — в фоне: оверлей уже закрыт, ждать нечего.
-    fn save(&self, path: PathBuf, image: Image, draft: Option<crate::recent_worker::Token>) {
+    fn save(&self, path: PathBuf, image: Arc<Image>, draft: Option<crate::recent_worker::Token>) {
         let (tx, host) = (self.saved_tx.clone(), self.hwnd.0 as isize);
         std::thread::spawn(move || {
             let result = file::write_png(&path, &image)
@@ -1403,6 +1465,7 @@ unsafe extern "system" fn host_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         WM_APP_CONFIG => with_app(App::on_config),
         WM_APP_RECENT => with_app(App::on_recent),
         WM_APP_RECENT_UI => with_app(App::on_recent_ui),
+        WM_APP_THUMB => with_app(App::on_thumbnail),
         WM_APP_PIN => with_app(App::on_pin),
         WM_RENDERFORMAT => with_app(|app| {
             if let Some(image) = &app.clipboard {

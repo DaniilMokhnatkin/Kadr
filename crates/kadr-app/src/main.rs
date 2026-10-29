@@ -23,6 +23,7 @@ mod pin_window;
 mod recent_window;
 mod recent_worker;
 mod snapshot;
+mod thumbnail;
 
 use std::error::Error;
 

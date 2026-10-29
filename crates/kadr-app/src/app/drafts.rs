@@ -14,6 +14,12 @@ pub(super) struct DraftState {
 impl App {
     pub(super) fn hide_recent_before_capture(&mut self) {
         self.finish_paused();
+        // The corner thumbnail is topmost: it must not end up in the next capture.
+        if crate::thumbnail::hide_now() {
+            unsafe {
+                let _ = DwmFlush();
+            }
+        }
         if let Some(window) = &self.recent_window
             && unsafe { IsWindowVisible(window.hwnd) }.as_bool()
         {

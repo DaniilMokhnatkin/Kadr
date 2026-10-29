@@ -185,6 +185,14 @@ pub fn design_set(dir: &str) -> Result<(), Box<dyn Error>> {
                 None,
             )?;
         }
+        let thumb = std::sync::Arc::new(kadr_doc::Image::new(
+            kadr_doc::Rect::new(0, 0, 1280, 720),
+            background(1280, 720),
+        ));
+        std::fs::write(
+            dir.join(format!("thumbnail-{}.png", (scale * 100.0) as i32)),
+            kadr_doc::pixels::encode_png(&crate::thumbnail::preview(thumb, scale)?)?,
+        )?;
         for (name, n, loading, error) in [
             ("recent", 6, false, None),
             ("recent-full", 10, false, None),
