@@ -27,6 +27,7 @@ impl App {
         }
         if !kadr_render::theme::motion_enabled() {
             self.close_session();
+            self.show_pending_thumbnail();
             if let Some((image, draft, anchor)) = save_as {
                 self.ask_save_as(image, draft, anchor);
             }

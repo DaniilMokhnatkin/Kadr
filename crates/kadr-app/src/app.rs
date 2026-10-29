@@ -19,7 +19,7 @@ use windows::Win32::UI::HiDpi::{
     AreDpiAwarenessContextsEqual, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetThreadDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey,
+    GetKeyState, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey, VK_MENU,
     ReleaseCapture, SetCapture, UnregisterHotKey, VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN,
     VK_RIGHT, VK_SHIFT, VK_SNAPSHOT, VK_SPACE, VK_UP,
 };
@@ -54,6 +54,7 @@ mod editor_input;
 mod pacing;
 mod pins;
 mod settings;
+mod text;
 
 const HK_PRTSC: i32 = 1;
 const HK_BACKUP: i32 = 2;
@@ -74,6 +75,8 @@ const WM_APP_RECENT_UI: u32 = WM_APP + 7;
 const WM_APP_PIN: u32 = WM_APP + 8;
 /// The corner thumbnail asked to reopen a capture or reveal its file.
 const WM_APP_THUMB: u32 = WM_APP + 9;
+/// Text recognition or translation finished on its worker.
+const WM_APP_TEXT: u32 = WM_APP + 10;
 const TIMER_HOOK_CHECK: usize = 1;
 const TIMER_DRAFT: usize = 2;
 
@@ -140,6 +143,10 @@ pub struct App {
     pending_config: Option<Config>,
     /// Thumbnail waiting for the overlay to finish its closing motion.
     thumb_pending: Option<crate::thumbnail::Shot>,
+    /// Bubble waiting for the overlay to leave: where to show it and what it says so far.
+    bubble_pending: Option<(DocRect, crate::bubble::Content)>,
+    text_tx: Sender<text::TextResult>,
+    text_rx: Receiver<text::TextResult>,
     warm_override: Option<bool>,
     /// Последняя вручную выделенная область; быстрый снимок монитора её не заменяет.
     last_region: Option<DocRect>,
@@ -211,6 +218,7 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
         TASKBAR_CREATED.store(RegisterWindowMessageW(w!("TaskbarCreated")), Relaxed);
 
         let (saved_tx, saved_rx) = channel();
+        let (text_tx, text_rx) = channel();
         let config_path = config::path();
         let (config, config_error) = config::load(&config_path);
         let warm = warm_override.unwrap_or(config.capture.warm);
@@ -242,6 +250,9 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
             watcher,
             pending_config: None,
             thumb_pending: None,
+            bubble_pending: None,
+            text_tx,
+            text_rx,
             warm_override,
             last_region: None,
             recent,
@@ -980,6 +991,11 @@ impl App {
     }
 
     fn on_pointer(&mut self, hwnd: HWND, msg: u32, p: DocPoint) {
+        // Alt+click on text translates the paragraph under the pointer.
+        if msg == WM_LBUTTONDOWN && unsafe { GetKeyState(i32::from(VK_MENU.0)) } < 0 {
+            self.quick_translate(p);
+            return;
+        }
         let hit = self.toolbar_at(POINT { x: p.x, y: p.y });
         let Some(active) = &mut self.active else {
             return;
@@ -1025,6 +1041,15 @@ impl App {
             }
             if vk == 0x48 {
                 self.show_recent();
+                return;
+            }
+            // Ctrl+Shift+C: the text in the selection; Ctrl+T: its translation.
+            if vk == 0x43 && mods().shift {
+                self.copy_text();
+                return;
+            }
+            if vk == 0x54 {
+                self.translate_selection();
                 return;
             }
         }
@@ -1128,6 +1153,7 @@ impl App {
     }
 
     pub(super) fn show_pending_thumbnail(&mut self) {
+        self.show_pending_bubble();
         if let Some(shot) = self.thumb_pending.take() {
             crate::thumbnail::show(self.instance, self.hwnd, WM_APP_THUMB, shot);
         }
@@ -1295,6 +1321,8 @@ impl App {
             ToolbarButton::Close => self.begin_exit(false, None),
             ToolbarButton::Pin => self.pin(),
             ToolbarButton::Recent => self.show_recent(),
+            ToolbarButton::Text => self.copy_text(),
+            ToolbarButton::Translate => self.translate_selection(),
             _ => self.editor_button(button),
         }
     }
@@ -1466,6 +1494,7 @@ unsafe extern "system" fn host_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         WM_APP_RECENT => with_app(App::on_recent),
         WM_APP_RECENT_UI => with_app(App::on_recent_ui),
         WM_APP_THUMB => with_app(App::on_thumbnail),
+        WM_APP_TEXT => with_app(App::on_text_result),
         WM_APP_PIN => with_app(App::on_pin),
         WM_RENDERFORMAT => with_app(|app| {
             if let Some(image) = &app.clipboard {

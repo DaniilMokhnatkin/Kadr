@@ -162,6 +162,10 @@ pub enum ToolbarButton {
     SaveAs,
     Pin,
     Recent,
+    /// Recognise the text in the selection and copy it.
+    Text,
+    /// Recognise and translate into Russian.
+    Translate,
     Close,
     Tool(Tool),
     Color(usize),
@@ -172,12 +176,14 @@ pub enum ToolbarButton {
 }
 
 impl ToolbarButton {
-    pub const ALL: [ToolbarButton; 6] = [
+    pub const ALL: [ToolbarButton; 8] = [
         Self::Copy,
         Self::Save,
         Self::SaveAs,
         Self::Pin,
         Self::Recent,
+        Self::Text,
+        Self::Translate,
         Self::Close,
     ];
 
@@ -189,6 +195,8 @@ impl ToolbarButton {
             Self::SaveAs => "Сохранить как…",
             Self::Pin => "Закрепить",
             Self::Recent => "Недавние",
+            Self::Text => "Скопировать текст",
+            Self::Translate => "Перевести",
             Self::Close => "Закрыть",
             Self::Tool(tool) => tool.label(),
             Self::Color(_) => "Цвет",
@@ -521,6 +529,8 @@ fn build_toolbar_layout(
             ToolbarButton::Redo,
             ToolbarButton::Recent,
             ToolbarButton::Pin,
+            ToolbarButton::Text,
+            ToolbarButton::Translate,
             ToolbarButton::SaveAs,
             ToolbarButton::Save,
             ToolbarButton::Close,
@@ -530,6 +540,8 @@ fn build_toolbar_layout(
         vec![
             ToolbarButton::Recent,
             ToolbarButton::Pin,
+            ToolbarButton::Text,
+            ToolbarButton::Translate,
             ToolbarButton::SaveAs,
             ToolbarButton::Save,
             ToolbarButton::Close,
@@ -821,6 +833,8 @@ fn draw_toolbar(
             ToolbarButton::Save => "Сохранить · Ctrl+S".into(),
             ToolbarButton::SaveAs => "Сохранить как… · Ctrl+Shift+S".into(),
             ToolbarButton::Pin => "Закрепить · Ctrl+D".into(),
+            ToolbarButton::Text => "Скопировать текст · Ctrl+Shift+C".into(),
+            ToolbarButton::Translate => "Перевести на русский · Ctrl+T".into(),
             ToolbarButton::Recent => "Недавние · Ctrl+H".into(),
             ToolbarButton::Close => "Закрыть · Esc".into(),
             ToolbarButton::Width => "Толщина · [ / ] · колесо".into(),

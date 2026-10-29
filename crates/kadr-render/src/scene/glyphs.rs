@@ -166,6 +166,24 @@ pub(super) fn draw(gpu: &Gpu, button: ToolbarButton, r: D2D_RECT_F, ink: D2D1_CO
             ellipse(13.0, 13.0, 8.0, 8.0);
             path(&[(13.0, 8.0), (13.0, 13.0), (17.0, 15.0)]);
         }
+        // Scan corners around a T: «text from the picture».
+        ToolbarButton::Text => {
+            path(&[(3.0, 8.0), (3.0, 3.0), (8.0, 3.0)]);
+            path(&[(16.0, 3.0), (21.0, 3.0), (21.0, 8.0)]);
+            path(&[(3.0, 16.0), (3.0, 21.0), (8.0, 21.0)]);
+            path(&[(16.0, 21.0), (21.0, 21.0), (21.0, 16.0)]);
+            line(8.0, 8.0, 16.0, 8.0);
+            line(12.0, 8.0, 12.0, 17.0);
+        }
+        // A Latin A beside a CJK-like character: the usual translate mark.
+        ToolbarButton::Translate => {
+            path(&[(2.5, 20.0), (7.0, 7.0), (11.5, 20.0)]);
+            line(4.4, 15.0, 9.6, 15.0);
+            line(13.0, 6.0, 21.5, 6.0);
+            line(17.25, 3.0, 17.25, 6.0);
+            line(14.0, 9.0, 21.0, 20.0);
+            line(21.0, 9.0, 14.0, 20.0);
+        }
         ToolbarButton::Close => {
             line(6.0, 6.0, 18.0, 18.0);
             line(18.0, 6.0, 6.0, 18.0);

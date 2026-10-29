@@ -10,6 +10,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod bubble;
 mod capture_mode;
 mod chrome;
 mod config_watch;
