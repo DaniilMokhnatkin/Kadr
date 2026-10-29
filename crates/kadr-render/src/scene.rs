@@ -1169,7 +1169,6 @@ fn draw_magnifier(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 /// «[Alt] + клик по тексту — перевод»: a quiet card at the top of the screen under the pointer,
 /// so the gesture can be discovered without reading anything elsewhere.
 fn draw_hint(gpu: &Gpu, shared: &Shared, text: &TextStyles, theme: &Theme, scene: &Scene, a: f32) -> Result<()> {
@@ -1203,6 +1202,7 @@ fn draw_hint(gpu: &Gpu, shared: &Shared, text: &TextStyles, theme: &Theme, scene
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn size_label(
     gpu: &Gpu,
     shared: &Shared,
