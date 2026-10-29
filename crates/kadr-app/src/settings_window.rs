@@ -319,7 +319,7 @@ pub fn show(instance: HINSTANCE, host: HWND, message: u32, config: &Config) {
                 WS_EX_NOREDIRECTIONBITMAP,
                 w!("KadrSettings"),
                 w!("Настройки — Kadr"),
-                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+                WS_OVERLAPPED | WS_CAPTION,
                 0,
                 0,
                 560,

@@ -357,7 +357,7 @@ impl Window {
                 WS_EX_TOPMOST | WS_EX_NOREDIRECTIONBITMAP,
                 w!("KadrRecent"),
                 w!("Недавние — Kadr"),
-                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                WS_OVERLAPPED | WS_CAPTION,
                 0,
                 0,
                 (WIDTH * scale) as i32,
