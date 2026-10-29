@@ -15,8 +15,10 @@ use windows::Win32::Graphics::DirectWrite::{
 use windows::core::{PCWSTR, Result, w};
 use windows_numerics::Vector2;
 
+use crate::annotations::{self, Cache, View};
 use crate::gpu::{Gpu, Shared};
 use crate::theme::{Theme, dip};
+use kadr_doc::annotation::{COLORS, Tool};
 
 struct Style {
     format: IDWriteTextFormat,
@@ -36,7 +38,10 @@ pub struct TextStyles {
 impl TextStyles {
     pub fn new(shared: &Shared, scale: f32) -> Result<Self> {
         let style = |weight, size: f32, tabular| -> Result<Style> {
-            Ok(Style { format: text_format(shared, weight, size * scale)?, tabular })
+            Ok(Style {
+                format: text_format(shared, weight, size * scale)?,
+                tabular,
+            })
         };
         Ok(Self {
             label: style(DWRITE_FONT_WEIGHT_REGULAR, dip::TEXT, false)?,
@@ -57,7 +62,11 @@ pub struct HudRow {
 
 impl HudRow {
     pub fn new(label: &str, value: String, unit: &str) -> Self {
-        Self { label: label.into(), value, unit: unit.into() }
+        Self {
+            label: label.into(),
+            value,
+            unit: unit.into(),
+        }
     }
 }
 
@@ -91,17 +100,29 @@ pub enum ToolbarButton {
     Save,
     SaveAs,
     Close,
+    Tool(Tool),
+    Color(usize),
+    Width,
+    Strength,
+    Undo,
+    Redo,
 }
 
 impl ToolbarButton {
     pub const ALL: [ToolbarButton; 4] = [Self::Copy, Self::Save, Self::SaveAs, Self::Close];
 
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::Copy => "Копировать",
             Self::Save => "Сохранить",
             Self::SaveAs => "Сохранить как…",
             Self::Close => "Закрыть",
+            Self::Tool(tool) => tool.label(),
+            Self::Color(_) => "Цвет",
+            Self::Width => "Толщина",
+            Self::Strength => "Сила",
+            Self::Undo => "Назад Z",
+            Self::Redo => "Повтор Y",
         }
     }
 }
@@ -110,6 +131,16 @@ impl ToolbarButton {
 #[derive(Clone, Copy, Default)]
 pub struct Toolbar {
     pub hovered: Option<ToolbarButton>,
+    pub editor: Option<EditorBar>,
+}
+#[derive(Clone, Copy)]
+pub struct EditorBar {
+    pub tool: Tool,
+    pub color: usize,
+    pub width: u32,
+    pub strength: u8,
+    pub undo: bool,
+    pub redo: bool,
 }
 
 /// Что нарисовать поверх кадра. Одинаково для всех мониторов: каждый рисует свою часть.
@@ -122,6 +153,7 @@ pub struct Marks<'a> {
     pub magnifier: Option<&'a Magnifier>,
     pub toolbar: Option<Toolbar>,
     pub hud: Option<&'a Hud>,
+    pub drawing: Option<View<'a>>,
 }
 
 pub struct Scene<'a> {
@@ -133,7 +165,14 @@ pub struct Scene<'a> {
     pub marks: Marks<'a>,
 }
 
-pub fn draw(gpu: &Gpu, shared: &Shared, text: &TextStyles, theme: &Theme, scene: &Scene) -> Result<()> {
+pub fn draw(
+    gpu: &Gpu,
+    shared: &Shared,
+    text: &TextStyles,
+    theme: &Theme,
+    scene: &Scene,
+    cache: &mut Cache,
+) -> Result<()> {
     let full = rect(0.0, 0.0, scene.size.0 as f32, scene.size.1 as f32);
     unsafe {
         match scene.frame {
@@ -149,9 +188,24 @@ pub fn draw(gpu: &Gpu, shared: &Shared, text: &TextStyles, theme: &Theme, scene:
         }
     }
 
+    if let Some(drawing) = scene.marks.drawing {
+        annotations::draw(
+            gpu,
+            shared,
+            kadr_doc::Point::new(scene.origin.0, scene.origin.1),
+            drawing,
+            cache,
+        )?;
+    }
+
     let (ox, oy) = (scene.origin.0, scene.origin.1);
     let selection = scene.marks.selection.map(|s| {
-        rect((s.left - ox) as f32, (s.top - oy) as f32, (s.right - ox) as f32, (s.bottom - oy) as f32)
+        rect(
+            (s.left - ox) as f32,
+            (s.top - oy) as f32,
+            (s.right - ox) as f32,
+            (s.bottom - oy) as f32,
+        )
     });
 
     match selection.and_then(|s| intersect(s, full)) {
@@ -172,6 +226,16 @@ pub fn draw(gpu: &Gpu, shared: &Shared, text: &TextStyles, theme: &Theme, scene:
         ring(gpu, theme.frame, sel, line);
         if scene.marks.handles {
             draw_handles(gpu, theme, sel, line, scene.scale);
+        }
+        if let Some(bounds) = scene.marks.drawing.and_then(|v| v.selected) {
+            let selected = rect(
+                (bounds.left - ox) as f32,
+                (bounds.top - oy) as f32,
+                (bounds.right - ox) as f32,
+                (bounds.bottom - oy) as f32,
+            );
+            ring(gpu, theme.frame, selected, line);
+            draw_handles(gpu, theme, selected, line, scene.scale);
         }
         let label = format!("{} × {}", screen.right - screen.left, screen.bottom - screen.top);
         size_label(gpu, shared, text, theme, scene, sel, line + outline, &label)?;
@@ -202,6 +266,7 @@ fn toolbar_layout(
     size: (f32, f32),
     scale: f32,
     sel: D2D_RECT_F,
+    editor: Option<EditorBar>,
 ) -> Result<Option<ToolbarLayout>> {
     let (w, h) = size;
     let (corner_x, corner_y) = (sel.right - 1.0, sel.bottom - 1.0);
@@ -213,12 +278,26 @@ fn toolbar_layout(
     let (button_x, button_y) = (dip::SPACE_3 * s, dip::SPACE_2 * s);
     let offset = (dip::SPACE_2 + dip::FRAME + dip::FRAME_OUTLINE) * s;
 
-    let labels =
-        ToolbarButton::ALL.iter().map(|b| Ok((*b, measure(shared, &text.button, b.label())?))).collect::<Result<Vec<_>>>()?;
+    let labels = ToolbarButton::ALL
+        .iter()
+        .map(|b| Ok((*b, measure(shared, &text.button, b.label())?)))
+        .collect::<Result<Vec<_>>>()?;
     let button_h = (labels.iter().map(|(_, t)| t.h).fold(0.0, f32::max) + button_y * 2.0).ceil();
     let widths: Vec<f32> = labels.iter().map(|(_, t)| (t.w + button_x * 2.0).ceil()).collect();
-    let panel_w = pad * 2.0 + widths.iter().sum::<f32>() + gap * (widths.len() - 1) as f32;
-    let panel_h = button_h + pad * 2.0;
+    let export_w = pad * 2.0 + widths.iter().sum::<f32>() + gap * (widths.len() - 1) as f32;
+    let columns = 7usize;
+    let editor_w = if editor.is_some() {
+        (660.0 * s).min(w - 8.0 * s)
+    } else {
+        0.0
+    };
+    let panel_w = export_w.max(editor_w).min(w);
+    let extra = if editor.is_some() {
+        3.0 * (button_h + gap) + 24.0 * s
+    } else {
+        0.0
+    };
+    let panel_h = button_h + pad * 2.0 + extra;
 
     let mut y = sel.bottom + offset;
     if y + panel_h > h {
@@ -231,16 +310,53 @@ fn toolbar_layout(
     let y = y.clamp(0.0, (h - panel_h).max(0.0)).round();
 
     let mut left = x + pad;
-    let buttons = labels
+    let mut buttons: Vec<_> = labels
         .into_iter()
         .zip(widths)
         .map(|((button, label), width)| {
-            let r = rect(left, y + pad, left + width, y + pad + button_h);
+            let r = rect(left, y + pad + extra, left + width, y + pad + button_h + extra);
             left += width + gap;
             (button, r, label)
         })
         .collect();
-    Ok(Some(ToolbarLayout { panel: rect(x, y, x + panel_w, y + panel_h), buttons }))
+    if let Some(editor) = editor {
+        let cell = (panel_w - 2.0 * pad - gap * (columns - 1) as f32) / columns as f32;
+        for (i, tool) in Tool::ALL.into_iter().enumerate() {
+            let l = x + pad + (i % columns) as f32 * (cell + gap);
+            let t = y + pad + (i / columns) as f32 * (button_h + gap);
+            buttons.push((
+                ToolbarButton::Tool(tool),
+                rect(l, t, l + cell, t + button_h),
+                measure(shared, &text.label, tool.label())?,
+            ));
+        }
+        let t = y + pad + 2.0 * (button_h + gap);
+        let mut l = x + pad;
+        for i in 0..COLORS.len() {
+            let cw = 26.0 * s;
+            buttons.push((
+                ToolbarButton::Color(i),
+                rect(l, t, l + cw, t + button_h),
+                measure(shared, &text.button, "")?,
+            ));
+            l += cw + gap;
+        }
+        for (button, label) in [
+            (ToolbarButton::Width, format!("{} px", editor.width)),
+            (ToolbarButton::Strength, format!("Сила {}", editor.strength + 1)),
+            (ToolbarButton::Undo, "Назад Z".into()),
+            (ToolbarButton::Redo, "Повтор Y".into()),
+        ] {
+            let label = measure(shared, &text.button, &label)?;
+            let bw = label.w + button_x * 2.0;
+            buttons.push((button, rect(l, t, l + bw, t + button_h), label));
+            l += bw + gap;
+        }
+    }
+    Ok(Some(ToolbarLayout {
+        panel: rect(x, y, x + panel_w, y + panel_h),
+        buttons,
+    }))
 }
 
 /// Какая кнопка панели под точкой `at` (координаты экрана) — по той же раскладке, что и отрисовка.
@@ -251,18 +367,26 @@ pub fn toolbar_hit(
     scale: f32,
     selection: RECT,
     at: (i32, i32),
+    editor: Option<EditorBar>,
 ) -> Option<ToolbarButton> {
     let (ox, oy) = (surface.left, surface.top);
-    let size = ((surface.right - surface.left) as f32, (surface.bottom - surface.top) as f32);
+    let size = (
+        (surface.right - surface.left) as f32,
+        (surface.bottom - surface.top) as f32,
+    );
     let sel = rect(
         (selection.left - ox) as f32,
         (selection.top - oy) as f32,
         (selection.right - ox) as f32,
         (selection.bottom - oy) as f32,
     );
-    let layout = toolbar_layout(shared, text, size, scale, sel).ok()??;
+    let layout = toolbar_layout(shared, text, size, scale, sel, editor).ok()??;
     let (x, y) = ((at.0 - ox) as f32, (at.1 - oy) as f32);
-    layout.buttons.into_iter().find(|(_, r, _)| x >= r.left && x < r.right && y >= r.top && y < r.bottom).map(|(b, _, _)| b)
+    layout
+        .buttons
+        .into_iter()
+        .find(|(_, r, _)| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
+        .map(|(b, _, _)| b)
 }
 
 /// Основное действие — белая заливка (editorial: «filled white on black»), остальные — текстом,
@@ -277,13 +401,48 @@ fn draw_toolbar(
     toolbar: Toolbar,
 ) -> Result<()> {
     let size = (scene.size.0 as f32, scene.size.1 as f32);
-    let Some(layout) = toolbar_layout(shared, text, size, scene.scale, sel)? else { return Ok(()) };
+    let Some(layout) = toolbar_layout(shared, text, size, scene.scale, sel, toolbar.editor)? else {
+        return Ok(());
+    };
     let s = scene.scale;
     panel(gpu, theme, layout.panel, dip::RADIUS_MD * s, s);
     for (button, r, label) in &layout.buttons {
         let hovered = toolbar.hovered == Some(*button);
-        let ink = if *button == ToolbarButton::Copy {
-            fill_rounded(gpu, if hovered { theme.text } else { theme.frame }, *r, dip::RADIUS_SM * s);
+        if let ToolbarButton::Color(index) = button {
+            let c = COLORS[*index];
+            let ink = D2D1_COLOR_F {
+                r: c[0] as f32 / 255.0,
+                g: c[1] as f32 / 255.0,
+                b: c[2] as f32 / 255.0,
+                a: 1.0,
+            };
+            let swatch = rect(r.left + 5.0 * s, r.top + 7.0 * s, r.right - 5.0 * s, r.bottom - 7.0 * s);
+            fill(gpu, ink, swatch);
+            ring(gpu, theme.text_muted, swatch, s);
+            if toolbar.editor.is_some_and(|e| e.color == *index) {
+                ring(gpu, theme.text, *r, 2.0 * s);
+            }
+            continue;
+        }
+        let selected = matches!(button,ToolbarButton::Tool(tool) if toolbar.editor.is_some_and(|e|e.tool==*tool));
+        if selected {
+            fill_rounded(gpu, theme.border, *r, dip::RADIUS_SM * s);
+            ring(gpu, theme.text, *r, s);
+        }
+        let enabled = toolbar.editor.is_none_or(|e| match button {
+            ToolbarButton::Undo => e.undo,
+            ToolbarButton::Redo => e.redo,
+            _ => true,
+        });
+        let ink = if !enabled {
+            theme.text_muted
+        } else if *button == ToolbarButton::Copy {
+            fill_rounded(
+                gpu,
+                if hovered { theme.text } else { theme.frame },
+                *r,
+                dip::RADIUS_SM * s,
+            );
             theme.surface
         } else {
             if hovered {
@@ -291,7 +450,31 @@ fn draw_toolbar(
             }
             theme.text
         };
-        draw_text(gpu, label, r.left + (r.right - r.left - label.w) / 2.0, r.top + (r.bottom - r.top - label.h) / 2.0, ink);
+        draw_text(
+            gpu,
+            label,
+            r.left + (r.right - r.left - label.w) / 2.0,
+            r.top + (r.bottom - r.top - label.h) / 2.0,
+            ink,
+        );
+    }
+    if let Some(editor) = toolbar.editor {
+        let hint = if editor.tool.is_blur() {
+            "Размытие скрывает детали · Для паролей используйте «Скрыть»"
+        } else if editor.tool == Tool::Text {
+            "Введите текст · Enter — готово · Shift+Enter — строка · Esc — отменить"
+        } else {
+            "Tab — инструмент · 1–6 — цвет · Ctrl+Z / Y · Del · F2 — текст · [ / ] — толщина"
+        };
+        let hint = measure(shared, &text.label, hint)?;
+        let export_top = layout.buttons[0].1.top;
+        draw_text(
+            gpu,
+            &hint,
+            layout.panel.left + 8.0 * s,
+            export_top - 22.0 * s,
+            theme.text_muted,
+        );
     }
     Ok(())
 }
@@ -299,7 +482,14 @@ fn draw_toolbar(
 fn fill_rounded(gpu: &Gpu, color: D2D1_COLOR_F, r: D2D_RECT_F, radius: f32) {
     unsafe {
         gpu.brush.SetColor(&color);
-        gpu.d2d.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: r, radiusX: radius, radiusY: radius }, &gpu.brush);
+        gpu.d2d.FillRoundedRectangle(
+            &D2D1_ROUNDED_RECT {
+                rect: r,
+                radiusX: radius,
+                radiusY: radius,
+            },
+            &gpu.brush,
+        );
     }
 }
 
@@ -339,7 +529,9 @@ fn draw_magnifier(
     const SPAN: i32 = 15;
     let (w, h) = (scene.size.0 as f32, scene.size.1 as f32);
     let (cx, cy) = (magnifier.at.0 - scene.origin.0, magnifier.at.1 - scene.origin.1);
-    let Some(frame) = scene.frame else { return Ok(()) };
+    let Some(frame) = scene.frame else {
+        return Ok(());
+    };
     if cx < 0 || cy < 0 || cx as f32 >= w || cy as f32 >= h {
         return Ok(());
     }
@@ -351,7 +543,9 @@ fn draw_magnifier(
     let gap = (dip::SPACE_4 + dip::SPACE_2) * s;
 
     let coords = measure(shared, &text.figure, &format!("{}, {}", magnifier.at.0, magnifier.at.1))?;
-    let hex_text = magnifier.rgb.map_or("—".to_string(), |c| format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]));
+    let hex_text = magnifier
+        .rgb
+        .map_or("—".to_string(), |c| format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]));
     let hex = measure(shared, &text.figure, &hex_text)?;
     let info_h = (coords.h + pad * 2.0).ceil();
     let (pw, ph) = (zoom + border * 2.0, zoom + border * 3.0 + info_h);
@@ -373,7 +567,12 @@ fn draw_magnifier(
 
     let zoom_rect = rect(inner.left, inner.top, inner.left + zoom, inner.top + zoom);
     let half = SPAN / 2;
-    let source = rect((cx - half) as f32, (cy - half) as f32, (cx + half + 1) as f32, (cy + half + 1) as f32);
+    let source = rect(
+        (cx - half) as f32,
+        (cy - half) as f32,
+        (cx + half + 1) as f32,
+        (cy + half + 1) as f32,
+    );
     if let Some(visible) = intersect(source, rect(0.0, 0.0, w, h)) {
         let dest = rect(
             zoom_rect.left + (visible.left - source.left) * cell,
@@ -398,7 +597,11 @@ fn draw_magnifier(
     ring(gpu, theme.frame_outline, inflate(center, border), border);
     ring(gpu, theme.frame, center, border);
 
-    fill(gpu, theme.border, rect(inner.left, zoom_rect.bottom, inner.right, zoom_rect.bottom + border));
+    fill(
+        gpu,
+        theme.border,
+        rect(inner.left, zoom_rect.bottom, inner.right, zoom_rect.bottom + border),
+    );
     let text_y = zoom_rect.bottom + border + pad;
     draw_text(gpu, &coords, inner.left + pad, text_y, theme.text_muted);
     let hex_x = inner.right - pad - hex.w;
@@ -406,9 +609,21 @@ fn draw_magnifier(
     if let Some([r, g, b]) = magnifier.rgb {
         // Образец цвета — это данные, а не хром: единственное место хрома, где есть цвет.
         let side = (hex.h * 0.6).round();
-        let (sx, sy) = ((hex_x - side - dip::SPACE_2 * s).round(), (text_y + (hex.h - side) / 2.0).round());
-        fill(gpu, theme.border, rect(sx - border, sy - border, sx + side + border, sy + side + border));
-        let color = D2D1_COLOR_F { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: 1.0 };
+        let (sx, sy) = (
+            (hex_x - side - dip::SPACE_2 * s).round(),
+            (text_y + (hex.h - side) / 2.0).round(),
+        );
+        fill(
+            gpu,
+            theme.border,
+            rect(sx - border, sy - border, sx + side + border, sy + side + border),
+        );
+        let color = D2D1_COLOR_F {
+            r: r as f32 / 255.0,
+            g: g as f32 / 255.0,
+            b: b as f32 / 255.0,
+            a: 1.0,
+        };
         fill(gpu, color, rect(sx, sy, sx + side, sy + side));
     }
     Ok(())
@@ -556,15 +771,31 @@ fn draw_hud(
     // Имя продукта и контекст — на одной базовой линии.
     let header_base = title.baseline.max(scope.baseline);
     draw_text(gpu, &title, left, top + header_base - title.baseline, theme.text);
-    draw_text(gpu, &scope, right - scope.w, top + header_base - scope.baseline, theme.text_muted);
+    draw_text(
+        gpu,
+        &scope,
+        right - scope.w,
+        top + header_base - scope.baseline,
+        theme.text_muted,
+    );
     top += title.h.max(scope.h) + block_gap;
 
     // Ответ на вопрос панели.
     draw_text(gpu, &lead_label, left, top, theme.text_muted);
     top += lead_label.h + row_gap;
-    let lead_color = if hud.lead.is_some() { theme.text } else { theme.text_muted };
+    let lead_color = if hud.lead.is_some() {
+        theme.text
+    } else {
+        theme.text_muted
+    };
     draw_text(gpu, &lead_value, left, top, lead_color);
-    draw_text(gpu, &lead_unit, left + lead_value.w + unit_gap, top + lead_value.baseline - lead_unit.baseline, theme.text_muted);
+    draw_text(
+        gpu,
+        &lead_unit,
+        left + lead_value.w + unit_gap,
+        top + lead_value.baseline - lead_unit.baseline,
+        theme.text_muted,
+    );
     top += lead_value.h;
 
     // Таблица: подписи слева, числа на одном правом крае с панелью, единицы серым после них.
@@ -576,8 +807,20 @@ fn draw_hud(
         for row in group {
             let base = row.baseline();
             draw_text(gpu, &row.label, left, top + base - row.label.baseline, theme.text_muted);
-            draw_text(gpu, &row.value, value_right - row.value.w, top + base - row.value.baseline, theme.text);
-            draw_text(gpu, &row.unit, value_right + unit_gap, top + base - row.unit.baseline, theme.text_muted);
+            draw_text(
+                gpu,
+                &row.value,
+                value_right - row.value.w,
+                top + base - row.value.baseline,
+                theme.text,
+            );
+            draw_text(
+                gpu,
+                &row.unit,
+                value_right + unit_gap,
+                top + base - row.unit.baseline,
+                theme.text_muted,
+            );
             top += row.height() + row_gap;
         }
         top -= row_gap;
@@ -601,9 +844,14 @@ struct Text {
 fn measure(shared: &Shared, style: &Style, s: &str) -> Result<Text> {
     let utf16: Vec<u16> = s.encode_utf16().collect();
     unsafe {
-        let layout = shared.dwrite.CreateTextLayout(&utf16, &style.format, 10_000.0, 10_000.0)?;
+        let layout = shared
+            .dwrite
+            .CreateTextLayout(&utf16, &style.format, 10_000.0, 10_000.0)?;
         if style.tabular {
-            let all = DWRITE_TEXT_RANGE { startPosition: 0, length: utf16.len() as u32 };
+            let all = DWRITE_TEXT_RANGE {
+                startPosition: 0,
+                length: utf16.len() as u32,
+            };
             layout.SetTypography(&shared.tabular, all)?;
         }
         let mut metrics = DWRITE_TEXT_METRICS::default();
@@ -611,7 +859,12 @@ fn measure(shared: &Shared, style: &Style, s: &str) -> Result<Text> {
         let mut lines = [DWRITE_LINE_METRICS::default(); 1];
         let mut count = 0;
         layout.GetLineMetrics(Some(&mut lines), &mut count)?;
-        Ok(Text { layout, w: metrics.widthIncludingTrailingWhitespace, h: metrics.height, baseline: lines[0].baseline })
+        Ok(Text {
+            layout,
+            w: metrics.widthIncludingTrailingWhitespace,
+            h: metrics.height,
+            baseline: lines[0].baseline,
+        })
     }
 }
 
@@ -619,7 +872,10 @@ fn draw_text(gpu: &Gpu, text: &Text, x: f32, y: f32, color: D2D1_COLOR_F) {
     unsafe {
         gpu.brush.SetColor(&color);
         gpu.d2d.DrawTextLayout(
-            Vector2 { X: x.round(), Y: y.round() },
+            Vector2 {
+                X: x.round(),
+                Y: y.round(),
+            },
             &text.layout,
             &gpu.brush,
             D2D1_DRAW_TEXT_OPTIONS_NONE,
@@ -632,19 +888,29 @@ fn panel(gpu: &Gpu, theme: &Theme, r: D2D_RECT_F, radius: f32, scale: f32) {
     let stroke = px(dip::BORDER, scale);
     let half = stroke / 2.0;
     let inner = rect(r.left + half, r.top + half, r.right - half, r.bottom - half);
-    let rounded = |r| D2D1_ROUNDED_RECT { rect: r, radiusX: radius, radiusY: radius };
+    let rounded = |r| D2D1_ROUNDED_RECT {
+        rect: r,
+        radiusX: radius,
+        radiusY: radius,
+    };
     unsafe {
         gpu.brush.SetColor(&theme.surface);
         gpu.d2d.FillRoundedRectangle(&rounded(r), &gpu.brush);
         gpu.brush.SetColor(&theme.border);
-        gpu.d2d.DrawRoundedRectangle(&rounded(inner), &gpu.brush, stroke, None::<&ID2D1StrokeStyle>);
+        gpu.d2d
+            .DrawRoundedRectangle(&rounded(inner), &gpu.brush, stroke, None::<&ID2D1StrokeStyle>);
     }
 }
 
 /// Кольцо толщиной `width` вокруг `inner`. Заливкой прямоугольников, а не обводкой, —
 /// так линии остаются чёткими без полупикселей.
 fn ring(gpu: &Gpu, color: D2D1_COLOR_F, inner: D2D_RECT_F, width: f32) {
-    let D2D_RECT_F { left: l, top: t, right: r, bottom: b } = inner;
+    let D2D_RECT_F {
+        left: l,
+        top: t,
+        right: r,
+        bottom: b,
+    } = inner;
     fill(gpu, color, rect(l - width, t - width, r + width, t));
     fill(gpu, color, rect(l - width, b, r + width, b + width));
     fill(gpu, color, rect(l - width, t, l, b));
@@ -683,7 +949,12 @@ fn px(value: f32, scale: f32) -> f32 {
 }
 
 fn rect(left: f32, top: f32, right: f32, bottom: f32) -> D2D_RECT_F {
-    D2D_RECT_F { left, top, right, bottom }
+    D2D_RECT_F {
+        left,
+        top,
+        right,
+        bottom,
+    }
 }
 
 fn inflate(r: D2D_RECT_F, by: f32) -> D2D_RECT_F {
@@ -691,6 +962,11 @@ fn inflate(r: D2D_RECT_F, by: f32) -> D2D_RECT_F {
 }
 
 fn intersect(a: D2D_RECT_F, b: D2D_RECT_F) -> Option<D2D_RECT_F> {
-    let r = rect(a.left.max(b.left), a.top.max(b.top), a.right.min(b.right), a.bottom.min(b.bottom));
+    let r = rect(
+        a.left.max(b.left),
+        a.top.max(b.top),
+        a.right.min(b.right),
+        a.bottom.min(b.bottom),
+    );
     (r.right > r.left && r.bottom > r.top).then_some(r)
 }

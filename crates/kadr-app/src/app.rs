@@ -3,9 +3,9 @@
 
 use std::cell::RefCell;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering::Relaxed};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::Arc;
 
 use windows::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
@@ -19,9 +19,9 @@ use windows::Win32::UI::HiDpi::{
     AreDpiAwarenessContextsEqual, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetThreadDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey, ReleaseCapture, SetCapture, UnregisterHotKey,
-    VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SNAPSHOT,
-    VK_SPACE, VK_UP,
+    GetKeyState, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey,
+    ReleaseCapture, SetCapture, UnregisterHotKey, VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN,
+    VK_RIGHT, VK_SHIFT, VK_SNAPSHOT, VK_SPACE, VK_UP,
 };
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIIF_RESPECT_QUIET_TIME, NIM_ADD, NIM_DELETE, NIM_MODIFY,
@@ -30,22 +30,27 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{Error, PCWSTR, Result, w};
 
+use crate::{capture_mode::Mode, config_watch::Watcher};
 use kadr_capture::{self as capture, Output};
 use kadr_doc::{Image, Point as DocPoint, Rect as DocRect};
+use kadr_editor::drawing::Drawing;
 use kadr_editor::overlay::{self, Overlay};
 use kadr_editor::session::{Action, CursorKind, Key, Mods, Session};
 use kadr_export::{clipboard, file};
 use kadr_render::gpu::{Gpu, Shared};
 use kadr_render::scene::{Hud, HudRow, Magnifier, Marks, Toolbar, ToolbarButton};
 use kadr_render::theme::{Theme, dip};
-use kadr_store::{config::{self, Config}, hotkey};
+use kadr_store::{
+    config::{self, Config},
+    hotkey,
+};
 use kadr_win::perf::{self, Stats, Timing};
 use kadr_win::privileges::{self, ProcessInfo};
 use kadr_win::{log, log_info, log_warn, wide};
-use crate::{capture_mode::Mode, config_watch::Watcher};
 
-mod settings;
 mod drafts;
+mod editor_input;
+mod settings;
 
 const HK_PRTSC: i32 = 1;
 const HK_BACKUP: i32 = 2;
@@ -95,6 +100,8 @@ struct Active {
     /// Кнопка панели под курсором — для подсветки.
     hovered: Option<ToolbarButton>,
     draft: Option<drafts::DraftState>,
+    drawing: Drawing,
+    text_surrogate: Option<u16>,
 }
 
 pub struct App {
@@ -164,7 +171,13 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
         let instance: HINSTANCE = GetModuleHandleW(None)?.into();
         let icons = crate::icons::Icons::load(instance)?;
         register_class(instance, HOST_CLASS, host_proc, HCURSOR::default(), &icons)?;
-        register_class(instance, overlay::CLASS, overlay_proc, LoadCursorW(None, IDC_CROSS)?, &icons)?;
+        register_class(
+            instance,
+            overlay::CLASS,
+            overlay_proc,
+            LoadCursorW(None, IDC_CROSS)?,
+            &icons,
+        )?;
         // Обычное скрытое окно, а не message-only: только так приходят WM_DISPLAYCHANGE и TaskbarCreated.
         let hwnd = CreateWindowExW(
             WS_EX_TOOLWINDOW,
@@ -232,7 +245,13 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
             log_warn!("конфиг: {error}");
             app.notify("Не удалось загрузить настройки", &error);
         } else if !conflicts.is_empty() {
-            app.notify("Некоторые хоткеи заняты", &format!("{}\nОбласть: Ctrl+Shift+F12 или значок Kadr в трее", conflicts.join("; ")));
+            app.notify(
+                "Некоторые хоткеи заняты",
+                &format!(
+                    "{}\nОбласть: Ctrl+Shift+F12 или значок Kadr в трее",
+                    conflicts.join("; ")
+                ),
+            );
         }
         APP.with(|cell| *cell.borrow_mut() = Some(app));
         if let Some(count) = bench {
@@ -241,7 +260,9 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            if crate::recent_window::dialog_message(&msg) { continue; }
+            if crate::recent_window::dialog_message(&msg) {
+                continue;
+            }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
@@ -256,7 +277,10 @@ impl App {
         self.outputs.clear();
         self.gpus.clear();
         let found = capture::enumerate().and_then(|(adapters, outputs)| {
-            let gpus = adapters.iter().map(|a| Gpu::new(&self.shared, &a.adapter, a.name.clone())).collect::<Result<Vec<_>>>()?;
+            let gpus = adapters
+                .iter()
+                .map(|a| Gpu::new(&self.shared, &a.adapter, a.name.clone()))
+                .collect::<Result<Vec<_>>>()?;
             Ok((gpus, outputs))
         });
         match found {
@@ -267,7 +291,14 @@ impl App {
             }
         }
         for (i, out) in self.outputs.iter().enumerate() {
-            match Overlay::new(&self.gpus[out.gpu], &self.shared, i, out.rect, out.monitor, self.instance) {
+            match Overlay::new(
+                &self.gpus[out.gpu],
+                &self.shared,
+                i,
+                out.rect,
+                out.monitor,
+                self.instance,
+            ) {
                 Ok(overlay) => self.overlays.push(overlay),
                 Err(e) => log_warn!("оверлей для {}: {e}", out.name),
             }
@@ -283,9 +314,20 @@ impl App {
         for overlay in &self.overlays {
             let gpu = &self.gpus[self.outputs[overlay.output].gpu];
             let r = overlay.rect;
-            let selection = Some(RECT { left: r.left + 64, top: r.top + 64, right: r.left + 128, bottom: r.top + 128 });
-            let marks =
-                Marks { selection, handles: true, magnifier: None, toolbar: Some(Toolbar::default()), hud: Some(&hud) };
+            let selection = Some(RECT {
+                left: r.left + 64,
+                top: r.top + 64,
+                right: r.left + 128,
+                bottom: r.top + 128,
+            });
+            let marks = Marks {
+                selection,
+                handles: true,
+                magnifier: None,
+                toolbar: Some(Toolbar::default()),
+                hud: Some(&hud),
+                drawing: None,
+            };
             if let Err(e) = overlay.present(gpu, &self.shared, &self.theme, marks) {
                 log_warn!("прогрев рендера: {e}");
             }
@@ -304,11 +346,14 @@ impl App {
     fn log_startup(&self) {
         let p = &self.process;
         let pmv2 = unsafe {
-            AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(), DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+            AreDpiAwarenessContextsEqual(
+                GetThreadDpiAwarenessContext(),
+                DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            )
         }
         .as_bool();
         log_info!(
-            "Kadr M1 запущен: целостность {}, uiAccess {}, админ {}, PerMonitorV2 {}, дубликатор {}",
+            "Kadr M2 запущен: целостность {}, uiAccess {}, админ {}, PerMonitorV2 {}, дубликатор {}",
             p.integrity,
             yes(p.ui_access),
             yes(p.elevated),
@@ -320,7 +365,9 @@ impl App {
         }
         self.log_outputs();
         match privileges::snipping_owns_prtsc() {
-            Some(true) => log_warn!("PrtSc забирают «Ножницы» (PrintScreenKeyForSnippingEnabled = 1)"),
+            Some(true) => {
+                log_warn!("PrtSc забирают «Ножницы» (PrintScreenKeyForSnippingEnabled = 1)")
+            }
             Some(false) => log_info!("PrtSc свободен (PrintScreenKeyForSnippingEnabled = 0)"),
             None => log_info!("PrintScreenKeyForSnippingEnabled не задан (в Win11 по умолчанию PrtSc у «Ножниц»)"),
         }
@@ -346,10 +393,12 @@ impl App {
     /// LL-хук только наблюдает: пишет в лог, видит ли он PrtSc. Скрин запускает WM_HOTKEY.
     fn set_hook(&mut self, on: bool) {
         match (on, self.hook.take()) {
-            (true, None) => match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), Some(self.instance), 0) } {
-                Ok(hook) => self.hook = Some(hook),
-                Err(e) => log_warn!("LL-хук не установлен: {e}"),
-            },
+            (true, None) => {
+                match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), Some(self.instance), 0) } {
+                    Ok(hook) => self.hook = Some(hook),
+                    Err(e) => log_warn!("LL-хук не установлен: {e}"),
+                }
+            }
             (false, Some(hook)) => unsafe {
                 let _ = UnhookWindowsHookEx(hook);
             },
@@ -358,7 +407,12 @@ impl App {
     }
 
     fn tray_data(&self) -> NOTIFYICONDATAW {
-        NOTIFYICONDATAW { cbSize: size_of::<NOTIFYICONDATAW>() as u32, hWnd: self.hwnd, uID: 1, ..Default::default() }
+        NOTIFYICONDATAW {
+            cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: self.hwnd,
+            uID: 1,
+            ..Default::default()
+        }
     }
 
     fn add_tray_icon(&self) {
@@ -376,11 +430,15 @@ impl App {
     fn on_hotkey(&mut self, id: i32, queue_ms: u32) {
         match id {
             HK_RECENT => self.show_recent(),
-            HK_ESC => self.close_session(),
+            HK_ESC => self.on_key(VK_ESCAPE.0, true),
             HK_PRTSC | HK_BACKUP | HK_FULLSCREEN | HK_WINDOW | HK_LAST_REGION => {
                 let foreground = privileges::foreground_exe();
-                let mode = match id { HK_FULLSCREEN => Mode::Fullscreen, HK_WINDOW => Mode::Window,
-                    HK_LAST_REGION => Mode::LastRegion, _ => Mode::Region };
+                let mode = match id {
+                    HK_FULLSCREEN => Mode::Fullscreen,
+                    HK_WINDOW => Mode::Window,
+                    HK_LAST_REGION => Mode::LastRegion,
+                    _ => Mode::Region,
+                };
                 self.capture_mode(mode, queue_ms, &foreground);
                 let printscreen = match id {
                     HK_PRTSC => &self.config.hotkeys.region,
@@ -389,7 +447,11 @@ impl App {
                     HK_LAST_REGION => &self.config.hotkeys.last_region,
                     _ => "",
                 };
-                if hotkey::parse(printscreen).ok().flatten().is_some_and(|key| key.vk == VK_SNAPSHOT.0) {
+                if hotkey::parse(printscreen)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|key| key.vk == VK_SNAPSHOT.0)
+                {
                     self.log_prtsc(&foreground);
                 }
             }
@@ -402,7 +464,9 @@ impl App {
         let mut data = self.tray_data();
         data.uFlags = NIF_ICON;
         data.hIcon = self.icons.tray();
-        unsafe { let _ = Shell_NotifyIconW(NIM_MODIFY, &data); }
+        unsafe {
+            let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
+        }
     }
 
     /// Итог эксперимента M0 по одному нажатию PrtSc: кто его увидел.
@@ -427,7 +491,9 @@ impl App {
 
     fn on_timer(&mut self, id: usize) {
         if id == TIMER_DRAFT {
-            unsafe { let _ = KillTimer(Some(self.hwnd), TIMER_DRAFT); }
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), TIMER_DRAFT);
+            }
             self.flush_draft(true);
             return;
         }
@@ -447,8 +513,12 @@ impl App {
             WM_LBUTTONUP => self.show_recent(),
             WM_RBUTTONUP | WM_CONTEXTMENU => self.show_menu(),
             NIN_BALLOONUSERCLICK => {
-                if self.recovery_notice { self.recovery_notice = false; self.show_recent(); }
-                else { self.open_last_saved(); }
+                if self.recovery_notice {
+                    self.recovery_notice = false;
+                    self.show_recent();
+                } else {
+                    self.open_last_saved();
+                }
             }
             _ => {}
         }
@@ -463,14 +533,23 @@ impl App {
             let label = wide(&format!("Монитор под курсором\t{}", self.config.hotkeys.fullscreen));
             let _ = AppendMenuW(menu, MF_STRING, CMD_FULLSCREEN, PCWSTR(label.as_ptr()));
             let label = wide(&format!("Повторить область\t{}", self.config.hotkeys.last_region));
-            let enabled = if self.last_region.is_some() { MF_ENABLED } else { MF_GRAYED };
+            let enabled = if self.last_region.is_some() {
+                MF_ENABLED
+            } else {
+                MF_GRAYED
+            };
             let _ = AppendMenuW(menu, MF_STRING | enabled, CMD_LAST_REGION, PCWSTR(label.as_ptr()));
             let _ = AppendMenuW(menu, MF_STRING, CMD_CONFIG, w!("Настройки…"));
             let label = wide(&format!("Недавние…\t{}", self.config.hotkeys.recent));
             let _ = AppendMenuW(menu, MF_STRING, CMD_RECENT, PCWSTR(label.as_ptr()));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(menu, MF_STRING | check(self.warm), CMD_WARM, w!("Прогретый дубликатор"));
-            let _ = AppendMenuW(menu, MF_STRING | check(self.hook.is_some()), CMD_HOOK, w!("Наблюдатель LL-хука"));
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING | check(self.hook.is_some()),
+                CMD_HOOK,
+                w!("Наблюдатель LL-хука"),
+            );
             let _ = AppendMenuW(menu, MF_STRING, CMD_LOG, w!("Открыть лог"));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(menu, MF_STRING, CMD_EXIT, w!("Выход"));
@@ -489,7 +568,16 @@ impl App {
             CMD_LAST_REGION => self.capture_mode(Mode::LastRegion, 0, "трей"),
             CMD_CONFIG => {
                 let path = wide(&format!("\"{}\"", self.config_path.display()));
-                unsafe { ShellExecuteW(None, w!("open"), w!("notepad.exe"), PCWSTR(path.as_ptr()), PCWSTR::null(), SW_SHOWNORMAL); }
+                unsafe {
+                    ShellExecuteW(
+                        None,
+                        w!("open"),
+                        w!("notepad.exe"),
+                        PCWSTR(path.as_ptr()),
+                        PCWSTR::null(),
+                        SW_SHOWNORMAL,
+                    );
+                }
             }
             CMD_WARM => {
                 self.set_warm(!self.warm);
@@ -497,13 +585,27 @@ impl App {
             }
             CMD_HOOK => {
                 self.set_hook(self.hook.is_none());
-                log_info!("наблюдатель LL-хука: {}", if self.hook.is_some() { "включён" } else { "выключен" });
+                log_info!(
+                    "наблюдатель LL-хука: {}",
+                    if self.hook.is_some() {
+                        "включён"
+                    } else {
+                        "выключен"
+                    }
+                );
             }
             CMD_LOG => {
                 if let Some(path) = log::path() {
                     let path = wide(&path.to_string_lossy());
                     unsafe {
-                        ShellExecuteW(None, w!("open"), PCWSTR(path.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
+                        ShellExecuteW(
+                            None,
+                            w!("open"),
+                            PCWSTR(path.as_ptr()),
+                            PCWSTR::null(),
+                            PCWSTR::null(),
+                            SW_SHOWNORMAL,
+                        );
                     }
                 }
             }
@@ -513,9 +615,16 @@ impl App {
     }
 
     fn capture_mode(&mut self, mode: Mode, queue_ms: u32, foreground: &str) {
-        if self.active.is_some() || self.loading_recent { return; }
+        if self.active.is_some() || self.loading_recent {
+            return;
+        }
         let monitors: Vec<_> = self.outputs.iter().map(Output::bounds).collect();
-        let region = mode.region(&monitors, doc_point(cursor_pos()), capture::foreground_window(), self.last_region);
+        let region = mode.region(
+            &monitors,
+            doc_point(cursor_pos()),
+            capture::foreground_window(),
+            self.last_region,
+        );
         match region {
             Ok(None) => self.open_session("область", queue_ms, foreground),
             Ok(Some(region)) => {
@@ -523,14 +632,22 @@ impl App {
                 let t = perf::now();
                 let image = self.capture_image(region);
                 if !self.warm {
-                    for out in &mut self.outputs { out.release_duplication(); out.release_frame(); }
+                    for out in &mut self.outputs {
+                        out.release_duplication();
+                        out.release_frame();
+                    }
                 }
                 match image {
                     Ok(image) => {
                         // В «Недавние» не пишем: снимок уже в буфере, а десяток быстрых снимков
                         // вытеснил бы несохранённую ручную область, ради которой «Недавние» и есть.
                         self.copy_image(Arc::new(image));
-                        log_info!("быстрый снимок {mode:?}: {}×{}, {:.1} мс", region.width(), region.height(), perf::ms(t, perf::now()));
+                        log_info!(
+                            "быстрый снимок {mode:?}: {}×{}, {:.1} мс",
+                            region.width(),
+                            region.height(),
+                            perf::ms(t, perf::now())
+                        );
                     }
                     Err(e) => {
                         log_warn!("быстрый снимок: {e}");
@@ -546,7 +663,9 @@ impl App {
     fn capture_image(&mut self, region: DocRect) -> Result<Image> {
         let mut frames = Vec::new();
         for out in &mut self.outputs {
-            if out.bounds().intersect(&region).is_none() { continue; }
+            if out.bounds().intersect(&region).is_none() {
+                continue;
+            }
             let gpu = &self.gpus[out.gpu];
             out.capture(&gpu.device, &gpu.context)?;
             frames.push(out.read_pixels(&gpu.device, &gpu.context)?);
@@ -578,7 +697,15 @@ impl App {
         let hud_overlay = self.overlay_at(cursor).unwrap_or(0);
         let monitors = self.outputs.iter().map(Output::bounds).collect();
         let session = Session::new(monitors, doc_point(cursor), self.grab(), self.perf_hud);
-        self.active = Some(Active { session, frames: Vec::new(), hud_overlay, hovered: None, draft: None });
+        self.active = Some(Active {
+            session,
+            frames: Vec::new(),
+            hud_overlay,
+            hovered: None,
+            draft: None,
+            drawing: Drawing::default(),
+            text_surrogate: None,
+        });
         self.source = source;
         self.render_all();
         let t2 = perf::now();
@@ -638,7 +765,11 @@ impl App {
             source,
             self.mode(),
             foreground,
-            if focused { "получен" } else { "НЕ получен" }
+            if focused {
+                "получен"
+            } else {
+                "НЕ получен"
+            }
         );
 
         self.after_show();
@@ -653,8 +784,12 @@ impl App {
 
     fn close_session(&mut self) {
         self.flush_draft(false);
-        let Some(active) = self.active.take() else { return };
-        if let Some(selection) = active.session.selection() { self.last_region = Some(selection); }
+        let Some(active) = self.active.take() else {
+            return;
+        };
+        if let Some(selection) = active.session.selection() {
+            self.last_region = Some(selection);
+        }
         unsafe {
             let _ = UnregisterHotKey(Some(self.hwnd), HK_ESC);
             let _ = ReleaseCapture();
@@ -679,7 +814,10 @@ impl App {
             .iter()
             .filter_map(|out| {
                 let gpu = &self.gpus[out.gpu];
-                out.read_pixels(&gpu.device, &gpu.context).map(Arc::new).map_err(|e| log_warn!("копия кадра {}: {e}", out.name)).ok()
+                out.read_pixels(&gpu.device, &gpu.context)
+                    .map(Arc::new)
+                    .map_err(|e| log_warn!("копия кадра {}: {e}", out.name))
+                    .ok()
             })
             .collect();
         let t_frames = perf::now();
@@ -701,9 +839,16 @@ impl App {
         let Some(active) = &self.active else { return };
         let session = &active.session;
         let hud = session.hud_visible().then(|| self.hud());
-        let magnifier = session.show_magnifier().then(|| {
+        let magnifier = (session.show_magnifier()
+            && active.drawing.tool == kadr_doc::annotation::Tool::Select
+            && active.drawing.selected.is_none())
+        .then(|| {
             let at = session.cursor();
-            let rgb = active.frames.iter().find_map(|f| f.pixel(at)).map(|[b, g, r, _]| [r, g, b]);
+            let rgb = active
+                .frames
+                .iter()
+                .find_map(|f| f.pixel(at))
+                .map(|[b, g, r, _]| [r, g, b]);
             Magnifier { at: (at.x, at.y), rgb }
         });
         let selection = session.highlight().map(win_rect);
@@ -711,10 +856,23 @@ impl App {
             let gpu = &self.gpus[self.outputs[overlay.output].gpu];
             let marks = Marks {
                 selection,
-                handles: session.show_handles(),
-                toolbar: session.show_toolbar().then_some(Toolbar { hovered: active.hovered }),
+                handles: session.show_handles()
+                    && active.drawing.tool == kadr_doc::annotation::Tool::Select
+                    && active.drawing.selected.is_none(),
+                toolbar: (session.show_toolbar() && !active.drawing.busy()).then_some(Toolbar {
+                    hovered: active.hovered,
+                    editor: Some(editor_bar(&active.drawing)),
+                }),
                 magnifier: magnifier.as_ref(),
                 hud: if i == active.hud_overlay { hud.as_ref() } else { None },
+                drawing: session.selection().map(|crop| kadr_render::annotations::View {
+                    shapes: active.drawing.shapes(),
+                    preview: active.drawing.preview(),
+                    frames: &active.frames,
+                    crop,
+                    selected: active.drawing.selected_bounds(),
+                    text_edit: active.drawing.text_selection(),
+                }),
             };
             if let Err(e) = overlay.present(gpu, &self.shared, &self.theme, marks) {
                 log_warn!("рендер оверлея: {e}");
@@ -725,7 +883,7 @@ impl App {
     fn hud(&self) -> Hud {
         let p = &self.process;
         let ui_access = if p.ui_access { " · uiAccess" } else { "" };
-        let scope = format!("M1 · {} · {}{ui_access} · {}", self.source, p.integrity, self.mode());
+        let scope = format!("M2 · {} · {}{ui_access} · {}", self.source, p.integrity, self.mode());
         let ms = |label: &str, v: f64| HudRow::new(label, format!("{v:.1}"), "мс");
         let (lead, groups) = match &self.last {
             None => (None, Vec::new()),
@@ -734,7 +892,11 @@ impl App {
                 if t.dup_create_ms > 0.0 {
                     stages.push(ms("из них дубликатор", t.dup_create_ms));
                 }
-                stages.extend([ms("рендер", t.render_ms), ms("показ", t.show_ms), ms("до экрана", t.composed_ms)]);
+                stages.extend([
+                    ms("рендер", t.render_ms),
+                    ms("показ", t.show_ms),
+                    ms("до экрана", t.composed_ms),
+                ]);
                 let stats = vec![
                     ms("p50", self.stats.percentile(50.0)),
                     ms("p95", self.stats.percentile(95.0)),
@@ -744,7 +906,10 @@ impl App {
                     ms("фокус после показа", t.focus_ms),
                     HudRow::new("очередь сообщений", format!("~{}", t.queue_ms), "мс"),
                 ];
-                (Some((format!("{:.1}", t.total()), "мс".to_string())), vec![stages, stats, after])
+                (
+                    Some((format!("{:.1}", t.total()), "мс".to_string())),
+                    vec![stages, stats, after],
+                )
             }
         };
         Hud {
@@ -759,7 +924,9 @@ impl App {
 
     fn on_pointer(&mut self, hwnd: HWND, msg: u32) {
         let hit = self.toolbar_at(cursor_pos());
-        let Some(active) = &mut self.active else { return };
+        let Some(active) = &mut self.active else {
+            return;
+        };
         // Кнопки панели перехватывают мышь раньше выделения: нажатие сразу выполняет действие.
         if active.hovered != hit {
             active.hovered = hit;
@@ -771,8 +938,13 @@ impl App {
             }
             return;
         }
-        let Some(active) = &mut self.active else { return };
         let p = doc_point(cursor_pos());
+        if self.drawing_pointer(hwnd, msg, p) {
+            return;
+        }
+        let Some(active) = &mut self.active else {
+            return;
+        };
         let action = match msg {
             WM_LBUTTONDOWN => {
                 unsafe { SetCapture(hwnd) };
@@ -790,9 +962,18 @@ impl App {
     }
 
     fn on_key(&mut self, vk: u16, down: bool) {
-        let Some(active) = &mut self.active else { return };
+        if down && self.editor_key(vk) {
+            return;
+        }
+        let Some(active) = &mut self.active else {
+            return;
+        };
         let Some(key) = key_from_vk(vk) else { return };
-        let action = if down { active.session.key_down(key, mods()) } else { active.session.key_up(key) };
+        let action = if down {
+            active.session.key_down(key, mods())
+        } else {
+            active.session.key_up(key)
+        };
         self.apply(action);
     }
 
@@ -812,9 +993,17 @@ impl App {
     /// Вырезает выделение из кадров в памяти, закрывает оверлей и отдаёт картинку дальше.
     /// Оверлей закрывается до диалога: в режиме uiAccess он лежит выше любых обычных окон.
     fn export(&mut self, how: Export) {
-        let Some(image) = self.selected_image() else { return };
+        if let Some(active) = &mut self.active {
+            active.drawing.finish_text();
+        }
+        let Some(image) = self.selected_image() else {
+            return;
+        };
         self.flush_draft(true);
-        let draft = self.active.as_ref().and_then(|a| a.draft.as_ref().map(|d| d.token.clone()));
+        let draft = self
+            .active
+            .as_ref()
+            .and_then(|a| a.draft.as_ref().map(|d| d.token.clone()));
         self.close_session();
         match how {
             Export::Copy => self.copy_image(Arc::new(image)),
@@ -832,7 +1021,11 @@ impl App {
 
     fn save_folder(&self) -> PathBuf {
         let folder = self.config.save.folder.trim();
-        if folder.is_empty() { file::default_folder() } else { PathBuf::from(folder) }
+        if folder.is_empty() {
+            file::default_folder()
+        } else {
+            PathBuf::from(folder)
+        }
     }
 
     fn copy_image(&mut self, image: Arc<Image>) {
@@ -855,14 +1048,24 @@ impl App {
             log_warn!("экспорт: копии кадров в памяти нет");
             return None;
         }
-        Some(Image::compose(active.frames.iter().map(Arc::as_ref), selection))
+        let gpu = self.gpus.first()?;
+        match kadr_render::annotations::flatten(gpu, &self.shared, &active.frames, selection, active.drawing.shapes()) {
+            Ok(image) => Some(image),
+            Err(e) => {
+                log_warn!("экспорт аннотаций: {e}");
+                self.notify("Не удалось подготовить снимок", &e.message());
+                None
+            }
+        }
     }
 
     /// Кодирование и запись — в фоне: оверлей уже закрыт, ждать нечего.
     fn save(&self, path: PathBuf, image: Image, draft: Option<crate::recent_worker::Token>) {
         let (tx, host) = (self.saved_tx.clone(), self.hwnd.0 as isize);
         std::thread::spawn(move || {
-            let result = file::write_png(&path, &image).map(|()| path.clone()).map_err(|e| (path, e.to_string()));
+            let result = file::write_png(&path, &image)
+                .map(|()| path.clone())
+                .map_err(|e| (path, e.to_string()));
             let _ = tx.send(Saved { result, draft });
             unsafe {
                 let _ = PostMessageW(Some(HWND(host as *mut _)), WM_APP_SAVED, WPARAM(0), LPARAM(0));
@@ -875,12 +1078,17 @@ impl App {
             match saved.result {
                 Ok(path) => {
                     log_info!("сохранено: {}", path.display());
-                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
                     if self.config.save.notify {
                         self.notify("Снимок сохранён", &format!("{name}\nНажмите, чтобы открыть папку"));
                     }
                     self.last_saved = Some(path);
-                    if let Some(draft) = saved.draft { self.recent.send(crate::recent_worker::Command::Remove(draft)); }
+                    if let Some(draft) = saved.draft {
+                        self.recent.send(crate::recent_worker::Command::Remove(draft));
+                    }
                 }
                 Err((path, e)) => {
                     log_warn!("не удалось сохранить {}: {e}", path.display());
@@ -893,7 +1101,9 @@ impl App {
     /// `C` над экраном — HEX цвета под курсором в буфер; оверлей остаётся открытым.
     fn copy_color(&mut self) {
         let Some(active) = &self.active else { return };
-        let Some(pixel) = active.frames.iter().find_map(|f| f.pixel(active.session.cursor())) else { return };
+        let Some(pixel) = active.frames.iter().find_map(|f| f.pixel(active.session.cursor())) else {
+            return;
+        };
         let hex = kadr_doc::hex(pixel);
         match clipboard::put_text(self.hwnd, &hex) {
             Ok(()) => {
@@ -921,18 +1131,27 @@ impl App {
         let Some(path) = &self.last_saved else { return };
         let args = wide(&format!("/select,\"{}\"", path.display()));
         unsafe {
-            ShellExecuteW(None, w!("open"), w!("explorer.exe"), PCWSTR(args.as_ptr()), PCWSTR::null(), SW_SHOWNORMAL);
+            ShellExecuteW(
+                None,
+                w!("open"),
+                w!("explorer.exe"),
+                PCWSTR(args.as_ptr()),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            );
         }
     }
 
     /// Кнопка панели под точкой — только когда панель видна.
     fn toolbar_at(&self, p: POINT) -> Option<ToolbarButton> {
         let active = self.active.as_ref()?;
-        if !active.session.show_toolbar() {
+        if !active.session.show_toolbar() || active.drawing.busy() {
             return None;
         }
         let selection = win_rect(active.session.selection()?);
-        self.overlays.iter().find_map(|o| o.toolbar_hit(&self.shared, selection, p))
+        self.overlays
+            .iter()
+            .find_map(|o| o.toolbar_hit(&self.shared, selection, p, Some(editor_bar(&active.drawing))))
     }
 
     fn press(&mut self, button: ToolbarButton) {
@@ -941,6 +1160,7 @@ impl App {
             ToolbarButton::Save => self.export(Export::Save),
             ToolbarButton::SaveAs => self.export(Export::SaveAs),
             ToolbarButton::Close => self.close_session(),
+            _ => self.editor_button(button),
         }
     }
 
@@ -950,7 +1170,35 @@ impl App {
             return unsafe { LoadCursorW(None, IDC_HAND) }.ok();
         }
         let active = self.active.as_ref()?;
-        let id = match active.session.cursor_kind(doc_point(cursor_pos())) {
+        if active.drawing.tool != kadr_doc::annotation::Tool::Select {
+            return unsafe {
+                LoadCursorW(
+                    None,
+                    if active.drawing.tool == kadr_doc::annotation::Tool::Text {
+                        IDC_IBEAM
+                    } else {
+                        IDC_CROSS
+                    },
+                )
+            }
+            .ok();
+        }
+        let point = doc_point(cursor_pos());
+        let shape_cursor = active
+            .drawing
+            .selected_bounds()
+            .and_then(|r| kadr_doc::hit_handle(&r, point, 8))
+            .map(|h| {
+                use kadr_doc::Handle;
+                match h {
+                    Handle::Move => CursorKind::Move,
+                    Handle::N | Handle::S => CursorKind::SizeNS,
+                    Handle::W | Handle::E => CursorKind::SizeWE,
+                    Handle::NW | Handle::SE => CursorKind::SizeNWSE,
+                    Handle::NE | Handle::SW => CursorKind::SizeNESW,
+                }
+            });
+        let id = match shape_cursor.unwrap_or_else(|| active.session.cursor_kind(point)) {
             CursorKind::Cross => IDC_CROSS,
             CursorKind::Move => IDC_SIZEALL,
             CursorKind::SizeNS => IDC_SIZENS,
@@ -991,7 +1239,13 @@ impl App {
     fn selftest_export(&mut self, dir: PathBuf) {
         self.open_session("самопроверка", 0, "—");
         if let Some(active) = &mut self.active {
-            active.session.key_down(Key::Char('a'), Mods { ctrl: true, shift: false });
+            active.session.key_down(
+                Key::Char('a'),
+                Mods {
+                    ctrl: true,
+                    shift: false,
+                },
+            );
         }
         let image = self.selected_image();
         self.close_session();
@@ -1037,7 +1291,7 @@ impl Drop for App {
         unsafe {
             let _ = Shell_NotifyIconW(NIM_DELETE, &self.tray_data());
         }
-        log_info!("Kadr M1 завершён");
+        log_info!("Kadr M2 завершён");
     }
 }
 
@@ -1081,13 +1335,25 @@ unsafe extern "system" fn host_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         m if m != 0 && m == TASKBAR_CREATED.load(Relaxed) => with_app(|app| app.add_tray_icon()),
         _ => false,
     };
-    if handled { LRESULT(0) } else { unsafe { DefWindowProcW(hwnd, msg, wp, lp) } }
+    if handled {
+        LRESULT(0)
+    } else {
+        unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
+    }
 }
 
 unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     let handled = match msg {
         WM_LBUTTONDOWN | WM_LBUTTONUP | WM_MOUSEMOVE => with_app(|app| app.on_pointer(hwnd, msg)),
-        WM_RBUTTONUP => with_app(App::close_session),
+        WM_RBUTTONUP => with_app(|app| app.on_key(VK_ESCAPE.0, true)),
+        WM_CHAR => with_app(|app| app.on_text(wp.0 as u16)),
+        WM_MOUSEWHEEL => with_app(|app| app.editor_wheel(((wp.0 >> 16) as u16 as i16) as i32)),
+        WM_LBUTTONDBLCLK => with_app(|app| {
+            if let Some(a) = &mut app.active {
+                a.drawing.edit_text();
+            }
+            app.render_all();
+        }),
         WM_KEYDOWN => with_app(|app| app.on_key(wp.0 as u16, true)),
         WM_KEYUP => with_app(|app| app.on_key(wp.0 as u16, false)),
         WM_SETCURSOR if (lp.0 & 0xffff) as u32 == HTCLIENT => {
@@ -1103,7 +1369,11 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
         WM_DPICHANGED => true,
         _ => false,
     };
-    if handled { LRESULT(0) } else { unsafe { DefWindowProcW(hwnd, msg, wp, lp) } }
+    if handled {
+        LRESULT(0)
+    } else {
+        unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
+    }
 }
 
 unsafe extern "system" fn keyboard_hook(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -1128,6 +1398,7 @@ unsafe fn register_class(
 ) -> Result<()> {
     let class = WNDCLASSEXW {
         cbSize: size_of::<WNDCLASSEXW>() as u32,
+        style: CS_DBLCLKS,
         lpfnWndProc: Some(proc),
         hInstance: instance,
         hCursor: cursor,
@@ -1144,10 +1415,15 @@ unsafe fn register_class(
 
 fn single_instance() -> Option<HANDLE> {
     // Изолированные проверки debug-сборки не завершают установленный экземпляр пользователя.
-    let dev = if cfg!(debug_assertions) { std::env::var("KADR_DEV_INSTANCE").ok() } else { None };
-    let name = dev.filter(|s| !s.is_empty() && s.len()<=32 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b==b'-'))
+    let dev = if cfg!(debug_assertions) {
+        std::env::var("KADR_DEV_INSTANCE").ok()
+    } else {
+        None
+    };
+    let name = dev
+        .filter(|s| !s.is_empty() && s.len() <= 32 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
         .map_or_else(|| "Local\\Kadr".to_string(), |s| format!("Local\\Kadr.Dev.{s}"));
-    let name=wide(&name);
+    let name = wide(&name);
     let handle = unsafe { CreateMutexW(None, true, PCWSTR(name.as_ptr())) }.ok()?;
     (unsafe { GetLastError() } != ERROR_ALREADY_EXISTS).then_some(handle)
 }
@@ -1172,7 +1448,12 @@ fn doc_point(p: POINT) -> DocPoint {
 }
 
 fn win_rect(r: DocRect) -> RECT {
-    RECT { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
+    RECT {
+        left: r.left,
+        top: r.top,
+        right: r.right,
+        bottom: r.bottom,
+    }
 }
 
 /// Клавиши по VK-коду: буквы приходят латиницей при любой раскладке, поэтому `C` = `С`.
@@ -1192,9 +1473,23 @@ fn key_from_vk(vk: u16) -> Option<Key> {
 
 fn mods() -> Mods {
     let down = |key: VIRTUAL_KEY| unsafe { GetKeyState(i32::from(key.0)) } < 0;
-    Mods { ctrl: down(VK_CONTROL), shift: down(VK_SHIFT) }
+    Mods {
+        ctrl: down(VK_CONTROL),
+        shift: down(VK_SHIFT),
+    }
 }
 
 fn yes(value: bool) -> &'static str {
     if value { "да" } else { "нет" }
+}
+
+fn editor_bar(d: &Drawing) -> kadr_render::scene::EditorBar {
+    kadr_render::scene::EditorBar {
+        tool: d.tool,
+        color: d.color,
+        width: d.width,
+        strength: d.strength,
+        undo: d.can_undo(),
+        redo: d.can_redo(),
+    }
 }

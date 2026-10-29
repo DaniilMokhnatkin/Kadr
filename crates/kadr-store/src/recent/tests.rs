@@ -26,8 +26,33 @@ fn document() -> Document {
         revision: 1,
         selection: Some([-1, 0, 1, 2]),
         automatic: false,
+        annotations: Vec::new(),
         layout: vec![[-2, 0, 0, 2], [0, 0, 2, 2]],
     }
+}
+#[test]
+fn annotations_roundtrip_and_old_drafts_default_to_empty() {
+    use kadr_doc::annotation::{Annotation, Tool};
+    let mut doc = document();
+    let old = toml::to_string(&doc).unwrap().replace("annotations = []\n", "");
+    assert!(toml::from_str::<Document>(&old).unwrap().annotations.is_empty());
+    let mut text = Annotation::new(1, Tool::Text, kadr_doc::Point::new(-1, 0));
+    text.text = "Привет 🌍\nстрока".into();
+    text.seed = u64::MAX;
+    doc.annotations.push(text);
+    let store = setup("annotations");
+    store.create("abc-44", 100, &frames(), &doc).unwrap();
+    store.update("abc-44", &doc, false, &frames()).unwrap();
+    assert_eq!(store.load("abc-44").unwrap().document, doc);
+    assert!(store.list().unwrap()[0].preview.is_none());
+    store
+        .set_preview("abc-44", &Image::new(Rect::new(0, 0, 2, 2), vec![17; 16]))
+        .unwrap();
+    assert!(store.list().unwrap()[0].preview.is_some());
+    doc.annotations[0].points.clear();
+    assert!(store.update("abc-44", &doc, false, &frames()).is_err());
+    store.clear().unwrap();
+    fs::remove_dir(store.root).unwrap();
 }
 #[test]
 fn captured_frames_and_selection_survive_reopening_the_store() {
@@ -123,7 +148,10 @@ fn abrupt_process_exit_leaves_recoverable_open_draft() {
     }
     let store = setup("process-exit");
     let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "recent::tests::abrupt_process_exit_leaves_recoverable_open_draft"])
+        .args([
+            "--exact",
+            "recent::tests::abrupt_process_exit_leaves_recoverable_open_draft",
+        ])
         .env(CHILD, &store.root)
         .stdout(std::process::Stdio::null())
         .status()

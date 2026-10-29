@@ -21,8 +21,16 @@ pub struct Token {
     pub revision: u64,
 }
 pub enum Command {
-    Create { token: Token, frames: Vec<Arc<Image>>, document: Document },
-    State { token: Token, document: Document, open: bool },
+    Create {
+        token: Token,
+        frames: Vec<Arc<Image>>,
+        document: Document,
+    },
+    State {
+        token: Token,
+        document: Document,
+        open: bool,
+    },
     Remove(Token),
     Load(String),
     List,
@@ -52,7 +60,47 @@ pub struct Worker {
     thread: Option<JoinHandle<()>>,
 }
 pub fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+/// Контекст создаётся лениво на потоке хранилища и не пересекается с UI-контекстом D2D.
+fn update_preview(
+    store: &Store<Dpapi>,
+    id: &str,
+    doc: &Document,
+    frames: &[Arc<Image>],
+    renderer: &mut Option<(kadr_render::gpu::Shared, kadr_render::gpu::Gpu)>,
+) -> io::Result<()> {
+    if doc.annotations.is_empty() {
+        return Ok(());
+    }
+    let render = (|| -> windows::core::Result<Image> {
+        if renderer.is_none() {
+            use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+            let shared = kadr_render::gpu::Shared::new()?;
+            let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1()? };
+            let gpu = kadr_render::gpu::Gpu::new(&shared, &unsafe { factory.EnumAdapters1(0)? }, "drafts".into())?;
+            *renderer = Some((shared, gpu));
+        }
+        let (shared, gpu) = renderer.as_ref().unwrap();
+        let bounds = kadr_doc::pixels::bounds(frames).unwrap();
+        let area = doc
+            .selection_rect()
+            .and_then(|r| r.intersect(&bounds))
+            .unwrap_or(bounds);
+        let image = kadr_render::annotations::flatten(gpu, shared, frames, area, &doc.annotations)?;
+        Ok(kadr_doc::pixels::thumbnail(&[Arc::new(image)], area, 320, 160))
+    })();
+    // Документ уже записан; ошибка превью не должна препятствовать восстановлению снимка.
+    match render {
+        Ok(image) => store.set_preview(id, &image),
+        Err(e) => {
+            kadr_win::log_warn!("миниатюра M2: {e}");
+            Ok(())
+        }
+    }
 }
 impl Worker {
     pub fn start(host: HWND, message: u32, max: usize, benchmark: bool) -> Self {
@@ -74,15 +122,23 @@ impl Worker {
                 let mut store = Store::new(PathBuf::from(base).join("Kadr/recent"), Dpapi, max)?;
                 let recovered = store.recover()?;
                 store.set_max(max)?;
-                emit(Event::Ready { entries: store.list()?, recovered });
+                emit(Event::Ready {
+                    entries: store.list()?,
+                    recovered,
+                });
                 let mut frames: HashMap<String, Vec<Arc<Image>>> = HashMap::new();
+                let mut renderer = None;
                 while let Ok(command) = commands.recv() {
                     if matches!(command, Command::Shutdown) {
                         break;
                     }
                     let result = (|| -> io::Result<()> {
                         match command {
-                            Command::Create { token, frames: captured, document } => {
+                            Command::Create {
+                                token,
+                                frames: captured,
+                                document,
+                            } => {
                                 store.create(&token.id, now_ms(), &captured, &document)?;
                                 store.update(&token.id, &document, true, &captured)?;
                                 frames.insert(token.id.clone(), captured);
@@ -91,6 +147,7 @@ impl Worker {
                             Command::State { token, document, open } => {
                                 if let Some(captured) = frames.get(&token.id) {
                                     store.update(&token.id, &document, open, captured)?;
+                                    update_preview(&store, &token.id, &document, captured, &mut renderer)?;
                                     emit(Event::Persisted(token.clone()));
                                     if !open {
                                         frames.remove(&token.id);
@@ -105,6 +162,7 @@ impl Worker {
                                 let mut draft = store.load(&id)?;
                                 draft.document.revision += 1;
                                 store.update(&id, &draft.document, true, &draft.frames)?;
+                                update_preview(&store, &id, &draft.document, &draft.frames, &mut renderer)?;
                                 frames.insert(id.clone(), draft.frames.clone());
                                 emit(Event::Loaded { id, draft });
                             }
@@ -132,7 +190,11 @@ impl Worker {
                 emit(Event::Error(error.to_string()));
             }
         });
-        Self { tx, events, thread: Some(thread) }
+        Self {
+            tx,
+            events,
+            thread: Some(thread),
+        }
     }
     pub fn send(&self, command: Command) -> bool {
         self.tx.send(command).is_ok()

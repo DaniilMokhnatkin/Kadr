@@ -37,17 +37,32 @@ impl App {
             active.session.is_auto_selected(),
         );
         let token = new_token();
-        if !self.recent.send(Command::Create { token: token.clone(), frames, document: document.clone() }) {
-            self.notify("Снимок не сохранён в «Недавних»", "Хранилище недоступно. Сохраните снимок в файл.");
+        if !self.recent.send(Command::Create {
+            token: token.clone(),
+            frames,
+            document: document.clone(),
+        }) {
+            self.notify(
+                "Снимок не сохранён в «Недавних»",
+                "Хранилище недоступно. Сохраните снимок в файл.",
+            );
             return;
         }
-        self.active.as_mut().unwrap().draft = Some(DraftState { token, document, view: None });
+        self.active.as_mut().unwrap().draft = Some(DraftState {
+            token,
+            document,
+            view: None,
+        });
     }
     pub(super) fn schedule_draft(&self) {
         let Some(active) = &self.active else { return };
         let Some(draft) = &active.draft else { return };
         let selection = archived_selection(active.session.selection(), draft.view).map(to_array);
-        if draft.document.selection != selection || draft.document.automatic != active.session.is_auto_selected() {
+        let annotations = archived_shapes(active.drawing.shapes(), draft.view, &draft.document.annotations);
+        if draft.document.selection != selection
+            || draft.document.automatic != active.session.is_auto_selected()
+            || draft.document.annotations != annotations
+        {
             unsafe {
                 SetTimer(Some(self.hwnd), TIMER_DRAFT, 300, None);
             }
@@ -57,19 +72,30 @@ impl App {
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_DRAFT);
         }
-        let Some(active) = &mut self.active else { return };
-        let Some(draft) = &mut active.draft else { return };
+        let Some(active) = &mut self.active else {
+            return;
+        };
+        let Some(draft) = &mut active.draft else {
+            return;
+        };
         let selection = archived_selection(active.session.selection(), draft.view).map(to_array);
-        let changed =
-            selection != draft.document.selection || draft.document.automatic != active.session.is_auto_selected();
+        let annotations = archived_shapes(active.drawing.shapes(), draft.view, &draft.document.annotations);
+        let changed = selection != draft.document.selection
+            || draft.document.automatic != active.session.is_auto_selected()
+            || draft.document.annotations != annotations;
         if changed {
             draft.token.revision += 1;
             draft.document.revision = draft.token.revision;
             draft.document.selection = selection;
             draft.document.automatic = active.session.is_auto_selected();
+            draft.document.annotations = annotations;
         }
         if changed || !open {
-            self.recent.send(Command::State { token: draft.token.clone(), document: draft.document.clone(), open });
+            self.recent.send(Command::State {
+                token: draft.token.clone(),
+                document: draft.document.clone(),
+                open,
+            });
         }
     }
     pub(super) fn show_recent(&mut self) {
@@ -79,7 +105,13 @@ impl App {
         self.close_session();
         self.recovery_notice = false;
         if self.recent_window.is_none() {
-            match Window::new(self.instance, self.hwnd, WM_APP_RECENT_UI, self.icons.app(), self.icons.small()) {
+            match Window::new(
+                self.instance,
+                self.hwnd,
+                WM_APP_RECENT_UI,
+                self.icons.app(),
+                self.icons.small(),
+            ) {
                 Ok(window) => self.recent_window = Some(window),
                 Err(e) => {
                     self.notify("Не удалось открыть «Недавние»", &e.message());
@@ -120,7 +152,10 @@ impl App {
                         window.set_entries(entries);
                     }
                     if recovered > 0 {
-                        self.notify("Снимок не был сохранён", "Он доступен в «Недавних». Нажмите, чтобы восстановить.");
+                        self.notify(
+                            "Снимок не был сохранён",
+                            "Он доступен в «Недавних». Нажмите, чтобы восстановить.",
+                        );
                         self.recovery_notice = true;
                     }
                 }
@@ -129,11 +164,20 @@ impl App {
                         window.set_entries(entries);
                     }
                 }
-                Event::Persisted(token) => log_info!("черновик {} записан, ревизия {}", token.id, token.revision),
+                Event::Persisted(token) => {
+                    log_info!("черновик {} записан, ревизия {}", token.id, token.revision)
+                }
                 Event::Loaded { id, draft } => {
                     if !self.loading_recent {
-                        let token = Token { id, revision: draft.document.revision };
-                        self.recent.send(Command::State { token, document: draft.document, open: false });
+                        let token = Token {
+                            id,
+                            revision: draft.document.revision,
+                        };
+                        self.recent.send(Command::State {
+                            token,
+                            document: draft.document,
+                            open: false,
+                        });
                         continue;
                     }
                     self.loading_recent = false;
@@ -170,7 +214,11 @@ impl App {
             current.clone()
         } else {
             let source = pixels::bounds(&frames).unwrap();
-            let primary = current.iter().find(|r| r.contains(DocPoint::new(0, 0))).copied().unwrap_or(current[0]);
+            let primary = current
+                .iter()
+                .find(|r| r.contains(DocPoint::new(0, 0)))
+                .copied()
+                .unwrap_or(current[0]);
             let (image, mapped) = pixels::fit_to_monitor(&frames, selection, primary);
             let target = image.rect;
             selection = mapped;
@@ -181,21 +229,47 @@ impl App {
         for overlay in &mut self.overlays {
             let image = Image::compose(
                 frames.iter().map(Arc::as_ref),
-                DocRect::new(overlay.rect.left, overlay.rect.top, overlay.rect.right, overlay.rect.bottom),
+                DocRect::new(
+                    overlay.rect.left,
+                    overlay.rect.top,
+                    overlay.rect.right,
+                    overlay.rect.bottom,
+                ),
             );
             overlay.set_image(&self.gpus[self.outputs[overlay.output].gpu], &image)?;
         }
         let cursor = doc_point(cursor_pos());
         let mut session = Session::new(monitors, cursor, self.grab(), self.perf_hud);
         session.restore_selection(selection, draft.document.automatic);
-        let token = Token { id, revision: draft.document.revision };
+        let mut drawing = Drawing::default();
+        let shapes = if let Some((from, to)) = view {
+            draft
+                .document
+                .annotations
+                .iter()
+                .map(|s| s.transformed(from, to))
+                .collect()
+        } else {
+            draft.document.annotations.clone()
+        };
+        drawing.restore(shapes);
+        let token = Token {
+            id,
+            revision: draft.document.revision,
+        };
         let hud_overlay = self.overlay_at(cursor_pos()).unwrap_or(0);
         self.active = Some(Active {
             session,
             frames,
             hud_overlay,
             hovered: None,
-            draft: Some(DraftState { token, document: draft.document, view }),
+            draft: Some(DraftState {
+                token,
+                document: draft.document,
+                view,
+            }),
+            drawing,
+            text_surrogate: None,
         });
         self.source = "Недавние";
         self.render_all();
@@ -222,7 +296,12 @@ impl App {
 fn new_token() -> Token {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     Token {
-        id: format!("{:x}-{:x}-{:x}", now_ms(), std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)),
+        id: format!(
+            "{:x}-{:x}-{:x}",
+            now_ms(),
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ),
         revision: 1,
     }
 }
@@ -233,10 +312,13 @@ fn document(layout: Vec<DocRect>, selection: Option<DocRect>, automatic: bool) -
         selection: selection.map(to_array),
         automatic,
         layout: layout.into_iter().map(to_array).collect(),
+        annotations: Vec::new(),
     }
 }
 fn archived_selection(selection: Option<DocRect>, view: Option<(DocRect, DocRect)>) -> Option<DocRect> {
-    let Some((source, target)) = view else { return selection };
+    let Some((source, target)) = view else {
+        return selection;
+    };
     selection
         .and_then(|r| r.intersect(&target))
         .map(|r| {
@@ -250,4 +332,61 @@ fn archived_selection(selection: Option<DocRect>, view: Option<(DocRect, DocRect
             )
         })
         .filter(|r| !r.is_empty())
+}
+
+fn archived_shapes(
+    shapes: &[kadr_doc::annotation::Annotation],
+    view: Option<(DocRect, DocRect)>,
+    originals: &[kadr_doc::annotation::Annotation],
+) -> Vec<kadr_doc::annotation::Annotation> {
+    if let Some((source, target)) = view {
+        shapes
+            .iter()
+            .map(|s| {
+                let original = originals.iter().find(|old| old.id == s.id);
+                let displayed = original.map(|s| s.transformed(source, target));
+                if displayed.as_ref() == Some(s) {
+                    return original.unwrap().clone();
+                }
+                let mut mapped = s.transformed(target, source);
+                if let Some(old) = original
+                    && displayed.as_ref().is_some_and(|d| d.width == s.width)
+                {
+                    mapped.width = old.width;
+                }
+                mapped
+            })
+            .collect()
+    } else {
+        shapes.to_vec()
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn restoring_on_a_smaller_monitor_does_not_rewrite_unedited_coordinates_or_width() {
+        use kadr_doc::annotation::{Annotation, Tool};
+        let source = DocRect::new(-1000, 0, 1000, 1000);
+        let target = DocRect::new(0, 0, 1000, 500);
+        let mut original = Annotation::new(1, Tool::Arrow, DocPoint::new(-801, 101));
+        original.points[1] = [301, 401];
+        let displayed = original.transformed(source, target);
+        assert_eq!(displayed.width, 2);
+        assert_eq!(
+            archived_shapes(
+                std::slice::from_ref(&displayed),
+                Some((source, target)),
+                std::slice::from_ref(&original)
+            ),
+            vec![original.clone()]
+        );
+        let mut moved = displayed;
+        moved.points[0][0] += 10;
+        moved.points[1][0] += 10;
+        assert_eq!(
+            archived_shapes(&[moved], Some((source, target)), &[original])[0].width,
+            3
+        );
+    }
 }

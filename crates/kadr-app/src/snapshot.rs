@@ -22,7 +22,10 @@ use kadr_render::theme::Theme;
 
 const BANDS: [u32; 5] = [0xffffff, 0xd4d4d8, 0x777777, 0x5e6ad2, 0x000000];
 
-pub fn run(path: &str, scale: f32) -> Result<(), Box<dyn Error>> {
+pub fn run(path: &str, scale: f32, editor: bool) -> Result<(), Box<dyn Error>> {
+    if !(0.5..=3.0).contains(&scale) {
+        return Err("масштаб должен быть от 0.5 до 3".into());
+    }
     let shared = Shared::new()?;
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1()? };
     let adapter = unsafe { factory.EnumAdapters1(0)? };
@@ -33,17 +36,35 @@ pub fn run(path: &str, scale: f32) -> Result<(), Box<dyn Error>> {
     let pixels = background(w, h);
     let at = |v: f32| (v * scale) as i32;
     // Выделение пересекает светлую, серую и акцентную полосы и радугу; правый край — на цвете акцента.
-    let selection = RECT { left: at(470.0), top: at(300.0), right: at(1270.0), bottom: at(700.0) };
+    let selection = RECT {
+        left: at(470.0),
+        top: at(300.0),
+        right: at(1270.0),
+        bottom: at(700.0),
+    };
+    let crop = kadr_doc::Rect::new(selection.left, selection.top, selection.right, selection.bottom);
+    let frames = vec![std::sync::Arc::new(kadr_doc::Image::new(
+        kadr_doc::Rect::new(0, 0, w as i32, h as i32),
+        pixels.clone(),
+    ))];
+    let shapes = if editor { sample_shapes(scale) } else { Vec::new() };
     let hud = sample_hud();
     // Курсор у правого нижнего угла, как при растягивании: видны и маркеры, и лупа.
     let cursor = (at(1268.0), at(698.0));
     let i = ((cursor.1 as u32 * w + cursor.0 as u32) * 4) as usize;
-    let magnifier = Magnifier { at: cursor, rgb: Some([pixels[i + 2], pixels[i + 1], pixels[i]]) };
+    let magnifier = Magnifier {
+        at: cursor,
+        rgb: Some([pixels[i + 2], pixels[i + 1], pixels[i]]),
+    };
 
     let rgba = unsafe {
         let ctx = &gpu.d2d;
-        let background =
-            ctx.CreateBitmap(size, Some(pixels.as_ptr() as *const c_void), w * 4, &bitmap_props(D2D1_BITMAP_OPTIONS_NONE))?;
+        let background = ctx.CreateBitmap(
+            size,
+            Some(pixels.as_ptr() as *const c_void),
+            w * 4,
+            &bitmap_props(D2D1_BITMAP_OPTIONS_NONE),
+        )?;
         let target = ctx.CreateBitmap(size, None, 0, &bitmap_props(D2D1_BITMAP_OPTIONS_TARGET))?;
         let scene = Scene {
             frame: Some(&background),
@@ -52,20 +73,49 @@ pub fn run(path: &str, scale: f32) -> Result<(), Box<dyn Error>> {
             scale,
             marks: Marks {
                 selection: Some(selection),
-                handles: true,
-                magnifier: Some(&magnifier),
-                toolbar: Some(Toolbar { hovered: Some(ToolbarButton::Save) }),
-                hud: Some(&hud),
+                handles: !editor,
+                magnifier: if editor { None } else { Some(&magnifier) },
+                toolbar: Some(Toolbar {
+                    hovered: Some(ToolbarButton::Save),
+                    editor: editor.then_some(scene::EditorBar {
+                        tool: kadr_doc::annotation::Tool::Arrow,
+                        color: 0,
+                        width: 3,
+                        strength: 1,
+                        undo: true,
+                        redo: false,
+                    }),
+                }),
+                hud: if editor { None } else { Some(&hud) },
+                drawing: editor.then_some(kadr_render::annotations::View {
+                    shapes: &shapes,
+                    preview: None,
+                    frames: &frames,
+                    crop,
+                    selected: None,
+                    text_edit: None,
+                }),
             },
         };
         ctx.SetTarget(&target);
         ctx.BeginDraw();
-        let drawn = scene::draw(&gpu, &shared, &TextStyles::new(&shared, scale)?, &Theme::current(), &scene);
+        let drawn = scene::draw(
+            &gpu,
+            &shared,
+            &TextStyles::new(&shared, scale)?,
+            &Theme::current(),
+            &scene,
+            &mut Default::default(),
+        );
         ctx.EndDraw(None, None)?;
         drawn?;
 
-        let readback =
-            ctx.CreateBitmap(size, None, 0, &bitmap_props(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW))?;
+        let readback = ctx.CreateBitmap(
+            size,
+            None,
+            0,
+            &bitmap_props(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW),
+        )?;
         readback.CopyFromBitmap(None, &target, None)?;
         let mapped = readback.Map(D2D1_MAP_OPTIONS_READ)?;
         let mut rgba = Vec::with_capacity((w * h * 4) as usize);
@@ -83,8 +133,40 @@ pub fn run(path: &str, scale: f32) -> Result<(), Box<dyn Error>> {
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
     encoder.write_header()?.write_image_data(&rgba)?;
+    if editor {
+        let image = kadr_render::annotations::flatten(&gpu, &shared, &frames, crop, &shapes)?;
+        let export = std::path::Path::new(path).with_file_name(format!(
+            "{}-export.png",
+            std::path::Path::new(path).file_stem().unwrap().to_string_lossy()
+        ));
+        std::fs::write(export, kadr_doc::pixels::encode_png(&image)?)?;
+    }
     kadr_win::log_info!("снимок сцены сохранён: {path} ({w}×{h}, масштаб {scale})");
     Ok(())
+}
+fn sample_shapes(scale: f32) -> Vec<kadr_doc::annotation::Annotation> {
+    use kadr_doc::{
+        Point, Rect,
+        annotation::{Annotation, Tool},
+    };
+    let mut shapes = Vec::new();
+    for (tool, a, b) in [
+        (Tool::Arrow, [570, 580], [770, 420]),
+        (Tool::Rectangle, [820, 410], [1080, 510]),
+        (Tool::Text, [820, 350], [820, 350]),
+        (Tool::Counter, [540, 360], [540, 360]),
+        (Tool::Blur, [840, 550], [1160, 650]),
+    ] {
+        let mut s = Annotation::new(shapes.len() as u64 + 1, tool, Point::new(a[0], a[1]));
+        s.points[1] = b;
+        s.text = "Здесь важная деталь".into();
+        s.seed = 42;
+        shapes.push(s.transformed(
+            Rect::new(0, 0, 1600, 900),
+            Rect::new(0, 0, (1600.0 * scale) as i32, (900.0 * scale) as i32),
+        ));
+    }
+    shapes
 }
 
 /// Цифры — из реального бенчмарка прогретого режима на машине разработки.
@@ -96,9 +178,21 @@ fn sample_hud() -> Hud {
         lead_label: "хоткей → экран".into(),
         lead: Some(("8.2".into(), "мс".into())),
         groups: vec![
-            vec![ms("захват", "0.2"), ms("рендер", "0.8"), ms("показ", "2.1"), ms("до экрана", "5.0")],
-            vec![ms("p50", "8.2"), ms("p95", "13.6"), HudRow::new("замеров", "10".into(), "")],
-            vec![ms("фокус после показа", "0.0"), HudRow::new("очередь сообщений", "~0".into(), "мс")],
+            vec![
+                ms("захват", "0.2"),
+                ms("рендер", "0.8"),
+                ms("показ", "2.1"),
+                ms("до экрана", "5.0"),
+            ],
+            vec![
+                ms("p50", "8.2"),
+                ms("p95", "13.6"),
+                HudRow::new("замеров", "10".into(), ""),
+            ],
+            vec![
+                ms("фокус после показа", "0.0"),
+                HudRow::new("очередь сообщений", "~0".into(), "мс"),
+            ],
         ],
         hint: "Esc закрыть · H скрыть панель".into(),
     }
@@ -109,7 +203,11 @@ fn background(w: u32, h: u32) -> Vec<u8> {
     let mut pixels = Vec::with_capacity((w * h * 4) as usize);
     for y in 0..h {
         for x in 0..w {
-            let c = if y * 3 >= h * 2 { hue(x as f32 / w as f32) } else { BANDS[(x * 5 / w) as usize] };
+            let c = if y * 3 >= h * 2 {
+                hue(x as f32 / w as f32)
+            } else {
+                BANDS[(x * 5 / w) as usize]
+            };
             pixels.extend_from_slice(&[(c & 0xff) as u8, ((c >> 8) & 0xff) as u8, ((c >> 16) & 0xff) as u8, 255]);
         }
     }

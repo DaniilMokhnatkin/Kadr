@@ -22,6 +22,8 @@ pub struct Document {
     #[serde(default)]
     pub automatic: bool,
     pub layout: Vec<[i32; 4]>,
+    #[serde(default)]
+    pub annotations: Vec<kadr_doc::annotation::Annotation>,
 }
 impl Document {
     pub fn selection_rect(&self) -> Option<Rect> {
@@ -34,6 +36,9 @@ impl Document {
             || self.layout.len() > 8
             || self.layout.iter().any(|r| !pixels::valid_rect(from_array(*r)))
             || self.selection_rect().is_some_and(|r| !pixels::valid_rect(r))
+            || self.annotations.len() > 256
+            || self.annotations.iter().any(|s| !s.validate())
+            || self.annotations.iter().map(|s| s.points.len()).sum::<usize>() > 65536
         {
             return Err(invalid("неподдерживаемое или повреждённое состояние снимка"));
         }
@@ -67,7 +72,11 @@ impl<C: Crypto> Store<C> {
             return Err(invalid("каталог черновиков не должен быть ссылкой"));
         }
         fs::create_dir_all(&root)?;
-        Ok(Self { root, crypto, max: max.clamp(1, 10) })
+        Ok(Self {
+            root,
+            crypto,
+            max: max.clamp(1, 10),
+        })
     }
     fn dir(&self, id: &str) -> io::Result<PathBuf> {
         if id.is_empty() || id.len() > 64 || !id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
@@ -93,9 +102,15 @@ impl<C: Crypto> Store<C> {
             // Перечитывание кадров не требуется: превью будет записано первым update из рабочего процесса.
             write_atomic(
                 &pending.join("state.enc"),
-                &self.crypto.seal(toml::to_string(doc).map_err(io::Error::other)?.as_bytes())?,
+                &self
+                    .crypto
+                    .seal(toml::to_string(doc).map_err(io::Error::other)?.as_bytes())?,
             )?;
-            let meta = Meta { version: 1, created_ms, open: true };
+            let meta = Meta {
+                version: 1,
+                created_ms,
+                open: true,
+            };
             write_meta(&pending, &meta)?;
             fs::rename(&pending, &dir)
         })();
@@ -111,21 +126,43 @@ impl<C: Crypto> Store<C> {
         doc.validate()?;
         let dir = self.dir(id)?;
         let mut meta = read_meta(&dir)?;
+        if !doc.annotations.is_empty() {
+            // Удаляем до state.enc: даже после сбоя карточка не покажет старый исходник.
+            match fs::remove_file(dir.join("preview.enc")) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
         write_atomic(
             &dir.join("state.enc"),
-            &self.crypto.seal(toml::to_string(doc).map_err(io::Error::other)?.as_bytes())?,
+            &self
+                .crypto
+                .seal(toml::to_string(doc).map_err(io::Error::other)?.as_bytes())?,
         )?;
-        if let Some(bounds) = pixels::bounds(frames) {
-            let area = doc.selection_rect().and_then(|s| s.intersect(&bounds)).unwrap_or(bounds);
+        if doc.annotations.is_empty()
+            && let Some(bounds) = pixels::bounds(frames)
+        {
+            let area = doc
+                .selection_rect()
+                .and_then(|s| s.intersect(&bounds))
+                .unwrap_or(bounds);
             let preview = pixels::thumbnail(frames, area, 320, 160);
-            let mut bytes = Vec::new();
-            bytes.extend_from_slice(&preview.width().to_le_bytes());
-            bytes.extend_from_slice(&preview.height().to_le_bytes());
-            bytes.extend_from_slice(&pixels::encode_png(&preview).map_err(io::Error::other)?);
-            write_atomic(&dir.join("preview.enc"), &self.crypto.seal(&bytes)?)?;
+            self.set_preview(id, &preview)?;
         }
         meta.open = open;
         write_meta(&dir, &meta)
+    }
+    /// Готовая плоская миниатюра; хранилище не зависит от GPU.
+    pub fn set_preview(&self, id: &str, preview: &Image) -> io::Result<()> {
+        if preview.width() == 0 || preview.height() == 0 || preview.width() > 320 || preview.height() > 160 {
+            return Err(invalid("неверный размер превью"));
+        }
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&preview.width().to_le_bytes());
+        bytes.extend_from_slice(&preview.height().to_le_bytes());
+        bytes.extend_from_slice(&pixels::encode_png(preview).map_err(io::Error::other)?);
+        write_atomic(&self.dir(id)?.join("preview.enc"), &self.crypto.seal(&bytes)?)
     }
     pub fn load(&self, id: &str) -> io::Result<Draft> {
         let dir = self.dir(id)?;
@@ -135,7 +172,9 @@ impl<C: Crypto> Store<C> {
         Ok(Draft { frames, document })
     }
     fn document(&self, dir: &Path) -> io::Result<Document> {
-        let bytes = self.crypto.open(&read_limited(&dir.join("state.enc"), 64 * 1024)?)?;
+        let bytes = self
+            .crypto
+            .open(&read_limited(&dir.join("state.enc"), 4 * 1024 * 1024)?)?;
         let doc: Document =
             toml::from_str(std::str::from_utf8(&bytes).map_err(io::Error::other)?).map_err(io::Error::other)?;
         doc.validate()?;
@@ -148,7 +187,9 @@ impl<C: Crypto> Store<C> {
             let Ok(dir) = self.dir(&id) else { continue };
             let Ok(meta) = read_meta(&dir) else { continue };
             let preview = (|| -> io::Result<Image> {
-                let bytes = self.crypto.open(&read_limited(&dir.join("preview.enc"), 1024 * 1024)?)?;
+                let bytes = self
+                    .crypto
+                    .open(&read_limited(&dir.join("preview.enc"), 1024 * 1024)?)?;
                 if bytes.len() < 8 {
                     return Err(invalid("неполное превью"));
                 }
@@ -160,7 +201,12 @@ impl<C: Crypto> Store<C> {
                 pixels::decode_png(&bytes[8..], Rect::new(0, 0, w as i32, h as i32))
             })()
             .ok();
-            entries.push(Entry { id, created_ms: meta.created_ms, open: meta.open, preview });
+            entries.push(Entry {
+                id,
+                created_ms: meta.created_ms,
+                open: meta.open,
+                preview,
+            });
         }
         entries.sort_by(|a, b| b.created_ms.cmp(&a.created_ms).then(b.id.cmp(&a.id)));
         Ok(entries)
@@ -222,7 +268,12 @@ impl<C: Crypto> Store<C> {
     }
     fn prune(&self) -> io::Result<()> {
         let mut entries = self.list()?;
-        entries.sort_by(|a, b| b.open.cmp(&a.open).then(b.created_ms.cmp(&a.created_ms)).then(b.id.cmp(&a.id)));
+        entries.sort_by(|a, b| {
+            b.open
+                .cmp(&a.open)
+                .then(b.created_ms.cmp(&a.created_ms))
+                .then(b.id.cmp(&a.id))
+        });
         for entry in entries.into_iter().skip(self.max) {
             self.remove(&entry.id)?;
         }
@@ -282,7 +333,10 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     result
 }
 fn write_meta(dir: &Path, meta: &Meta) -> io::Result<()> {
-    write_atomic(&dir.join("meta.toml"), toml::to_string(meta).map_err(io::Error::other)?.as_bytes())
+    write_atomic(
+        &dir.join("meta.toml"),
+        toml::to_string(meta).map_err(io::Error::other)?.as_bytes(),
+    )
 }
 fn read_meta(dir: &Path) -> io::Result<Meta> {
     let bytes = read_limited(&dir.join("meta.toml"), 4096)?;

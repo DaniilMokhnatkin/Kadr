@@ -1,10 +1,11 @@
 //! Окно оверлея: одно на монитор. Создаётся при старте и прячется DWM-cloaking'ом,
 //! поэтому показ на горячем пути — это только снятие маскировки с уже отрисованного окна.
 
+use kadr_render::annotations::Cache;
+use std::cell::RefCell;
 use std::ffi::c_void;
 
 use windows::Win32::Foundation::{HINSTANCE, HWND, POINT, RECT};
-use windows::Win32::Graphics::Gdi::HMONITOR;
 use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET, ID2D1Bitmap1,
 };
@@ -18,6 +19,7 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT_FLIP_DISCARD,
     DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIOutput, IDXGISurface, IDXGISwapChain1,
 };
+use windows::Win32::Graphics::Gdi::HMONITOR;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos, ShowWindow,
@@ -42,6 +44,7 @@ pub struct Overlay {
     target: ID2D1Bitmap1,
     _visual: IDCompositionVisual,
     _composition: IDCompositionTarget,
+    annotation_cache: RefCell<Cache>,
 }
 
 impl Overlay {
@@ -60,7 +63,9 @@ impl Overlay {
             // Только изолированный debug-сеанс: окна доступны нативным UI-тестам.
             let tool_style = if cfg!(debug_assertions) && std::env::var_os("KADR_DEV_INSTANCE").is_some() {
                 Default::default()
-            } else { WS_EX_TOOLWINDOW };
+            } else {
+                WS_EX_TOOLWINDOW
+            };
             let hwnd = CreateWindowExW(
                 WS_EX_TOPMOST | tool_style | WS_EX_NOREDIRECTIONBITMAP,
                 CLASS,
@@ -91,7 +96,9 @@ impl Overlay {
                 AlphaMode: DXGI_ALPHA_MODE_IGNORE,
                 ..Default::default()
             };
-            let swapchain = gpu.factory.CreateSwapChainForComposition(&gpu.device, &desc, None::<&IDXGIOutput>)?;
+            let swapchain = gpu
+                .factory
+                .CreateSwapChainForComposition(&gpu.device, &desc, None::<&IDXGIOutput>)?;
             let surface: IDXGISurface = swapchain.GetBuffer(0)?;
             let props = bitmap_props(D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW);
             let target = gpu.d2d.CreateBitmapFromDxgiSurface(&surface, Some(&raw const props))?;
@@ -114,6 +121,7 @@ impl Overlay {
                 target,
                 _visual: visual,
                 _composition: composition,
+                annotation_cache: RefCell::new(Cache::default()),
             })
         }
     }
@@ -129,16 +137,23 @@ impl Overlay {
 
     pub fn clear_frame(&mut self) {
         self.frame = None;
+        *self.annotation_cache.borrow_mut() = Cache::default();
     }
 
     /// Загруженный черновик уже находится в памяти CPU, захват живого экрана не нужен.
     pub fn set_image(&mut self, gpu: &Gpu, image: &kadr_doc::Image) -> Result<()> {
         let size = windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_U {
-            width: image.width(), height: image.height(),
+            width: image.width(),
+            height: image.height(),
         };
-        self.frame = Some(unsafe { gpu.d2d.CreateBitmap(size,
-            Some(image.bgra.as_ptr() as *const c_void), image.width()*4,
-            &bitmap_props(D2D1_BITMAP_OPTIONS_NONE))? });
+        self.frame = Some(unsafe {
+            gpu.d2d.CreateBitmap(
+                size,
+                Some(image.bgra.as_ptr() as *const c_void),
+                image.width() * 4,
+                &bitmap_props(D2D1_BITMAP_OPTIONS_NONE),
+            )?
+        });
         Ok(())
     }
 
@@ -146,14 +161,24 @@ impl Overlay {
         let scene = Scene {
             frame: self.frame.as_ref(),
             origin: (self.rect.left, self.rect.top),
-            size: ((self.rect.right - self.rect.left) as u32, (self.rect.bottom - self.rect.top) as u32),
+            size: (
+                (self.rect.right - self.rect.left) as u32,
+                (self.rect.bottom - self.rect.top) as u32,
+            ),
             scale: self.scale,
             marks,
         };
         unsafe {
             gpu.d2d.SetTarget(&self.target);
             gpu.d2d.BeginDraw();
-            let drawn = scene::draw(gpu, shared, &self.text, theme, &scene);
+            let drawn = scene::draw(
+                gpu,
+                shared,
+                &self.text,
+                theme,
+                &scene,
+                &mut self.annotation_cache.borrow_mut(),
+            );
             gpu.d2d.EndDraw(None, None)?;
             drawn?;
             // Без ожидания vsync: DWM сам возьмёт самый свежий кадр (flip-discard).
@@ -175,8 +200,14 @@ impl Overlay {
     }
 
     /// Кнопка панели под точкой экрана, если панель нарисована на этом мониторе.
-    pub fn toolbar_hit(&self, shared: &Shared, selection: RECT, p: POINT) -> Option<ToolbarButton> {
-        scene::toolbar_hit(shared, &self.text, self.rect, self.scale, selection, (p.x, p.y))
+    pub fn toolbar_hit(
+        &self,
+        shared: &Shared,
+        selection: RECT,
+        p: POINT,
+        editor: Option<kadr_render::scene::EditorBar>,
+    ) -> Option<ToolbarButton> {
+        scene::toolbar_hit(shared, &self.text, self.rect, self.scale, selection, (p.x, p.y), editor)
     }
 
     pub fn contains(&self, p: POINT) -> bool {

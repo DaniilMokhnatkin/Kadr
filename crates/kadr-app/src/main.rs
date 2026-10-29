@@ -1,4 +1,4 @@
-//! Kadr — M1: выделение, экспорт PNG, быстрые режимы захвата и конфиг. См. STATUS.md.
+//! Kadr — M2: выделение, аннотации, размытие, PNG/буфер и черновики. См. STATUS.md.
 //!
 //! Запуск:
 //!   kadr                     — резидентный режим (трей), PrtSc или Ctrl+Shift+F12 — скрин
@@ -12,9 +12,11 @@
 mod app;
 mod capture_mode;
 mod config_watch;
-mod recent_worker;
-mod recent_window;
 mod icons;
+#[cfg(test)]
+mod m2;
+mod recent_window;
+mod recent_worker;
 mod snapshot;
 
 use std::error::Error;
@@ -30,16 +32,25 @@ fn main() {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let flag = |name: &str| args.iter().position(|a| a == name);
-    let result: Result<(), Box<dyn Error>> = match flag("--snapshot") {
+    let result: Result<(), Box<dyn Error>> = match flag("--snapshot").or_else(|| flag("--editor-snapshot")) {
         Some(i) => {
-            let path = args.get(i + 1).filter(|a| !a.starts_with("--")).map_or("kadr-snapshot.png", String::as_str);
-            let scale = flag("--scale").and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(1.0);
-            snapshot::run(path, scale)
+            let path = args
+                .get(i + 1)
+                .filter(|a| !a.starts_with("--"))
+                .map_or("kadr-snapshot.png", String::as_str);
+            let scale = flag("--scale")
+                .and_then(|i| args.get(i + 1))
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1.0);
+            snapshot::run(path, scale, flag("--editor-snapshot").is_some())
         }
         None => {
             let bench = flag("--bench").map(|i| args.get(i + 1).and_then(|n| n.parse().ok()).unwrap_or(20));
-            let warm = if flag("--cold").is_some() { Some(false) }
-                else { flag("--warm").map(|_| true) };
+            let warm = if flag("--cold").is_some() {
+                Some(false)
+            } else {
+                flag("--warm").map(|_| true)
+            };
             app::run(warm, flag("--perf-hud").is_some(), bench).map_err(Into::into)
         }
     };

@@ -7,7 +7,8 @@ use std::sync::OnceLock;
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
 use windows::Win32::Graphics::Gdi::{BI_RGB, BITMAPINFOHEADER};
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, GetClipboardOwner, IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+    CloseClipboard, EmptyClipboard, GetClipboardOwner, IsClipboardFormatAvailable, OpenClipboard,
+    RegisterClipboardFormatW, SetClipboardData,
 };
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::core::{Error, Result, w};
@@ -42,6 +43,29 @@ pub fn put_image(owner: HWND, image: &Image) -> Result<()> {
 pub fn put_text(owner: HWND, text: &str) -> Result<()> {
     let bytes: Vec<u8> = text.encode_utf16().chain(Some(0)).flat_map(u16::to_le_bytes).collect();
     with_clipboard(owner, || unsafe { set(CF_UNICODETEXT, global(&bytes)?) })
+}
+/// Ограниченный Unicode-текст для инструмента аннотаций. Буфер не очищается.
+pub fn text(owner: HWND) -> Result<String> {
+    use windows::Win32::System::DataExchange::GetClipboardData;
+    use windows::Win32::System::Memory::GlobalSize;
+    unsafe {
+        OpenClipboard(Some(owner))?;
+        let result = (|| -> Result<String> {
+            let handle = HGLOBAL(GetClipboardData(CF_UNICODETEXT)?.0);
+            let size = GlobalSize(handle).min(32768) / 2;
+            let ptr = GlobalLock(handle) as *const u16;
+            if ptr.is_null() {
+                return Err(Error::from_thread());
+            }
+            let data = std::slice::from_raw_parts(ptr, size);
+            let end = data.iter().position(|c| *c == 0).unwrap_or(size);
+            let text = String::from_utf16_lossy(&data[..end]);
+            let _ = GlobalUnlock(handle);
+            Ok(text)
+        })();
+        let _ = CloseClipboard();
+        result
+    }
 }
 
 /// WM_RENDERFORMAT: буфер уже открыт системой, открывать его снова нельзя.
@@ -174,9 +198,13 @@ mod tests {
         let dib_available = unsafe { IsClipboardFormatAvailable(CF_DIB) }.is_ok();
         let png_available = unsafe { IsClipboardFormatAvailable(png_format()) }.is_ok();
         render_all(owner, &image);
-        unsafe { OpenClipboard(Some(owner)).unwrap(); }
+        unsafe {
+            OpenClipboard(Some(owner)).unwrap();
+        }
         let png_rendered = unsafe { GetClipboardData(png_format()) }.is_ok();
-        unsafe { CloseClipboard().unwrap(); }
+        unsafe {
+            CloseClipboard().unwrap();
+        }
         unsafe {
             DestroyWindow(owner).unwrap();
         }
