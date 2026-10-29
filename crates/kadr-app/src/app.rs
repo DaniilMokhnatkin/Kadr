@@ -921,6 +921,7 @@ impl App {
                     text_edit: active.drawing.text_selection(),
                 }),
                 glide: session.selection().is_none(),
+                hint: session.selection().is_none() && exit_pose.is_none() && overlay.contains(cursor_pos()),
                 exit: exit_pose.map_or(0.0, |(e, _)| e),
                 flash: exit_pose.is_some_and(|(_, f)| f),
             };

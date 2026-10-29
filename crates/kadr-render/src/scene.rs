@@ -43,6 +43,7 @@ pub struct TextStyles {
     toolbar: std::cell::RefCell<Option<(ToolbarKey, Option<ToolbarLayout>)>>,
     motion: std::cell::RefCell<transition::State>,
     chrome: std::cell::RefCell<transition::Chrome>,
+    hint: std::cell::RefCell<transition::Hint>,
     /// Frosted backdrop of the toolbar; created on first use by this surface's device context.
     backdrop: std::cell::RefCell<Option<ID2D1Effect>>,
     animate: std::cell::Cell<bool>,
@@ -67,6 +68,7 @@ impl TextStyles {
             toolbar: Default::default(),
             motion: Default::default(),
             chrome: Default::default(),
+            hint: Default::default(),
             backdrop: Default::default(),
             animate: std::cell::Cell::new(false),
             epoch: std::time::Instant::now(),
@@ -83,13 +85,15 @@ impl TextStyles {
     pub fn reset_motion(&self) {
         self.motion.borrow_mut().clear();
         self.chrome.borrow_mut().clear();
+        self.hint.borrow_mut().clear();
     }
     fn reset_toolbar_motion(&self) {
         self.motion.borrow_mut().clear();
     }
     pub fn animations_pending(&self) -> bool {
         let now = self.animation_time();
-        self.animate.get() && (self.motion.borrow().active(now) || self.chrome.borrow().active(now))
+        self.animate.get()
+            && (self.motion.borrow().active(now) || self.chrome.borrow().active(now) || self.hint.borrow().active(now))
     }
     pub fn set_animation_time(&self, seconds: Option<f64>) {
         self.time_override.set(seconds);
@@ -237,6 +241,8 @@ pub struct Marks<'a> {
     pub drawing: Option<View<'a>>,
     /// The highlight is a hovered window, not a selection: let it glide between windows.
     pub glide: bool,
+    /// Show the «Alt + click» hint on this surface (pointer here, nothing selected yet).
+    pub hint: bool,
     /// Closing motion, eased 0 → 1: chrome and dimming fade, the toolbar folds into the selection.
     pub exit: f32,
     /// The capture was exported: the selection flashes once as the overlay leaves.
@@ -389,6 +395,10 @@ pub fn draw(
     }
     if let Some(magnifier) = scene.marks.magnifier {
         draw_magnifier(gpu, shared, text, theme, scene, magnifier)?;
+    }
+    let hint = text.hint.borrow_mut().sample(scene.marks.hint && leave >= 1.0, now, animate);
+    if hint > 0.002 {
+        draw_hint(gpu, shared, text, theme, scene, hint)?;
     }
     Ok(())
 }
@@ -1160,6 +1170,39 @@ fn draw_magnifier(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// «[Alt] + клик по тексту — перевод»: a quiet card at the top of the screen under the pointer,
+/// so the gesture can be discovered without reading anything elsewhere.
+fn draw_hint(gpu: &Gpu, shared: &Shared, text: &TextStyles, theme: &Theme, scene: &Scene, a: f32) -> Result<()> {
+    let s = scene.scale;
+    let key = measure(shared, &text.label, "Alt")?;
+    let rest = measure(shared, &text.label, "+ клик по тексту — перевод")?;
+    let (pad, gap) = (12.0 * s, 7.0 * s);
+    let key_w = key.w + 12.0 * s;
+    let h = (rest.h + 16.0 * s).max(key.h + 14.0 * s);
+    let w = pad + key_w + gap + rest.w + pad;
+    let x = ((scene.size.0 as f32 - w) / 2.0).round();
+    let y = (20.0 * s - (1.0 - a) * 6.0 * s).round();
+    let mut card = *theme;
+    card.surface = fade(theme.surface, a);
+    card.hairline = fade(theme.hairline, a);
+    card.sheen = fade(theme.sheen, a);
+    panel(gpu, &card, rect(x, y, x + w, y + h), h / 2.0, s);
+    let cap = rect(x + pad, y + (h - key.h - 8.0 * s) / 2.0, x + pad + key_w, y + (h + key.h + 8.0 * s) / 2.0);
+    fill_rounded(gpu, fade(theme.control, a), cap, 5.0 * s);
+    unsafe {
+        gpu.brush.SetColor(&fade(theme.hairline, a));
+        gpu.d2d.DrawRoundedRectangle(
+            &D2D1_ROUNDED_RECT { rect: cap, radiusX: 5.0 * s, radiusY: 5.0 * s },
+            &gpu.brush,
+            1.0,
+            None::<&ID2D1StrokeStyle>,
+        );
+    }
+    draw_text(gpu, &key, cap.left + 6.0 * s, y + (h - key.h) / 2.0, fade(theme.text, a));
+    draw_text(gpu, &rest, cap.right + gap, y + (h - rest.h) / 2.0, fade(theme.text_muted, a));
+    Ok(())
+}
+
 fn size_label(
     gpu: &Gpu,
     shared: &Shared,

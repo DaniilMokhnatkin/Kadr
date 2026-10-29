@@ -448,3 +448,29 @@ impl Chrome {
         }
     }
 }
+
+/// The «Alt + click» hint: appears after the pointer has rested a moment, leaves at once.
+#[derive(Default)]
+pub(super) struct Hint {
+    shown: Option<Spring>,
+}
+impl Hint {
+    pub fn clear(&mut self) {
+        self.shown = None;
+    }
+    pub fn active(&self, now: f64) -> bool {
+        self.shown.is_some_and(|s| s.active(now))
+    }
+    pub fn sample(&mut self, on: bool, now: f64, animate: bool) -> f32 {
+        if !animate {
+            return f32::from(on);
+        }
+        let s = self.shown.get_or_insert_with(|| Spring::with(0.0, Curve::FADE).precise(0.002));
+        if on && s.goal() < 0.5 {
+            s.target_at(1.0, now, now + 0.45);
+        } else if !on && s.goal() > 0.5 {
+            s.target_with(0.0, Curve::FADE_OUT, now);
+        }
+        s.value(now)
+    }
+}

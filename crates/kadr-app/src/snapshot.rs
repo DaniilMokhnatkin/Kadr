@@ -107,6 +107,7 @@ fn run_tool(
                 glide: false,
                 exit: exit.unwrap_or(0.0),
                 flash: exit.is_some(),
+                hint: !editor,
             },
         };
         ctx.SetTarget(&target);
