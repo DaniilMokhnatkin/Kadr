@@ -1,0 +1,25 @@
+[package]
+name = "kadr-app"
+description = "Kadr — резидентный скриншотер: трей, хоткеи, оркестрация"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "kadr"
+path = "src/main.rs"
+
+[features]
+# Манифест с uiAccess="true". Такая сборка запускается только подписанной и из Program Files.
+uiaccess = []
+
+[dependencies]
+kadr-win.workspace = true
+kadr-doc.workspace = true
+kadr-capture.workspace = true
+kadr-render.workspace = true
+kadr-editor.workspace = true
+kadr-export.workspace = true
+png.workspace = true
+windows.workspace = true

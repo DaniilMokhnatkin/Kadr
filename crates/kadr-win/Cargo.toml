@@ -1,0 +1,10 @@
+[package]
+name = "kadr-win"
+description = "Тонкие обёртки над Win32 и общие утилиты процесса: лог, тайминги, привилегии"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+windows.workspace = true

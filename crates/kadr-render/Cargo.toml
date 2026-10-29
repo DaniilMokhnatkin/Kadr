@@ -1,0 +1,12 @@
+[package]
+name = "kadr-render"
+description = "GPU-контекст (D3D11/D2D/DWrite/DirectComposition), токены дизайна и отрисовка сцены"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+kadr-win.workspace = true
+windows.workspace = true
+windows-numerics.workspace = true

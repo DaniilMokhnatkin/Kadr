@@ -1,0 +1,135 @@
+//! `kadr --snapshot [файл.png] [--scale 1.5]` — сцена оверлея в PNG без окон и без реального экрана.
+//! Фон — полосы «худших» цветов (белый, светло-серый, средне-серый, цвет акцента, чёрный) и радуга
+//! снизу: сразу видно, читаются ли рамка и подписи на любом скрине. Для ревью дизайна и будущих
+//! golden-тестов.
+
+use std::error::Error;
+use std::ffi::c_void;
+use std::fs::File;
+use std::io::BufWriter;
+
+use windows::Win32::Foundation::RECT;
+use windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_U;
+use windows::Win32::Graphics::Direct2D::{
+    D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_CPU_READ, D2D1_BITMAP_OPTIONS_NONE,
+    D2D1_BITMAP_OPTIONS_TARGET, D2D1_MAP_OPTIONS_READ,
+};
+use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+
+use kadr_render::gpu::{Gpu, Shared, bitmap_props};
+use kadr_render::scene::{self, Hud, HudRow, Magnifier, Marks, Scene, TextStyles, Toolbar, ToolbarButton};
+use kadr_render::theme::Theme;
+
+const BANDS: [u32; 5] = [0xffffff, 0xd4d4d8, 0x777777, 0x5e6ad2, 0x000000];
+
+pub fn run(path: &str, scale: f32) -> Result<(), Box<dyn Error>> {
+    let shared = Shared::new()?;
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1()? };
+    let adapter = unsafe { factory.EnumAdapters1(0)? };
+    let gpu = Gpu::new(&shared, &adapter, "snapshot".into())?;
+
+    let (w, h) = ((1600.0 * scale) as u32, (900.0 * scale) as u32);
+    let size = D2D_SIZE_U { width: w, height: h };
+    let pixels = background(w, h);
+    let at = |v: f32| (v * scale) as i32;
+    // Выделение пересекает светлую, серую и акцентную полосы и радугу; правый край — на цвете акцента.
+    let selection = RECT { left: at(470.0), top: at(300.0), right: at(1270.0), bottom: at(700.0) };
+    let hud = sample_hud();
+    // Курсор у правого нижнего угла, как при растягивании: видны и маркеры, и лупа.
+    let cursor = (at(1268.0), at(698.0));
+    let i = ((cursor.1 as u32 * w + cursor.0 as u32) * 4) as usize;
+    let magnifier = Magnifier { at: cursor, rgb: Some([pixels[i + 2], pixels[i + 1], pixels[i]]) };
+
+    let rgba = unsafe {
+        let ctx = &gpu.d2d;
+        let background =
+            ctx.CreateBitmap(size, Some(pixels.as_ptr() as *const c_void), w * 4, &bitmap_props(D2D1_BITMAP_OPTIONS_NONE))?;
+        let target = ctx.CreateBitmap(size, None, 0, &bitmap_props(D2D1_BITMAP_OPTIONS_TARGET))?;
+        let scene = Scene {
+            frame: Some(&background),
+            origin: (0, 0),
+            size: (w, h),
+            scale,
+            marks: Marks {
+                selection: Some(selection),
+                handles: true,
+                magnifier: Some(&magnifier),
+                toolbar: Some(Toolbar { hovered: Some(ToolbarButton::Save) }),
+                hud: Some(&hud),
+            },
+        };
+        ctx.SetTarget(&target);
+        ctx.BeginDraw();
+        let drawn = scene::draw(&gpu, &shared, &TextStyles::new(&shared, scale)?, &Theme::current(), &scene);
+        ctx.EndDraw(None, None)?;
+        drawn?;
+
+        let readback =
+            ctx.CreateBitmap(size, None, 0, &bitmap_props(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW))?;
+        readback.CopyFromBitmap(None, &target, None)?;
+        let mapped = readback.Map(D2D1_MAP_OPTIONS_READ)?;
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            let row = std::slice::from_raw_parts(mapped.bits.add((y * mapped.pitch) as usize), (w * 4) as usize);
+            for [b, g, r, _] in row.as_chunks::<4>().0 {
+                rgba.extend_from_slice(&[*r, *g, *b, 255]);
+            }
+        }
+        readback.Unmap()?;
+        rgba
+    };
+
+    let mut encoder = png::Encoder::new(BufWriter::new(File::create(path)?), w, h);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.write_header()?.write_image_data(&rgba)?;
+    kadr_win::log_info!("снимок сцены сохранён: {path} ({w}×{h}, масштаб {scale})");
+    Ok(())
+}
+
+/// Цифры — из реального бенчмарка прогретого режима на машине разработки.
+fn sample_hud() -> Hud {
+    let ms = |label: &str, value: &str| HudRow::new(label, value.into(), "мс");
+    Hud {
+        title: "Kadr".into(),
+        scope: "M0 · PrtSc · Medium · прогретый (пример)".into(),
+        lead_label: "хоткей → экран".into(),
+        lead: Some(("8.2".into(), "мс".into())),
+        groups: vec![
+            vec![ms("захват", "0.2"), ms("рендер", "0.8"), ms("показ", "2.1"), ms("до экрана", "5.0")],
+            vec![ms("p50", "8.2"), ms("p95", "13.6"), HudRow::new("замеров", "10".into(), "")],
+            vec![ms("фокус после показа", "0.0"), HudRow::new("очередь сообщений", "~0".into(), "мс")],
+        ],
+        hint: "Esc закрыть · H скрыть панель".into(),
+    }
+}
+
+/// BGRA: пять вертикальных полос, нижняя треть — радуга.
+fn background(w: u32, h: u32) -> Vec<u8> {
+    let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let c = if y * 3 >= h * 2 { hue(x as f32 / w as f32) } else { BANDS[(x * 5 / w) as usize] };
+            pixels.extend_from_slice(&[(c & 0xff) as u8, ((c >> 8) & 0xff) as u8, ((c >> 16) & 0xff) as u8, 255]);
+        }
+    }
+    pixels
+}
+
+/// HSV(t, 0.8, 0.9) → 0xRRGGBB.
+fn hue(t: f32) -> u32 {
+    let (v, s) = (0.9, 0.8);
+    let h = t * 6.0;
+    let f = h - h.floor();
+    let (p, q, r) = (v * (1.0 - s), v * (1.0 - s * f), v * (1.0 - s * (1.0 - f)));
+    let (red, green, blue) = match (h.floor() as i32).rem_euclid(6) {
+        0 => (v, r, p),
+        1 => (q, v, p),
+        2 => (p, v, r),
+        3 => (p, q, v),
+        4 => (r, p, v),
+        _ => (v, p, q),
+    };
+    let byte = |c: f32| (c * 255.0) as u32;
+    (byte(red) << 16) | (byte(green) << 8) | byte(blue)
+}

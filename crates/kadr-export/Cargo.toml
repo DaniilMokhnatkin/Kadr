@@ -1,0 +1,13 @@
+[package]
+name = "kadr-export"
+description = "Экспорт снимка: PNG, буфер обмена, сохранение в файл"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+kadr-doc.workspace = true
+kadr-win.workspace = true
+png.workspace = true
+windows.workspace = true
