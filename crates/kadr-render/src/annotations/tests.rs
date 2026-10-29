@@ -12,6 +12,87 @@ fn setup() -> (Shared, Gpu) {
     let gpu = Gpu::new(&shared, &unsafe { factory.EnumAdapters1(0).unwrap() }, "test".into()).unwrap();
     (shared, gpu)
 }
+#[test]
+fn blur_cpu_work_is_shared_between_surfaces_and_invalidated_for_different_frames() {
+    let (shared, gpu) = setup();
+    let crop = Rect::new(0, 0, 128, 64);
+    let frames = vec![image(crop, false)];
+    let mut blur = Annotation::new(1, Tool::Blur, kadr_doc::Point::new(10, 10));
+    blur.points[1] = [80, 50];
+    flatten(&gpu, &shared, &frames, crop, std::slice::from_ref(&blur)).unwrap();
+    let first = shared.blur.borrow().as_ref().unwrap().image.clone();
+    flatten(&gpu, &shared, &frames, crop, std::slice::from_ref(&blur)).unwrap();
+    assert!(Arc::ptr_eq(&first, &shared.blur.borrow().as_ref().unwrap().image));
+    flatten(&gpu, &shared, &[image(crop, true)], crop, &[blur]).unwrap();
+    assert!(!Arc::ptr_eq(&first, &shared.blur.borrow().as_ref().unwrap().image));
+    shared.clear_annotation_cache();
+    assert!(shared.blur.borrow().is_none());
+}
+#[test]
+fn gpu_exposes_a_ready_frame_event_without_showing_a_window() {
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows::Win32::Graphics::Dxgi::Common::DXGI_ALPHA_MODE_IGNORE;
+    use windows::Win32::Graphics::Dxgi::*;
+    use windows::Win32::System::Threading::WaitForSingleObject;
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    let (_, gpu) = setup();
+    unsafe {
+        let desc = DXGI_SWAP_CHAIN_DESC1 {
+            Width: 64,
+            Height: 64,
+            Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+            BufferCount: 2,
+            Scaling: DXGI_SCALING_STRETCH,
+            SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+            AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+            Flags: DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0 as u32,
+            ..Default::default()
+        };
+        let chain = gpu
+            .factory
+            .CreateSwapChainForComposition(&gpu.device, &desc, None::<&IDXGIOutput>)
+            .unwrap();
+        use windows::core::Interface;
+        let chain: IDXGISwapChain2 = chain.cast().unwrap();
+        let foreground = GetForegroundWindow();
+        let window = CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            w!("STATIC"),
+            w!("Kadr frame pacing test"),
+            WS_POPUP,
+            0,
+            0,
+            64,
+            64,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let composition = gpu.dcomp.CreateTargetForHwnd(window, true).unwrap();
+        let visual = gpu.dcomp.CreateVisual().unwrap();
+        visual.SetContent(&chain).unwrap();
+        composition.SetRoot(&visual).unwrap();
+        gpu.dcomp.Commit().unwrap();
+        chain.SetMaximumFrameLatency(1).unwrap();
+        let event = chain.GetFrameLatencyWaitableObject();
+        assert!(!event.is_invalid());
+        let ready = WaitForSingleObject(event, 1000);
+        let shown = chain.Present(1, DXGI_PRESENT_DO_NOT_WAIT);
+        assert!(!IsWindowVisible(window).as_bool());
+        assert_eq!(GetForegroundWindow(), foreground);
+        let _ = DestroyWindow(window);
+        let _ = CloseHandle(event);
+        assert_eq!(ready, WAIT_OBJECT_0);
+        assert!(
+            shown.is_ok() || shown == DXGI_ERROR_WAS_STILL_DRAWING,
+            "Present returned {shown:?}"
+        );
+    }
+}
 fn image(r: Rect, inverse: bool) -> Arc<Image> {
     let mut pixels = Vec::new();
     for y in 0..r.height() {

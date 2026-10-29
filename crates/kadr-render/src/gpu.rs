@@ -3,12 +3,13 @@
 
 use std::mem::ManuallyDrop;
 
+use windows::Win32::Foundation::E_FAIL;
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_PIXEL_FORMAT};
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_BITMAP_OPTIONS, D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1Device,
-    ID2D1DeviceContext, ID2D1Factory1, ID2D1SolidColorBrush,
+    D2D1_BITMAP_OPTIONS, D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
+    ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0,
@@ -25,7 +26,6 @@ use windows::Win32::Graphics::DirectWrite::{
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Dxgi::{IDXGIAdapter1, IDXGIDevice1, IDXGIFactory2};
 use windows::core::{BOOL, Error, Interface, PCWSTR, Result};
-use windows::Win32::Foundation::E_FAIL;
 
 use kadr_win::wide;
 
@@ -33,6 +33,7 @@ use crate::theme;
 
 /// Фабрики, общие для всех адаптеров.
 pub struct Shared {
+    pub(crate) blur: std::cell::RefCell<Option<crate::annotations::CpuBlur>>,
     pub d2d: ID2D1Factory1,
     pub dwrite: IDWriteFactory,
     /// UTF-16 с нулём на конце — готово для CreateTextFormat.
@@ -48,9 +49,21 @@ impl Shared {
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
             let ui_family = pick_family(&dwrite, theme::UI_FONTS);
             let tabular = dwrite.CreateTypography()?;
-            tabular.AddFontFeature(DWRITE_FONT_FEATURE { nameTag: DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES, parameter: 1 })?;
-            Ok(Self { d2d, dwrite, ui_family, tabular })
+            tabular.AddFontFeature(DWRITE_FONT_FEATURE {
+                nameTag: DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES,
+                parameter: 1,
+            })?;
+            Ok(Self {
+                d2d,
+                dwrite,
+                ui_family,
+                tabular,
+                blur: Default::default(),
+            })
         }
+    }
+    pub fn clear_annotation_cache(&self) {
+        *self.blur.borrow_mut() = None;
     }
 }
 
@@ -69,7 +82,12 @@ pub struct Gpu {
 impl Gpu {
     pub fn new(shared: &Shared, adapter: &IDXGIAdapter1, name: String) -> Result<Self> {
         unsafe {
-            let levels = [D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0];
+            let levels = [
+                D3D_FEATURE_LEVEL_11_1,
+                D3D_FEATURE_LEVEL_11_0,
+                D3D_FEATURE_LEVEL_10_1,
+                D3D_FEATURE_LEVEL_10_0,
+            ];
             let mut device = None;
             let mut context = None;
             D3D11CreateDevice(
@@ -95,7 +113,16 @@ impl Gpu {
             d2d.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
             let dcomp: IDCompositionDevice = DCompositionCreateDevice(&dxgi)?;
             let brush = d2d.CreateSolidColorBrush(&D2D1_COLOR_F::default(), None)?;
-            Ok(Self { name, device, context, factory, d2d, dcomp, brush, _d2d_device: d2d_device })
+            Ok(Self {
+                name,
+                device,
+                context,
+                factory,
+                d2d,
+                dcomp,
+                brush,
+                _d2d_device: d2d_device,
+            })
         }
     }
 }
@@ -103,7 +130,10 @@ impl Gpu {
 /// Свойства BGRA-битмапа в пикселях (96 DPI: одна единица D2D = один физический пиксель).
 pub fn bitmap_props(options: D2D1_BITMAP_OPTIONS) -> D2D1_BITMAP_PROPERTIES1 {
     D2D1_BITMAP_PROPERTIES1 {
-        pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_IGNORE },
+        pixelFormat: D2D1_PIXEL_FORMAT {
+            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            alphaMode: D2D1_ALPHA_MODE_IGNORE,
+        },
         dpiX: 96.0,
         dpiY: 96.0,
         bitmapOptions: options,

@@ -22,7 +22,13 @@ pub struct View<'a> {
 }
 #[derive(Default)]
 pub struct Cache {
-    blur: Option<(Vec<Annotation>, Rect, ID2D1Bitmap1)>,
+    blur: Option<(Arc<Image>, ID2D1Bitmap1)>,
+}
+pub(crate) struct CpuBlur {
+    shapes: Vec<Annotation>,
+    crop: Rect,
+    frames: Vec<Arc<Image>>,
+    image: Arc<Image>,
 }
 pub fn bitmap(gpu: &Gpu, image: &Image) -> Result<ID2D1Bitmap1> {
     unsafe {
@@ -46,10 +52,12 @@ pub fn draw(gpu: &Gpu, shared: &Shared, origin: Point, view: View, cache: &mut C
         let shapes = view.shapes.iter().chain(view.preview);
         let blurs: Vec<_> = shapes.clone().filter(|s| s.tool.is_blur()).cloned().collect();
         if !blurs.is_empty() {
-            let same = cache
-                .blur
-                .as_ref()
-                .is_some_and(|(old, r, _)| *old == blurs && *r == view.crop);
+            let same = shared.blur.borrow().as_ref().is_some_and(|old| {
+                old.shapes == blurs
+                    && old.crop == view.crop
+                    && old.frames.len() == view.frames.len()
+                    && old.frames.iter().zip(view.frames).all(|(a, b)| Arc::ptr_eq(a, b))
+            });
             if !same {
                 let mut base = Image::compose(view.frames.iter().map(Arc::as_ref), view.crop);
                 for shape in &blurs {
@@ -70,9 +78,18 @@ pub fn draw(gpu: &Gpu, shared: &Shared, origin: Point, view: View, cache: &mut C
                         }
                     }
                 }
-                cache.blur = Some((blurs, view.crop, bitmap(gpu, &base)?));
+                *shared.blur.borrow_mut() = Some(CpuBlur {
+                    shapes: blurs,
+                    crop: view.crop,
+                    frames: view.frames.to_vec(),
+                    image: Arc::new(base),
+                });
             }
-            if let Some((_, _, image)) = &cache.blur {
+            let cpu = shared.blur.borrow().as_ref().unwrap().image.clone();
+            if !cache.blur.as_ref().is_some_and(|(old, _)| Arc::ptr_eq(old, &cpu)) {
+                cache.blur = Some((cpu.clone(), bitmap(gpu, &cpu)?));
+            }
+            if let Some((_, image)) = &cache.blur {
                 unsafe {
                     gpu.d2d.DrawBitmap(
                         image,

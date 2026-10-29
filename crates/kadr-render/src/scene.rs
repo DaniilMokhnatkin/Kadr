@@ -33,6 +33,7 @@ pub struct TextStyles {
     figure: Style,
     lead: Style,
     button: Style,
+    toolbar: std::cell::RefCell<Option<(ToolbarKey, Option<ToolbarLayout>)>>,
 }
 
 impl TextStyles {
@@ -49,6 +50,7 @@ impl TextStyles {
             figure: style(DWRITE_FONT_WEIGHT_REGULAR, dip::TEXT, true)?,
             lead: style(DWRITE_FONT_WEIGHT_REGULAR, dip::LEAD, true)?,
             button: style(DWRITE_FONT_WEIGHT_REGULAR, dip::TITLE, false)?,
+            toolbar: Default::default(),
         })
     }
 }
@@ -144,7 +146,7 @@ pub struct Toolbar {
     pub hovered: Option<ToolbarButton>,
     pub editor: Option<EditorBar>,
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct EditorBar {
     pub tool: Tool,
     pub color: usize,
@@ -199,7 +201,18 @@ pub fn draw(
         }
     }
 
-    if let Some(drawing) = scene.marks.drawing {
+    if let Some(drawing) = scene.marks.drawing
+        && intersect(
+            rect(
+                (drawing.crop.left - scene.origin.0) as f32,
+                (drawing.crop.top - scene.origin.1) as f32,
+                (drawing.crop.right - scene.origin.0) as f32,
+                (drawing.crop.bottom - scene.origin.1) as f32,
+            ),
+            full,
+        )
+        .is_some()
+    {
         annotations::draw(
             gpu,
             shared,
@@ -264,14 +277,45 @@ pub fn draw(
     Ok(())
 }
 
+#[derive(Clone)]
 struct ToolbarLayout {
     panel: D2D_RECT_F,
     buttons: Vec<(ToolbarButton, D2D_RECT_F, Text)>,
+}
+#[derive(Clone, PartialEq)]
+struct ToolbarKey {
+    size: (f32, f32),
+    scale: f32,
+    sel: (f32, f32, f32, f32),
+    editor: Option<EditorBar>,
 }
 
 /// Панель под выделением, по правому краю; нет места снизу — сверху, нет и там — внутри.
 /// Рисует её та поверхность, где лежит правый нижний угол выделения.
 fn toolbar_layout(
+    shared: &Shared,
+    text: &TextStyles,
+    size: (f32, f32),
+    scale: f32,
+    sel: D2D_RECT_F,
+    editor: Option<EditorBar>,
+) -> Result<Option<ToolbarLayout>> {
+    let key = ToolbarKey {
+        size,
+        scale,
+        sel: (sel.left, sel.top, sel.right, sel.bottom),
+        editor,
+    };
+    if let Some((old, layout)) = &*text.toolbar.borrow()
+        && *old == key
+    {
+        return Ok(layout.clone());
+    }
+    let layout = build_toolbar_layout(shared, text, size, scale, sel, editor)?;
+    *text.toolbar.borrow_mut() = Some((key, layout.clone()));
+    Ok(layout)
+}
+fn build_toolbar_layout(
     shared: &Shared,
     text: &TextStyles,
     size: (f32, f32),
@@ -845,6 +889,7 @@ fn draw_hud(
     Ok(())
 }
 
+#[derive(Clone)]
 struct Text {
     layout: IDWriteTextLayout,
     w: f32,
