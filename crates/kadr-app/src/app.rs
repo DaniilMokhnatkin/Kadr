@@ -133,6 +133,7 @@ pub struct App {
     loading_recent: bool,
     recovery_notice: bool,
     bench_mode: bool,
+    icons: crate::icons::Icons,
 }
 
 /// Итог фонового сохранения: путь или путь с текстом ошибки.
@@ -161,8 +162,9 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
         // COM нужен диалогу «Сохранить как» и папкам оболочки.
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let instance: HINSTANCE = GetModuleHandleW(None)?.into();
-        register_class(instance, HOST_CLASS, host_proc, HCURSOR::default())?;
-        register_class(instance, overlay::CLASS, overlay_proc, LoadCursorW(None, IDC_CROSS)?)?;
+        let icons = crate::icons::Icons::load(instance)?;
+        register_class(instance, HOST_CLASS, host_proc, HCURSOR::default(), &icons)?;
+        register_class(instance, overlay::CLASS, overlay_proc, LoadCursorW(None, IDC_CROSS)?, &icons)?;
         // Обычное скрытое окно, а не message-only: только так приходят WM_DISPLAYCHANGE и TaskbarCreated.
         let hwnd = CreateWindowExW(
             WS_EX_TOOLWINDOW,
@@ -219,6 +221,7 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
             loading_recent: false,
             recovery_notice: false,
             bench_mode: bench.is_some(),
+            icons,
         };
         app.build_outputs();
         app.log_startup();
@@ -362,7 +365,7 @@ impl App {
         let mut data = self.tray_data();
         data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
         data.uCallbackMessage = WM_APP_TRAY;
-        data.hIcon = unsafe { LoadIconW(None, IDI_APPLICATION) }.unwrap_or_default();
+        data.hIcon = self.icons.tray();
         let tip = wide("Kadr — снимки экрана; правый клик: меню");
         data.szTip[..tip.len()].copy_from_slice(&tip);
         if !unsafe { Shell_NotifyIconW(NIM_ADD, &data) }.as_bool() {
@@ -392,6 +395,14 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn on_theme_change(&mut self) {
+        self.theme = Theme::current();
+        let mut data = self.tray_data();
+        data.uFlags = NIF_ICON;
+        data.hIcon = self.icons.tray();
+        unsafe { let _ = Shell_NotifyIconW(NIM_MODIFY, &data); }
     }
 
     /// Итог эксперимента M0 по одному нажатию PrtSc: кто его увидел.
@@ -1066,7 +1077,7 @@ unsafe extern "system" fn host_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         WM_DESTROYCLIPBOARD => with_app(|app| app.clipboard = None),
         WM_TIMER => with_app(|app| app.on_timer(wp.0)),
         WM_DISPLAYCHANGE => with_app(App::on_display_change),
-        WM_SETTINGCHANGE | WM_SYSCOLORCHANGE => with_app(|app| app.theme = Theme::current()),
+        WM_SETTINGCHANGE | WM_SYSCOLORCHANGE | WM_THEMECHANGED => with_app(App::on_theme_change),
         m if m != 0 && m == TASKBAR_CREATED.load(Relaxed) => with_app(|app| app.add_tray_icon()),
         _ => false,
     };
@@ -1113,12 +1124,15 @@ unsafe fn register_class(
     name: PCWSTR,
     proc: unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT,
     cursor: HCURSOR,
+    icons: &crate::icons::Icons,
 ) -> Result<()> {
     let class = WNDCLASSEXW {
         cbSize: size_of::<WNDCLASSEXW>() as u32,
         lpfnWndProc: Some(proc),
         hInstance: instance,
         hCursor: cursor,
+        hIcon: icons.app(),
+        hIconSm: icons.small(),
         lpszClassName: name,
         ..Default::default()
     };

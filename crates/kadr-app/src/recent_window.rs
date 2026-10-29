@@ -41,7 +41,7 @@ pub struct Window {
 const CLEAR: usize = 200;
 const FIRST: usize = 100;
 impl Window {
-    pub fn new(instance: HINSTANCE, host: HWND, message: u32) -> Result<Self> {
+    pub fn new(instance: HINSTANCE, host: HWND, message: u32, app_icon: HICON, small_icon: HICON) -> Result<Self> {
         unsafe {
             let class = WNDCLASSEXW {
                 cbSize: size_of::<WNDCLASSEXW>() as u32,
@@ -49,6 +49,8 @@ impl Window {
                 lpfnWndProc: Some(proc),
                 lpszClassName: w!("KadrRecent"),
                 hCursor: LoadCursorW(None, IDC_ARROW)?,
+                hIcon: app_icon,
+                hIconSm: small_icon,
                 ..Default::default()
             };
             RegisterClassExW(&class);

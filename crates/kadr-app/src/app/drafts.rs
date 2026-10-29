@@ -92,7 +92,7 @@ impl App {
         self.close_session();
         self.recovery_notice = false;
         if self.recent_window.is_none() {
-            match Window::new(self.instance, self.hwnd, WM_APP_RECENT_UI) {
+            match Window::new(self.instance, self.hwnd, WM_APP_RECENT_UI, self.icons.app(), self.icons.small()) {
                 Ok(window) => self.recent_window = Some(window),
                 Err(e) => {
                     self.notify("Не удалось открыть «Недавние»", &e.message());

@@ -14,6 +14,7 @@ mod capture_mode;
 mod config_watch;
 mod recent_worker;
 mod recent_window;
+mod icons;
 mod snapshot;
 
 use std::error::Error;
