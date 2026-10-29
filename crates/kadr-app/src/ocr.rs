@@ -39,8 +39,8 @@ pub fn recognize(image: &Image) -> Result<Vec<Line>> {
         source.rect.height(),
         BitmapAlphaMode::Ignore,
     )?;
-    let mut best: Option<(usize, Vec<Line>)> = None;
-    for engine in engines()? {
+    let mut readings = Vec::new();
+    for (cyrillic, engine) in engines()? {
         let result = engine.RecognizeAsync(&bitmap)?.join()?;
         let lines = result.Lines()?;
         let mut out = Vec::new();
@@ -62,21 +62,73 @@ pub fn recognize(image: &Image) -> Result<Vec<Line>> {
                 out.push(Line { text: line.Text()?.to_string(), rect });
             }
         }
-        let score = out.iter().map(|l| l.text.chars().filter(|c| c.is_alphanumeric()).count()).sum();
-        if best.as_ref().is_none_or(|(s, _)| score > *s) {
-            best = Some((score, out));
+        readings.push((cyrillic, out));
+    }
+    Ok(merge(readings))
+}
+
+/// Words written wholly in one script (Cyrillic or Latin) with no digits inside: real words.
+/// Misreadings mix scripts («Неllо») or swap letters for digits («CKonhp0BaTb»).
+fn clean_words(text: &str, cyrillic_script: bool) -> usize {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().any(char::is_alphabetic))
+        .filter(|w| {
+            w.chars().all(|c| {
+                let cyr = ('а'..='я').contains(&c.to_lowercase().next().unwrap_or(c)) || "ёєіїўђћјљњџ".contains(c.to_lowercase().next().unwrap_or(c));
+                c.is_alphabetic() && cyr == cyrillic_script
+            })
+        })
+        .count()
+}
+
+fn overlap(a: Rect, b: Rect) -> f32 {
+    let Some(i) = a.intersect(&b) else { return 0.0 };
+    let area = |r: Rect| r.width() as f32 * r.height() as f32;
+    area(i) / (area(a) + area(b) - area(i)).max(1.0)
+}
+
+/// One reading from two recognizers, line by line. The Latin-only recognizer turns Cyrillic into
+/// look-alike letters and digits («CKonhp0BaTb»), so it may never win on a Cyrillic line; the
+/// Cyrillic recognizer is weaker on English, so a Latin line takes the Latin reading.
+fn merge(readings: Vec<(bool, Vec<Line>)>) -> Vec<Line> {
+    let latin = readings.iter().find(|(c, _)| !c).map(|(_, l)| l.clone());
+    let Some(mut base) = readings.into_iter().find(|(c, _)| *c).map(|(_, l)| l) else {
+        return latin.unwrap_or_default();
+    };
+    let Some(latin) = latin else { return base };
+    let mut used = vec![false; latin.len()];
+    for line in &mut base {
+        let best = latin
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (i, overlap(line.rect, l.rect)))
+            .filter(|(_, o)| *o > 0.3)
+            .max_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((i, _)) = best {
+            used[i] = true;
+            let words = line.text.split(|c: char| !c.is_alphanumeric()).filter(|w| w.chars().any(char::is_alphabetic)).count();
+            // Mostly whole Cyrillic words: a Russian line. Otherwise the Latin reader knows better.
+            if clean_words(&line.text, true) * 2 <= words {
+                *line = latin[i].clone();
+            }
         }
     }
-    Ok(best.map(|(_, l)| l).unwrap_or_default())
+    // Lines only the Latin recognizer saw, as long as they are not Cyrillic in disguise.
+    base.extend(latin.into_iter().zip(used).filter(|(_, u)| !u).map(|(l, _)| l));
+    base.sort_by_key(|l| (l.rect.top / 4, l.rect.left));
+    base
 }
 
 /// The user's own recognizer first, then English and Russian if installed and different.
-fn engines() -> Result<Vec<OcrEngine>> {
+/// The flag marks recognizers that read Cyrillic.
+fn engines() -> Result<Vec<(bool, OcrEngine)>> {
+    let reads_cyrillic = |tag: &str| ["ru", "uk", "be", "bg", "sr", "kk"].iter().any(|p| tag.starts_with(p));
     let mut out = Vec::new();
     let mut tags = Vec::new();
     if let Ok(engine) = OcrEngine::TryCreateFromUserProfileLanguages() {
-        tags.push(engine.RecognizerLanguage()?.LanguageTag()?.to_string());
-        out.push(engine);
+        let tag = engine.RecognizerLanguage()?.LanguageTag()?.to_string();
+        out.push((reads_cyrillic(&tag), engine));
+        tags.push(tag);
     }
     for tag in ["en-US", "ru-RU"] {
         let language = Language::CreateLanguage(&HSTRING::from(tag))?;
@@ -85,8 +137,8 @@ fn engines() -> Result<Vec<OcrEngine>> {
             continue;
         }
         if let Ok(engine) = OcrEngine::TryCreateFromLanguage(&language) {
+            out.push((reads_cyrillic(tag), engine));
             tags.push(tag.into());
-            out.push(engine);
         }
     }
     Ok(out)
@@ -170,10 +222,36 @@ mod tests {
         assert!(all.contains("Hello") && all.contains("2026"), "{all:?}");
         assert!(lines[0].rect.left >= image.rect.left && lines[0].rect.right <= image.rect.right);
     }
+    #[test]
+    fn merge_keeps_cyrillic_lines_from_the_cyrillic_reader_and_latin_from_the_latin_one() {
+        let ru = vec![
+            line("Скопировать текст", 10, 10, 300, 30),
+            line("Неllо wоrld", 10, 50, 300, 70),
+        ];
+        let en = vec![
+            line("CKonhp0BaTb TeKCT", 12, 11, 298, 31),
+            line("Hello world", 10, 50, 300, 70),
+            line("only latin saw this", 10, 90, 300, 110),
+        ];
+        let merged = merge(vec![(true, ru), (false, en)]);
+        let texts: Vec<_> = merged.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, ["Скопировать текст", "Hello world", "only latin saw this"]);
+    }
+    #[test]
+    fn reads_russian_and_mixed_text_without_latin_look_alikes() {
+        let Ok(engines) = engines() else { return };
+        if !engines.iter().any(|(c, _)| *c) {
+            return;
+        }
+        let all = text(&recognize(&render("Скопировать текст
+Hello Kadr 2026")).unwrap());
+        assert!(all.contains("Скопировать") && all.contains("текст"), "{all:?}");
+        assert!(all.contains("Hello") && all.contains("2026"), "{all:?}");
+    }
     /// White text image via GDI, offset on the desktop to check coordinate mapping.
     fn render(value: &str) -> Image {
         use windows::Win32::Graphics::Gdi::*;
-        let (w, h) = (360, 80);
+        let (w, h) = (520, 60 + 44 * value.lines().count() as i32);
         unsafe {
             let dc = CreateCompatibleDC(None);
             let info = BITMAPINFO {
@@ -197,7 +275,7 @@ mod tests {
             let old_font = SelectObject(dc, font.into());
             let mut wide: Vec<u16> = value.encode_utf16().collect();
             let mut r = windows::Win32::Foundation::RECT { left: 16, top: 16, right: w, bottom: h };
-            DrawTextW(dc, &mut wide, &mut r, DT_LEFT | DT_TOP | DT_SINGLELINE);
+            DrawTextW(dc, &mut wide, &mut r, DT_LEFT | DT_TOP);
             let _ = GdiFlush();
             let mut px = std::slice::from_raw_parts(bits as *const u8, (w * h * 4) as usize).to_vec();
             for p in px.as_chunks_mut::<4>().0 {
