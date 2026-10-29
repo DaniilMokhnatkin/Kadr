@@ -8,3 +8,4 @@ publish.workspace = true
 
 [dependencies]
 png.workspace = true
+serde = { version = "1.0.229", features = ["derive"] }

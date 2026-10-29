@@ -1,0 +1,509 @@
+//! Чистый контроллер M2: каждый штрих, правка текста и перетаскивание — одна операция истории.
+use crate::text_input::TextInput;
+use kadr_doc::annotation::{Annotation, COLORS, Tool};
+use kadr_doc::{Handle, Point, Rect, drag_handle, hit_handle};
+use std::sync::Arc;
+pub struct Drawing {
+    pub tool: Tool,
+    pub color: usize,
+    pub width: u32,
+    pub strength: u8,
+    shapes: Vec<Annotation>,
+    undo: Vec<Arc<Vec<Annotation>>>,
+    redo: Vec<Arc<Vec<Annotation>>>,
+    pending: Option<Annotation>,
+    edit: Option<Edit>,
+    pub selected: Option<usize>,
+    text: Option<usize>,
+    text_before: Option<Arc<Vec<Annotation>>>,
+    text_input: TextInput,
+    pub revision: u64,
+    next_id: u64,
+}
+struct Edit {
+    start: Point,
+    shape: Annotation,
+    handle: Handle,
+}
+impl Default for Drawing {
+    fn default() -> Self {
+        Self {
+            tool: Tool::Select,
+            color: 0,
+            width: 3,
+            strength: 1,
+            shapes: Vec::new(),
+            undo: Vec::new(),
+            redo: Vec::new(),
+            pending: None,
+            edit: None,
+            selected: None,
+            text: None,
+            text_before: None,
+            text_input: TextInput::default(),
+            revision: 0,
+            next_id: 1,
+        }
+    }
+}
+impl Drawing {
+    pub fn shapes(&self) -> &[Annotation] {
+        &self.shapes
+    }
+    pub fn preview(&self) -> Option<&Annotation> {
+        self.pending.as_ref()
+    }
+    pub fn typing(&self) -> bool {
+        self.text.is_some()
+    }
+    pub fn text_selection(&self) -> Option<(u64, usize, usize)> {
+        self.text
+            .map(|i| (self.shapes[i].id, self.text_input.cursor, self.text_input.anchor))
+    }
+    pub fn selected_text(&self) -> Option<&str> {
+        self.text.map(|i| &self.shapes[i].text[self.text_input.range()])
+    }
+    pub fn text_insert(&mut self, value: &str) {
+        if let Some(i) = self.text {
+            let clean: String = value
+                .replace("\r\n", "\n")
+                .chars()
+                .filter(|c| *c == '\n' || !c.is_control())
+                .take(4097)
+                .collect();
+            self.text_input.insert(&mut self.shapes[i].text, &clean);
+            self.revision += 1;
+        }
+    }
+    pub fn text_key(&mut self, key: u16, shift: bool, ctrl: bool) {
+        if let Some(i) = self.text {
+            let value = &mut self.shapes[i].text;
+            if ctrl && key == 0x41 {
+                self.text_input.select_all(value);
+            } else if key == 0x2E {
+                self.text_input.erase(value, false);
+            } else {
+                self.text_input.navigate(value, key, shift);
+            }
+            self.revision += 1;
+        }
+    }
+    pub fn busy(&self) -> bool {
+        self.pending.is_some() || self.edit.is_some()
+    }
+    pub fn selected_bounds(&self) -> Option<Rect> {
+        self.selected.and_then(|i| self.shapes.get(i)).map(Annotation::bounds)
+    }
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+    pub fn restore(&mut self, shapes: Vec<Annotation>) {
+        self.next_id = shapes.iter().map(|s| s.id).max().unwrap_or(0).saturating_add(1);
+        self.shapes = shapes;
+        self.undo.clear();
+        self.redo.clear();
+        self.pending = None;
+        self.edit = None;
+        self.selected = None;
+        self.text = None;
+        self.text_before = None;
+        self.revision += 1;
+    }
+    fn snapshot(&self) -> Arc<Vec<Annotation>> {
+        Arc::new(self.shapes.clone())
+    }
+    fn record(&mut self, before: Arc<Vec<Annotation>>) {
+        if *before == self.shapes {
+            return;
+        }
+        self.undo.push(before);
+        if self.undo.len() > 80 {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+        self.revision += 1;
+    }
+    pub fn set_tool(&mut self, tool: Tool) {
+        self.finish_text();
+        self.cancel_drag();
+        self.tool = tool;
+        self.selected = None;
+    }
+    pub fn set_color(&mut self, index: usize) {
+        self.color = index.min(COLORS.len() - 1);
+        let before = self.snapshot();
+        if let Some(i) = self.selected {
+            self.shapes[i].color = COLORS[self.color];
+        }
+        self.record(before);
+    }
+    pub fn set_width(&mut self, width: u32) {
+        self.width = width.clamp(1, 12);
+        let before = self.snapshot();
+        if let Some(i) = self.selected {
+            self.shapes[i].width = self.width;
+        }
+        self.record(before);
+    }
+    pub fn set_strength(&mut self, strength: u8) {
+        self.strength = strength.min(2);
+        let before = self.snapshot();
+        if let Some(i) = self.selected {
+            self.shapes[i].strength = self.strength;
+        }
+        self.record(before);
+    }
+    /// Возвращает true, когда событие принадлежит слою рисования, иначе рамке захвата.
+    pub fn down(&mut self, p: Point, crop: Rect, seed: u64) -> bool {
+        self.finish_text();
+        if !crop.contains(p) {
+            return self.tool != Tool::Select;
+        }
+        if self.tool == Tool::Select {
+            let previous = self.selected.filter(|i| *i < self.shapes.len());
+            let handle = previous.and_then(|i| hit_handle(&self.shapes[i].bounds(), p, 8));
+            let index = if handle.is_some() {
+                previous
+            } else {
+                self.shapes.iter().rposition(|s| s.hit(p))
+            };
+            self.selected = index;
+            if let Some(i) = index {
+                self.color = COLORS
+                    .iter()
+                    .position(|c| *c == self.shapes[i].color)
+                    .unwrap_or(self.color);
+                self.width = self.shapes[i].width;
+                self.strength = self.shapes[i].strength;
+                self.edit = Some(Edit {
+                    start: p,
+                    shape: self.shapes[i].clone(),
+                    handle: handle.unwrap_or(Handle::Move),
+                });
+                return true;
+            }
+            return false;
+        }
+        if self.shapes.len() >= 256
+            || self.shapes.iter().map(|s| s.points.len()).sum::<usize>() >= 65534
+            || self.next_id == u64::MAX
+        {
+            return true;
+        }
+        let mut shape = Annotation::new(self.next_id, self.tool, p);
+        self.next_id += 1;
+        shape.color = COLORS[self.color];
+        shape.width = self.width;
+        shape.strength = self.strength;
+        shape.seed = seed;
+        if self.tool == Tool::Counter {
+            shape.number = self
+                .shapes
+                .iter()
+                .filter(|s| s.tool == Tool::Counter)
+                .map(|s| s.number)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1)
+                .min(9999);
+            let before = self.snapshot();
+            self.shapes.push(shape);
+            self.record(before);
+        } else if self.tool == Tool::Text {
+            let before = self.snapshot();
+            let i = self.shapes.len();
+            self.shapes.push(shape);
+            self.text = Some(i);
+            self.text_input = TextInput::default();
+            self.text_before = Some(before);
+            self.revision += 1;
+        } else {
+            self.pending = Some(shape);
+        }
+        true
+    }
+    pub fn motion(&mut self, p: Point, crop: Rect, shift: bool) -> bool {
+        let remaining = 65536 - self.shapes.iter().map(|s| s.points.len()).sum::<usize>().min(65536);
+        let p = Point::new(
+            p.x.clamp(crop.left, crop.right - 1),
+            p.y.clamp(crop.top, crop.bottom - 1),
+        );
+        if let Some(shape) = &mut self.pending {
+            if shape.tool.is_path() {
+                let last = shape.points.last().unwrap();
+                if (last[0] - p.x).abs() + (last[1] - p.y).abs() >= 2 && shape.points.len() < 8192.min(remaining) {
+                    shape.points.push([p.x, p.y]);
+                }
+            } else {
+                let mut end = [p.x, p.y];
+                let start = shape.points[0];
+                if shift {
+                    let dx = end[0] - start[0];
+                    let dy = end[1] - start[1];
+                    let side = dx.abs().max(dy.abs());
+                    if matches!(shape.tool, Tool::Line | Tool::Arrow) {
+                        if dx.abs() > 2 * dy.abs() {
+                            end[1] = start[1];
+                        } else if dy.abs() > 2 * dx.abs() {
+                            end[0] = start[0];
+                        } else {
+                            end = [start[0] + side * dx.signum(), start[1] + side * dy.signum()];
+                        }
+                    } else {
+                        end = [
+                            start[0] + side * if dx < 0 { -1 } else { 1 },
+                            start[1] + side * if dy < 0 { -1 } else { 1 },
+                        ];
+                    }
+                }
+                shape.points[1] = [
+                    end[0].clamp(crop.left, crop.right - 1),
+                    end[1].clamp(crop.top, crop.bottom - 1),
+                ];
+            }
+            return true;
+        }
+        if let Some(edit) = &self.edit {
+            let i = self.selected.unwrap();
+            let bounds = edit.shape.bounds();
+            if edit.handle == Handle::Move {
+                let target = bounds
+                    .offset(p.x - edit.start.x, p.y - edit.start.y)
+                    .moved_inside(&crop);
+                let mut shape = edit.shape.clone();
+                for xy in &mut shape.points {
+                    xy[0] += target.left - bounds.left;
+                    xy[1] += target.top - bounds.top;
+                }
+                self.shapes[i] = shape;
+            } else {
+                let target = drag_handle(&bounds, edit.handle, edit.start, p, &crop);
+                self.shapes[i] = edit.shape.transformed(bounds, target);
+            }
+            return true;
+        }
+        false
+    }
+    pub fn up(&mut self, p: Point, crop: Rect, shift: bool) -> bool {
+        self.motion(p, crop, shift);
+        if let Some(shape) = self.pending.take() {
+            let before = self.snapshot();
+            self.shapes.push(shape);
+            self.record(before);
+            return true;
+        }
+        if let Some(edit) = self.edit.take() {
+            let mut before = self.shapes.clone();
+            before[self.selected.unwrap()] = edit.shape;
+            self.record(Arc::new(before));
+            return true;
+        }
+        self.tool != Tool::Select
+    }
+    pub fn text_char(&mut self, c: char) -> bool {
+        let Some(i) = self.text else { return false };
+        let shape = &mut self.shapes[i];
+        if c == '\u{8}' {
+            self.text_input.erase(&mut shape.text, true);
+        } else if c == '\n' || !c.is_control() {
+            self.text_input.insert(&mut shape.text, &c.to_string());
+        }
+        self.revision += 1;
+        true
+    }
+    pub fn finish_text(&mut self) {
+        if let Some(i) = self.text.take() {
+            if self.shapes[i].text.trim().is_empty() {
+                self.shapes.remove(i);
+                self.selected = None;
+            }
+            if let Some(before) = self.text_before.take() {
+                self.record(before);
+            }
+        }
+    }
+    pub fn edit_text(&mut self) -> bool {
+        if let Some(i) = self.selected.filter(|i| self.shapes[*i].tool == Tool::Text) {
+            self.text_before = Some(self.snapshot());
+            self.text = Some(i);
+            self.text_input = TextInput::at_end(&self.shapes[i].text);
+            return true;
+        }
+        false
+    }
+    pub fn cancel(&mut self) -> bool {
+        if self.typing() {
+            self.text = None;
+            self.selected = None;
+            if let Some(before) = self.text_before.take() {
+                self.shapes = (*before).clone();
+                self.revision += 1;
+            }
+            return true;
+        }
+        if self.busy() {
+            self.cancel_drag();
+            return true;
+        }
+        if self.selected.take().is_some() {
+            return true;
+        }
+        if self.tool != Tool::Select {
+            self.tool = Tool::Select;
+            return true;
+        }
+        false
+    }
+    fn cancel_drag(&mut self) {
+        self.pending = None;
+        if let Some(edit) = self.edit.take()
+            && let Some(i) = self.selected
+        {
+            self.shapes[i] = edit.shape;
+        }
+    }
+    pub fn delete(&mut self) {
+        self.finish_text();
+        if let Some(i) = self.selected.take() {
+            let before = self.snapshot();
+            self.shapes.remove(i);
+            self.record(before);
+        }
+    }
+    pub fn nudge(&mut self, dx: i32, dy: i32, crop: Rect) {
+        let Some(i) = self.selected else { return };
+        let before = self.snapshot();
+        let r = self.shapes[i].bounds();
+        let target = r.offset(dx, dy).moved_inside(&crop);
+        for p in &mut self.shapes[i].points {
+            p[0] += target.left - r.left;
+            p[1] += target.top - r.top;
+        }
+        self.record(before);
+    }
+    pub fn undo(&mut self) {
+        self.finish_text();
+        self.cancel_drag();
+        if let Some(previous) = self.undo.pop() {
+            let now = self.snapshot();
+            self.redo.push(now);
+            self.shapes = (*previous).clone();
+            self.selected = None;
+            self.revision += 1;
+        }
+    }
+    pub fn redo(&mut self) {
+        self.finish_text();
+        self.cancel_drag();
+        if let Some(next) = self.redo.pop() {
+            let before = self.snapshot();
+            self.undo.push(before);
+            self.shapes = (*next).clone();
+            self.selected = None;
+            self.revision += 1;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    const C: Rect = Rect::new(-100, 0, 500, 500);
+    #[test]
+    fn active_tool_does_not_start_a_crop_drag_outside_the_selection() {
+        let mut d = Drawing::default();
+        d.set_tool(Tool::Arrow);
+        assert!(d.down(Point::new(600, 600), C, 1));
+        assert!(d.up(Point::new(450, 450), C, false));
+        assert!(d.shapes().is_empty());
+        d.set_tool(Tool::Select);
+        assert!(!d.down(Point::new(600, 600), C, 1));
+    }
+    #[test]
+    fn empty_selected_text_can_be_deleted_without_a_stale_selection() {
+        let mut d = Drawing::default();
+        d.set_tool(Tool::Text);
+        d.down(Point::new(0, 10), C, 1);
+        d.text_char('Я');
+        d.finish_text();
+        d.set_tool(Tool::Select);
+        d.down(Point::new(10, 20), C, 1);
+        d.up(Point::new(10, 20), C, false);
+        d.edit_text();
+        d.text_key(0x41, false, true);
+        d.text_insert("");
+        d.delete();
+        assert!(d.shapes().is_empty());
+        assert!(d.selected.is_none());
+    }
+    #[test]
+    fn stroke_is_one_history_action_and_new_edit_clears_redo() {
+        let mut d = Drawing::default();
+        d.set_tool(Tool::Pen);
+        d.down(Point::new(0, 10), C, 1);
+        for x in 1..20 {
+            d.motion(Point::new(x, 10), C, false);
+        }
+        d.up(Point::new(20, 10), C, false);
+        assert_eq!(d.shapes().len(), 1);
+        d.undo();
+        assert!(d.shapes().is_empty());
+        d.redo();
+        assert_eq!(d.shapes().len(), 1);
+        d.undo();
+        d.down(Point::new(0, 20), C, 2);
+        d.up(Point::new(20, 20), C, false);
+        assert!(!d.can_redo());
+    }
+    #[test]
+    fn unicode_text_is_one_operation_and_escape_reverts_edit() {
+        let mut d = Drawing::default();
+        d.set_tool(Tool::Text);
+        d.down(Point::new(0, 10), C, 1);
+        for c in "Привет 🌍".chars() {
+            d.text_char(c);
+        }
+        d.text_char('\u{8}');
+        d.finish_text();
+        assert_eq!(d.shapes()[0].text, "Привет ");
+        d.undo();
+        assert!(d.shapes().is_empty());
+        d.redo();
+        d.set_tool(Tool::Select);
+        d.down(Point::new(10, 20), C, 1);
+        d.up(Point::new(10, 20), C, false);
+        assert!(d.edit_text());
+        d.text_char('!');
+        assert!(d.cancel());
+        assert_eq!(d.shapes()[0].text, "Привет ");
+    }
+    #[test]
+    fn cancel_partial_stroke_preserves_committed_drawing() {
+        let mut d = Drawing::default();
+        d.set_tool(Tool::Arrow);
+        d.down(Point::new(0, 10), C, 3);
+        d.motion(Point::new(30, 30), C, false);
+        assert!(d.cancel());
+        assert!(d.shapes().is_empty());
+        assert!(d.preview().is_none());
+    }
+    #[test]
+    fn shape_move_undo_and_restore_reset_history() {
+        let mut d = Drawing::default();
+        d.set_tool(Tool::Redact);
+        d.down(Point::new(0, 10), C, 1);
+        d.up(Point::new(80, 80), C, false);
+        d.set_tool(Tool::Select);
+        assert!(d.down(Point::new(30, 30), C, 1));
+        d.up(Point::new(50, 40), C, false);
+        assert_eq!(d.shapes()[0].points[0], [20, 20]);
+        d.undo();
+        assert_eq!(d.shapes()[0].points[0], [0, 10]);
+        let shapes = d.shapes.clone();
+        d.restore(shapes);
+        assert!(!d.can_undo());
+    }
+}

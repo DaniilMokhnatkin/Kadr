@@ -100,6 +100,7 @@ name = "kadr-doc"
 version = "0.0.1"
 dependencies = [
  "png",
+ "serde",
 ]
 
 [[package]]
@@ -125,6 +126,7 @@ dependencies = [
 name = "kadr-render"
 version = "0.0.1"
 dependencies = [
+ "kadr-doc",
  "kadr-win",
  "windows",
  "windows-numerics",
