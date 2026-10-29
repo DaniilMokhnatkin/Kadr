@@ -289,6 +289,10 @@ impl Drawing {
     }
     pub fn up(&mut self, p: Point, crop: Rect, shift: bool) -> bool {
         self.motion(p, crop, shift);
+        self.finish_gesture()
+    }
+    /// Фиксирует уже видимый preview перед переходом в другое окно, без новой позиции мыши.
+    pub fn finish_gesture(&mut self) -> bool {
         if let Some(shape) = self.pending.take() {
             let before = self.snapshot();
             self.shapes.push(shape);
@@ -412,6 +416,20 @@ impl Drawing {
 mod tests {
     use super::*;
     const C: Rect = Rect::new(-100, 0, 500, 500);
+    #[test]
+    fn switching_windows_commits_visible_stroke_and_does_not_continue_it_on_return() {
+        let mut d = Drawing::default();
+        d.set_tool(Tool::Pen);
+        d.down(Point::new(10, 20), C, 1);
+        d.motion(Point::new(50, 60), C, false);
+        let visible = d.preview().unwrap().clone();
+        d.finish_gesture();
+        assert!(!d.busy());
+        assert_eq!(d.shapes(), &[visible]);
+        assert!(!d.motion(Point::new(80, 90), C, false));
+        d.undo();
+        assert!(d.shapes().is_empty());
+    }
     #[test]
     fn active_tool_does_not_start_a_crop_drag_outside_the_selection() {
         let mut d = Drawing::default();
