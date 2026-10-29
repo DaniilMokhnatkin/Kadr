@@ -7,5 +7,6 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+kadr-doc.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.8"

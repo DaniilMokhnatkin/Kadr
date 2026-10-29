@@ -14,3 +14,4 @@ pub fn from_wide(w: &[u16]) -> String {
     let end = w.iter().position(|&c| c == 0).unwrap_or(w.len());
     String::from_utf16_lossy(&w[..end])
 }
+pub mod protect;

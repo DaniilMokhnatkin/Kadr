@@ -3,27 +3,12 @@
 pub mod clipboard;
 pub mod file;
 
-use kadr_doc::Image;
-
-/// PNG из BGRA-изображения. Быстрое сжатие: скриншоты хорошо жмутся и так, а ждать никто не должен.
-pub fn encode_png(image: &Image) -> Result<Vec<u8>, png::EncodingError> {
-    let mut rgba = Vec::with_capacity(image.bgra.len());
-    for [b, g, r, a] in image.bgra.as_chunks::<4>().0 {
-        rgba.extend_from_slice(&[*r, *g, *b, *a]);
-    }
-    let mut out = Vec::new();
-    let mut encoder = png::Encoder::new(&mut out, image.width(), image.height());
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    encoder.set_compression(png::Compression::Fast);
-    encoder.write_header()?.write_image_data(&rgba)?;
-    Ok(out)
-}
+pub use kadr_doc::pixels::encode_png;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kadr_doc::Rect;
+    use kadr_doc::{Image, Rect};
 
     #[test]
     fn png_round_trip_keeps_pixels() {

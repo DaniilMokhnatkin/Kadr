@@ -98,6 +98,9 @@ dependencies = [
 [[package]]
 name = "kadr-doc"
 version = "0.0.1"
+dependencies = [
+ "png",
+]
 
 [[package]]
 name = "kadr-editor"
@@ -131,6 +134,7 @@ dependencies = [
 name = "kadr-store"
 version = "0.0.1"
 dependencies = [
+ "kadr-doc",
  "serde",
  "toml",
 ]

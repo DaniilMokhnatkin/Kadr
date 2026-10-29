@@ -11,6 +11,7 @@ pub struct Config {
     pub hotkeys: Hotkeys,
     pub capture: Capture,
     pub save: Save,
+    pub recent: Recent,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -20,6 +21,7 @@ pub struct Hotkeys {
     pub fullscreen: String,
     pub window: String,
     pub last_region: String,
+    pub recent: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -36,10 +38,16 @@ pub struct Save {
     pub notify: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Recent { pub enabled: bool, pub max: usize }
+impl Default for Recent { fn default() -> Self { Self { enabled: true, max: 10 } } }
+
 impl Config {
     /// Проверяем весь набор до замены действующих настроек и регистрации клавиш.
     pub fn parse(text: &str) -> Result<Self, String> {
         let config: Self = toml::from_str(text).map_err(|e| e.to_string())?;
+        if !(1..=10).contains(&config.recent.max) { return Err("recent.max должен быть от 1 до 10".into()); }
         let mut seen = Vec::new();
         for (name, text) in config.hotkeys.entries() {
             if let Some(key) = crate::hotkey::parse(text).map_err(|e| format!("hotkeys.{name}: {e}"))? {
@@ -54,12 +62,13 @@ impl Config {
 }
 
 impl Hotkeys {
-    pub fn entries(&self) -> [(&'static str, &str); 4] {
+    pub fn entries(&self) -> [(&'static str, &str); 5] {
         [
             ("region", &self.region),
             ("fullscreen", &self.fullscreen),
             ("window", &self.window),
             ("last_region", &self.last_region),
+            ("recent", &self.recent),
         ]
     }
 }
@@ -71,6 +80,7 @@ impl Default for Hotkeys {
             fullscreen: "Shift+PrintScreen".into(),
             window: "Ctrl+PrintScreen".into(),
             last_region: "Ctrl+Shift+PrintScreen".into(),
+            recent: "Ctrl+Alt+PrintScreen".into(),
         }
     }
 }
@@ -96,6 +106,7 @@ region      = "PrintScreen"             # выделить область
 fullscreen  = "Shift+PrintScreen"       # монитор под курсором — сразу в буфер
 window      = "Ctrl+PrintScreen"        # активное окно — сразу в буфер
 last_region = "Ctrl+Shift+PrintScreen"  # та же область, что в прошлый раз
+recent      = "Ctrl+Alt+PrintScreen"    # вернуть несохранённый снимок
 
 [capture]
 warm = true   # держать захват наготове: ~8 мс вместо ~23 мс
@@ -103,6 +114,10 @@ warm = true   # держать захват наготове: ~8 мс вмест
 [save]
 folder = ""     # пусто — «Изображения\Screenshots»
 notify = true   # уведомление после сохранения
+
+[recent]
+enabled = true  # сохранять несохранённые снимки зашифрованно
+max = 10        # от 1 до 10; старые записи вытесняются
 "#;
 
 pub fn path() -> PathBuf {
