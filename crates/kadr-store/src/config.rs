@@ -36,6 +36,34 @@ pub struct Save {
     pub notify: bool,
 }
 
+impl Config {
+    /// Проверяем весь набор до замены действующих настроек и регистрации клавиш.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let config: Self = toml::from_str(text).map_err(|e| e.to_string())?;
+        let mut seen = Vec::new();
+        for (name, text) in config.hotkeys.entries() {
+            if let Some(key) = crate::hotkey::parse(text).map_err(|e| format!("hotkeys.{name}: {e}"))? {
+                if let Some((other, _)) = seen.iter().find(|(_, previous)| *previous == key) {
+                    return Err(format!("hotkeys.{name} и hotkeys.{other}: одна комбинация «{text}»"));
+                }
+                seen.push((name, key));
+            }
+        }
+        Ok(config)
+    }
+}
+
+impl Hotkeys {
+    pub fn entries(&self) -> [(&'static str, &str); 4] {
+        [
+            ("region", &self.region),
+            ("fullscreen", &self.fullscreen),
+            ("window", &self.window),
+            ("last_region", &self.last_region),
+        ]
+    }
+}
+
 impl Default for Hotkeys {
     fn default() -> Self {
         Self {
@@ -84,17 +112,20 @@ pub fn path() -> PathBuf {
 /// Читает конфиг; вторым значением — текст ошибки, если файл не разобрался.
 pub fn load(path: &Path) -> (Config, Option<String>) {
     match std::fs::read_to_string(path) {
-        Ok(text) => match toml::from_str(&text) {
+        Ok(text) => match Config::parse(&text) {
             Ok(config) => (config, None),
             Err(e) => (Config::default(), Some(e.to_string())),
         },
-        Err(_) => {
-            if let Some(dir) = path.parent() {
-                let _ = std::fs::create_dir_all(dir);
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(dir) = path.parent()
+                && let Err(e) = std::fs::create_dir_all(dir)
+            {
+                return (Config::default(), Some(e.to_string()));
             }
-            let _ = std::fs::write(path, TEMPLATE);
-            (Config::default(), None)
+            let error = std::fs::write(path, TEMPLATE).err().map(|e| e.to_string());
+            (Config::default(), error)
         }
+        Err(e) => (Config::default(), Some(e.to_string())),
     }
 }
 
@@ -112,5 +143,24 @@ mod tests {
         let config: Config = toml::from_str("[capture]\nwarm = false\nunknown = 1\n").unwrap();
         assert!(!config.capture.warm);
         assert_eq!(config.hotkeys, Hotkeys::default());
+    }
+
+    #[test]
+    fn rejects_invalid_or_duplicate_hotkeys_before_applying() {
+        assert!(Config::parse("[hotkeys]\nregion = 'Hyper+Q'").is_err());
+        assert!(Config::parse("[hotkeys]\nfullscreen = 'PrtSc'").is_err());
+        let config = Config::parse("[hotkeys]\nfullscreen = ''\nwindow = 'Alt+F9'").unwrap();
+        assert!(config.hotkeys.fullscreen.is_empty());
+        assert_eq!(config.hotkeys.window, "Alt+F9");
+    }
+
+    #[test]
+    fn read_error_does_not_overwrite_existing_path() {
+        let dir = std::env::temp_dir().join(format!("kadr-config-dir-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (_, error) = load(&dir);
+        assert!(error.is_some(), "ошибку чтения нельзя скрывать как отсутствие конфига");
+        assert!(dir.is_dir());
+        std::fs::remove_dir(&dir).unwrap();
     }
 }
