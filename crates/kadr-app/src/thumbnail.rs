@@ -41,6 +41,8 @@ pub struct Shot {
 pub enum Request {
     Edit(String),
     Reveal(PathBuf),
+    /// Neither a file nor a draft (quick and long captures): open a temporary PNG in the viewer.
+    View(PathBuf),
 }
 
 /// Card box and margins in DIPs; the margin leaves room for the shadow and the slide.
@@ -541,7 +543,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                         let request = match (&shot.draft, &shot.path) {
                             (_, Some(path)) => Request::Reveal(path.clone()),
                             (Some(id), None) => Request::Edit(id.clone()),
-                            (None, None) => return None,
+                            (None, None) => Request::View(file_for_drag(shot)?),
                         };
                         st.leave();
                         Some(request)

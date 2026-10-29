@@ -1200,6 +1200,12 @@ impl App {
                 self.last_saved = Some(path);
                 self.open_last_saved();
             }
+            Some(crate::thumbnail::Request::View(path)) => {
+                let file = wide(&path.to_string_lossy());
+                unsafe {
+                    ShellExecuteW(None, w!("open"), PCWSTR(file.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
+                }
+            }
             None => {}
         }
     }

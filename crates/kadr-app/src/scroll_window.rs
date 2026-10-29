@@ -126,9 +126,10 @@ pub fn open(instance: HINSTANCE, host: HWND, message: u32, area: Rect) {
             })
         });
     }
-    STATE.with(|s| {
-        let Ok(mut state) = s.try_borrow_mut() else { return Default::default() };
-        let Some(st) = state.as_mut() else { return };
+    // Compute under the borrow, move the window after it: SetWindowPos sends messages to `proc`.
+    let placed = STATE.with(|s| {
+        let Ok(mut state) = s.try_borrow_mut() else { return None };
+        let st = state.as_mut()?;
         let monitor = unsafe { MonitorFromPoint(POINT { x: area.left, y: area.top }, MONITOR_DEFAULTTONEAREST) };
         let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
         let (mut dx, mut dy) = (96u32, 96u32);
@@ -164,11 +165,28 @@ pub fn open(instance: HINSTANCE, host: HWND, message: u32, area: Rect) {
         let now = st.epoch.elapsed().as_secs_f64();
         st.appear.snap(0.0);
         st.appear.target(1.0, now);
-        unsafe {
-            let _ = SetWindowPos(st.hwnd, Some(HWND_TOPMOST), left, top, right - left, bottom - top, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-            let _ = InvalidateRect(Some(st.hwnd), None, false);
-        }
+        // Window shape = the frame ring + the panel. HTTRANSPARENT only passes the mouse to windows
+        // of this same thread, so the area itself must be a real hole for the wheel to reach the
+        // page underneath.
+        let (w, h) = ((right - left) as f32, (bottom - top) as f32);
+        let ring = glass::inflate(st.area, MARGIN * s);
+        let pane = glass::inflate(panel(st, w, h), 18.0 * s);
+        Some((st.hwnd, left, top, right - left, bottom - top, ring, st.area, pane))
     });
+    let Some((hwnd, x, y, w, h, ring, hole, pane)) = placed else { return };
+    unsafe {
+        use windows::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, RGN_DIFF, RGN_OR, SetWindowRgn};
+        let r = |x: D2D_RECT_F| CreateRectRgn(x.left as i32, x.top as i32, x.right.ceil() as i32, x.bottom.ceil() as i32);
+        let (shape, hole, pane) = (r(ring), r(hole), r(pane));
+        CombineRgn(Some(shape), Some(shape), Some(hole), RGN_DIFF);
+        CombineRgn(Some(shape), Some(shape), Some(pane), RGN_OR);
+        let _ = DeleteObject(hole.into());
+        let _ = DeleteObject(pane.into());
+        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        // The window owns the region from here on.
+        SetWindowRgn(hwnd, Some(shape), true);
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
 }
 
 pub fn update(height: usize, status: Status) {
@@ -398,5 +416,33 @@ mod tests {
         assert_eq!(group(980), "980");
         assert_eq!(group(12480), "12\u{2009}480");
         assert_eq!(group(1234567), "1\u{2009}234\u{2009}567");
+    }
+
+    use windows::Win32::Graphics::Gdi::{CreateRectRgn, DeleteObject, GetWindowRgn, PtInRegion};
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+
+    #[test]
+    fn the_area_is_a_hole_so_the_wheel_reaches_the_page() {
+        let instance: HINSTANCE = unsafe { GetModuleHandleW(None) }.unwrap().into();
+        let area = Rect::new(300, 200, 900, 700);
+        open(instance, HWND::default(), 0, area);
+        let hwnd = STATE.with(|s| s.borrow().as_ref().map(|st| st.hwnd)).unwrap();
+        let mut origin = windows::Win32::Foundation::RECT::default();
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut origin);
+        }
+        // Region points are in window coordinates.
+        let at = |x: i32, y: i32| (x - origin.left, y - origin.top);
+        let rgn = unsafe { CreateRectRgn(0, 0, 0, 0) };
+        unsafe { GetWindowRgn(hwnd, rgn) };
+        let has = |(x, y): (i32, i32)| unsafe { PtInRegion(rgn, x, y) }.as_bool();
+        assert!(!has(at(600, 450)), "the middle of the area belongs to the page");
+        assert!(!has(at(302, 202)), "so do its corners");
+        assert!(has(at(298, 450)), "the frame ring stays ours");
+        assert!(has(at(600, 720)), "and so does the panel");
+        unsafe {
+            let _ = DeleteObject(rgn.into());
+        }
+        close();
     }
 }
