@@ -140,6 +140,12 @@ pub fn run(path: &str, scale: f32, editor: bool) -> Result<(), Box<dyn Error>> {
             std::path::Path::new(path).file_stem().unwrap().to_string_lossy()
         ));
         std::fs::write(export, kadr_doc::pixels::encode_png(&image)?)?;
+        let pin = crate::pin_window::preview(&image, scale)?;
+        let pin_path = std::path::Path::new(path).with_file_name(format!(
+            "{}-pin.png",
+            std::path::Path::new(path).file_stem().unwrap().to_string_lossy()
+        ));
+        std::fs::write(pin_path, kadr_doc::pixels::encode_png(&pin)?)?;
     }
     kadr_win::log_info!("снимок сцены сохранён: {path} ({w}×{h}, масштаб {scale})");
     Ok(())

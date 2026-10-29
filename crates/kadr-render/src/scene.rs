@@ -99,6 +99,8 @@ pub enum ToolbarButton {
     Copy,
     Save,
     SaveAs,
+    Pin,
+    Recent,
     Close,
     Tool(Tool),
     Color(usize),
@@ -109,13 +111,22 @@ pub enum ToolbarButton {
 }
 
 impl ToolbarButton {
-    pub const ALL: [ToolbarButton; 4] = [Self::Copy, Self::Save, Self::SaveAs, Self::Close];
+    pub const ALL: [ToolbarButton; 6] = [
+        Self::Copy,
+        Self::Save,
+        Self::SaveAs,
+        Self::Pin,
+        Self::Recent,
+        Self::Close,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Copy => "Копировать",
             Self::Save => "Сохранить",
             Self::SaveAs => "Сохранить как…",
+            Self::Pin => "Закрепить",
+            Self::Recent => "Недавние",
             Self::Close => "Закрыть",
             Self::Tool(tool) => tool.label(),
             Self::Color(_) => "Цвет",
@@ -284,7 +295,7 @@ fn toolbar_layout(
         .collect::<Result<Vec<_>>>()?;
     let button_h = (labels.iter().map(|(_, t)| t.h).fold(0.0, f32::max) + button_y * 2.0).ceil();
     let widths: Vec<f32> = labels.iter().map(|(_, t)| (t.w + button_x * 2.0).ceil()).collect();
-    let export_w = pad * 2.0 + widths.iter().sum::<f32>() + gap * (widths.len() - 1) as f32;
+    let export_w = pad * 2.0 + widths.iter().copied().fold(0.0, f32::max) * 3.0 + gap * 2.0;
     let columns = 7usize;
     let editor_w = if editor.is_some() {
         (660.0 * s).min(w - 8.0 * s)
@@ -297,7 +308,7 @@ fn toolbar_layout(
     } else {
         0.0
     };
-    let panel_h = button_h + pad * 2.0 + extra;
+    let panel_h = button_h * 2.0 + gap + pad * 2.0 + extra;
 
     let mut y = sel.bottom + offset;
     if y + panel_h > h {
@@ -309,13 +320,14 @@ fn toolbar_layout(
     let x = (sel.right - panel_w).clamp(0.0, (w - panel_w).max(0.0)).round();
     let y = y.clamp(0.0, (h - panel_h).max(0.0)).round();
 
-    let mut left = x + pad;
+    let cell = (panel_w - pad * 2.0 - gap * 2.0) / 3.0;
     let mut buttons: Vec<_> = labels
         .into_iter()
-        .zip(widths)
-        .map(|((button, label), width)| {
-            let r = rect(left, y + pad + extra, left + width, y + pad + button_h + extra);
-            left += width + gap;
+        .enumerate()
+        .map(|(i, (button, label))| {
+            let left = x + pad + (i % 3) as f32 * (cell + gap);
+            let top = y + pad + extra + (i / 3) as f32 * (button_h + gap);
+            let r = rect(left, top, left + cell, top + button_h);
             (button, r, label)
         })
         .collect();
@@ -464,7 +476,7 @@ fn draw_toolbar(
         } else if editor.tool == Tool::Text {
             "Введите текст · Enter — готово · Shift+Enter — строка · Esc — отменить"
         } else {
-            "Tab — инструмент · 1–6 — цвет · Ctrl+Z / Y · Del · F2 — текст · [ / ] — толщина"
+            "Ctrl+D — закрепить · Ctrl+H — недавние · Tab — инструмент · 1–6 — цвет"
         };
         let hint = measure(shared, &text.label, hint)?;
         let export_top = layout.buttons[0].1.top;
@@ -969,4 +981,63 @@ fn intersect(a: D2D_RECT_F, b: D2D_RECT_F) -> Option<D2D_RECT_F> {
         a.bottom.min(b.bottom),
     );
     (r.right > r.left && r.bottom > r.top).then_some(r)
+}
+#[cfg(test)]
+mod toolbar_tests {
+    use super::*;
+    #[test]
+    fn all_actions_have_a_visible_non_overlapping_hit_target_at_each_dpi() {
+        let shared = Shared::new().unwrap();
+        for s in [1.0, 1.5, 2.0] {
+            let text = TextStyles::new(&shared, s).unwrap();
+            let size = (1280.0 * s, 720.0 * s);
+            let selection = rect(200.0 * s, 100.0 * s, 1100.0 * s, 500.0 * s);
+            let editor = Some(EditorBar {
+                tool: Tool::Select,
+                color: 0,
+                width: 3,
+                strength: 1,
+                undo: false,
+                redo: false,
+            });
+            let layout = toolbar_layout(&shared, &text, size, s, selection, editor)
+                .unwrap()
+                .unwrap();
+            assert!(
+                layout.panel.left >= 0.0
+                    && layout.panel.right <= size.0
+                    && layout.panel.top >= 0.0
+                    && layout.panel.bottom <= size.1
+            );
+            for button in ToolbarButton::ALL {
+                let (_, r, label) = layout.buttons.iter().find(|b| b.0 == button).unwrap();
+                assert!(label.w <= r.right - r.left);
+                let hit = toolbar_hit(
+                    &shared,
+                    &text,
+                    RECT {
+                        left: 0,
+                        top: 0,
+                        right: size.0 as i32,
+                        bottom: size.1 as i32,
+                    },
+                    s,
+                    RECT {
+                        left: selection.left as i32,
+                        top: selection.top as i32,
+                        right: selection.right as i32,
+                        bottom: selection.bottom as i32,
+                    },
+                    (((r.left + r.right) / 2.0) as i32, ((r.top + r.bottom) / 2.0) as i32),
+                    editor,
+                );
+                assert_eq!(hit, Some(button));
+            }
+            for (i, (_, r, _)) in layout.buttons.iter().enumerate() {
+                for (_, other, _) in layout.buttons.iter().skip(i + 1) {
+                    assert!(intersect(*r, *other).is_none());
+                }
+            }
+        }
+    }
 }

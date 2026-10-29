@@ -50,6 +50,7 @@ use kadr_win::{log, log_info, log_warn, wide};
 
 mod drafts;
 mod editor_input;
+mod pins;
 mod settings;
 
 const HK_PRTSC: i32 = 1;
@@ -68,6 +69,7 @@ const WM_APP_SAVED: u32 = WM_APP + 4;
 const WM_APP_CONFIG: u32 = WM_APP + 5;
 const WM_APP_RECENT: u32 = WM_APP + 6;
 const WM_APP_RECENT_UI: u32 = WM_APP + 7;
+const WM_APP_PIN: u32 = WM_APP + 8;
 const TIMER_HOOK_CHECK: usize = 1;
 const TIMER_DRAFT: usize = 2;
 
@@ -140,6 +142,8 @@ pub struct App {
     loading_recent: bool,
     recovery_notice: bool,
     bench_mode: bool,
+    pins: Vec<crate::pin_window::Window>,
+    paused: Option<Active>,
     icons: crate::icons::Icons,
 }
 
@@ -235,6 +239,8 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
             recovery_notice: false,
             bench_mode: bench.is_some(),
             icons,
+            pins: Vec::new(),
+            paused: None,
         };
         app.build_outputs();
         app.log_startup();
@@ -260,7 +266,7 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            if crate::recent_window::dialog_message(&msg) {
+            if crate::recent_window::dialog_message(&msg) || crate::pin_window::dialog_message(&msg) {
                 continue;
             }
             let _ = TranslateMessage(&msg);
@@ -962,6 +968,16 @@ impl App {
     }
 
     fn on_key(&mut self, vk: u16, down: bool) {
+        if down && mods().ctrl && !self.active.as_ref().is_some_and(|a| a.drawing.typing()) {
+            if vk == 0x44 {
+                self.pin();
+                return;
+            }
+            if vk == 0x48 {
+                self.show_recent();
+                return;
+            }
+        }
         if down && self.editor_key(vk) {
             return;
         }
@@ -994,6 +1010,7 @@ impl App {
     /// Оверлей закрывается до диалога: в режиме uiAccess он лежит выше любых обычных окон.
     fn export(&mut self, how: Export) {
         if let Some(active) = &mut self.active {
+            active.drawing.finish_gesture();
             active.drawing.finish_text();
         }
         let Some(image) = self.selected_image() else {
@@ -1160,6 +1177,8 @@ impl App {
             ToolbarButton::Save => self.export(Export::Save),
             ToolbarButton::SaveAs => self.export(Export::SaveAs),
             ToolbarButton::Close => self.close_session(),
+            ToolbarButton::Pin => self.pin(),
+            ToolbarButton::Recent => self.show_recent(),
             _ => self.editor_button(button),
         }
     }
@@ -1269,6 +1288,7 @@ impl App {
 
     fn on_display_change(&mut self) {
         log_info!("конфигурация мониторов изменилась — пересоздаю оверлеи");
+        self.finish_paused();
         self.close_session();
         self.build_outputs();
         self.log_outputs();
@@ -1285,6 +1305,7 @@ impl App {
 
 impl Drop for App {
     fn drop(&mut self) {
+        self.finish_paused();
         self.close_session();
         self.set_hook(false);
         self.unregister_hotkeys();
@@ -1318,6 +1339,7 @@ unsafe extern "system" fn host_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         WM_APP_CONFIG => with_app(App::on_config),
         WM_APP_RECENT => with_app(App::on_recent),
         WM_APP_RECENT_UI => with_app(App::on_recent_ui),
+        WM_APP_PIN => with_app(App::on_pin),
         WM_RENDERFORMAT => with_app(|app| {
             if let Some(image) = &app.clipboard {
                 clipboard::render(wp.0 as u32, image);

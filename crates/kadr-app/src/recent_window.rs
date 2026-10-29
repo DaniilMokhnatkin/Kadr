@@ -30,6 +30,7 @@ struct Data {
     font: HFONT,
     title: HFONT,
     error: Option<String>,
+    returning: bool,
 }
 thread_local! {
     static DATA: RefCell<Option<Data>> = const { RefCell::new(None) };
@@ -39,6 +40,7 @@ pub struct Window {
     pub hwnd: HWND,
 }
 const CLEAR: usize = 200;
+const BACK: usize = 201;
 const FIRST: usize = 100;
 impl Window {
     pub fn new(instance: HINSTANCE, host: HWND, message: u32, app_icon: HICON, small_icon: HICON) -> Result<Self> {
@@ -93,17 +95,19 @@ impl Window {
                     font,
                     title,
                     error: None,
+                    returning: false,
                 })
             });
             Ok(Self { hwnd })
         }
     }
-    pub fn show(&self, enabled: bool) {
+    pub fn show(&self, enabled: bool, returning: bool) {
         DATA.with(|d| {
             if let Some(d) = d.borrow_mut().as_mut() {
                 d.loading = true;
                 d.enabled = enabled;
                 d.error = None;
+                d.returning = returning;
             }
         });
         unsafe {
@@ -141,7 +145,10 @@ impl Window {
             }
             (
                 d.scale,
-                d.entries.iter().map(|e| format!("Восстановить снимок {}", stamp(e.created_ms))).collect::<Vec<_>>(),
+                d.entries
+                    .iter()
+                    .map(|e| format!("Восстановить снимок {}", stamp(e.created_ms)))
+                    .collect::<Vec<_>>(),
                 d.font,
             )
         });
@@ -164,7 +171,7 @@ impl Window {
                 0,
                 outer.right - outer.left,
                 desired + (outer.bottom - outer.top - client.bottom),
-                SWP_NOMOVE | SWP_NOZORDER,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
             );
             let _ = GetClientRect(self.hwnd, &mut client);
         }
@@ -218,7 +225,32 @@ impl Window {
             }
             buttons.push(button);
         }
-        let focus = buttons.first().copied();
+        let returning = DATA.with(|d| d.borrow().as_ref().is_some_and(|d| d.returning));
+        let back = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("BUTTON"),
+                if returning {
+                    w!("К снимку")
+                } else {
+                    w!("Закрыть")
+                },
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_OWNERDRAW as u32),
+                client.right - at(264.0),
+                at(25.0),
+                at(120.0),
+                at(36.0),
+                Some(self.hwnd),
+                Some(HMENU(BACK as *mut _)),
+                None,
+                None,
+            )
+        };
+        let first = buttons.first().copied().filter(|_| !labels.is_empty());
+        if let Ok(back) = back {
+            buttons.push(back);
+        }
+        let focus = first.or_else(|| buttons.last().copied());
         DATA.with(|d| d.borrow_mut().as_mut().unwrap().buttons = buttons);
         unsafe {
             let _ = InvalidateRect(Some(self.hwnd), None, false);
@@ -264,7 +296,11 @@ impl Drop for Window {
 }
 pub fn dialog_message(msg: &MSG) -> bool {
     let hwnd = DATA.with(|d| d.borrow().as_ref().map(|d| d.hwnd));
-    hwnd.is_some_and(|hwnd| unsafe { IsWindowVisible(hwnd).as_bool() && IsDialogMessageW(hwnd, msg).as_bool() })
+    hwnd.is_some_and(|hwnd| unsafe {
+        GetAncestor(msg.hwnd, GA_ROOT) == hwnd
+            && IsWindowVisible(hwnd).as_bool()
+            && IsDialogMessageW(hwnd, msg).as_bool()
+    })
 }
 fn request(value: Request) {
     REQUEST.with(|r| *r.borrow_mut() = Some(value));
@@ -309,7 +345,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 return LRESULT(0);
             }
             let mut id = wp.0 & 0xffff;
-            if id == 2 {
+            if id == 2 || id == BACK {
                 unsafe {
                     let _ = ShowWindow(hwnd, SW_HIDE);
                 }
@@ -318,6 +354,13 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             }
             if id == 1 {
                 id = unsafe { GetDlgCtrlID(GetFocus()) } as usize;
+            }
+            if id == BACK {
+                unsafe {
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                }
+                request(Request::Close);
+                return LRESULT(0);
             }
             if id == CLEAR {
                 let any = DATA.with(|d| d.borrow().as_ref().is_some_and(|d| !d.entries.is_empty()));
@@ -334,8 +377,11 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     request(Request::Clear);
                 }
             } else if (FIRST..FIRST + 10).contains(&id) {
-                let id =
-                    DATA.with(|d| d.borrow().as_ref().and_then(|d| d.entries.get(id - FIRST).map(|e| e.id.clone())));
+                let id = DATA.with(|d| {
+                    d.borrow()
+                        .as_ref()
+                        .and_then(|d| d.entries.get(id - FIRST).map(|e| e.id.clone()))
+                });
                 if let Some(id) = id {
                     request(Request::Load(id));
                 }
@@ -359,7 +405,15 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_DPICHANGED => {
             let r = unsafe { &*(lp.0 as *const RECT) };
             unsafe {
-                let _ = SetWindowPos(hwnd, None, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER);
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    r.left,
+                    r.top,
+                    r.right - r.left,
+                    r.bottom - r.top,
+                    SWP_NOZORDER,
+                );
             }
             request(Request::Refresh);
         }
@@ -384,7 +438,12 @@ fn text(dc: HDC, r: RECT, value: &str, font: HFONT, c: COLORREF) {
         let old = SelectObject(dc, font.into());
         SetTextColor(dc, c);
         SetBkMode(dc, TRANSPARENT);
-        DrawTextW(dc, &mut chars, &mut r, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        DrawTextW(
+            dc,
+            &mut chars,
+            &mut r,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
+        );
         SelectObject(dc, old);
     }
 }
@@ -398,7 +457,12 @@ fn draw(dc: HDC, d: &Data) {
     fill(dc, r, color(theme.surface));
     text(
         dc,
-        RECT { left: at(24.0), top: at(18.0), right: r.right - at(150.0), bottom: at(54.0) },
+        RECT {
+            left: at(24.0),
+            top: at(18.0),
+            right: r.right - at(150.0),
+            bottom: at(54.0),
+        },
         "Недавние",
         d.title,
         color(theme.text),
@@ -410,7 +474,12 @@ fn draw(dc: HDC, d: &Data) {
     };
     text(
         dc,
-        RECT { left: at(24.0), top: at(57.0), right: r.right - at(24.0), bottom: at(80.0) },
+        RECT {
+            left: at(24.0),
+            top: at(57.0),
+            right: r.right - at(24.0),
+            bottom: at(80.0),
+        },
         &subtitle,
         d.font,
         color(theme.text_muted),
@@ -418,14 +487,24 @@ fn draw(dc: HDC, d: &Data) {
     if d.entries.is_empty() && !d.loading {
         text(
             dc,
-            RECT { left: at(24.0), top: at(155.0), right: r.right - at(24.0), bottom: at(185.0) },
+            RECT {
+                left: at(24.0),
+                top: at(155.0),
+                right: r.right - at(24.0),
+                bottom: at(185.0),
+            },
             "Несохранённых снимков пока нет",
             d.title,
             color(theme.text),
         );
         text(
             dc,
-            RECT { left: at(24.0), top: at(200.0), right: r.right - at(24.0), bottom: at(230.0) },
+            RECT {
+                left: at(24.0),
+                top: at(200.0),
+                right: r.right - at(24.0),
+                bottom: at(230.0),
+            },
             "После захвата снимок останется здесь, пока вы не сохраните его в файл.",
             d.font,
             color(theme.text_muted),
@@ -434,13 +513,22 @@ fn draw(dc: HDC, d: &Data) {
     let hint = if let Some(error) = &d.error {
         error.as_str()
     } else if d.enabled {
-        "Выберите снимок, чтобы продолжить · Tab — выбор · Esc — закрыть"
+        if d.returning {
+            "Выберите другой снимок · Esc — вернуться к текущему"
+        } else {
+            "Выберите снимок, чтобы продолжить · Tab — выбор · Esc — закрыть"
+        }
     } else {
         "Автосохранение выключено в настройках · прежние снимки доступны"
     };
     text(
         dc,
-        RECT { left: at(24.0), top: r.bottom - at(42.0), right: r.right - at(24.0), bottom: r.bottom - at(16.0) },
+        RECT {
+            left: at(24.0),
+            top: r.bottom - at(42.0),
+            right: r.right - at(24.0),
+            bottom: r.bottom - at(16.0),
+        },
         hint,
         d.font,
         color(theme.text_muted),
@@ -453,13 +541,36 @@ fn draw_button(item: &DRAWITEMSTRUCT, d: &Data) {
     let focused = item.itemState.0 & (ODS_FOCUS.0 | ODS_SELECTED.0) != 0;
     fill(item.hDC, r, color(if focused { t.text } else { t.border }));
     let inset = if focused { at(2.0) } else { at(1.0) };
-    let inner = RECT { left: r.left + inset, top: r.top + inset, right: r.right - inset, bottom: r.bottom - inset };
+    let inner = RECT {
+        left: r.left + inset,
+        top: r.top + inset,
+        right: r.right - inset,
+        bottom: r.bottom - inset,
+    };
     fill(item.hDC, inner, color(t.surface));
-    if item.CtlID as usize == CLEAR {
-        text(item.hDC, RECT { left: inner.left + at(16.0), ..inner }, "Очистить", d.font, color(t.text));
+    if item.CtlID as usize == CLEAR || item.CtlID as usize == BACK {
+        let label = if item.CtlID as usize == CLEAR {
+            "Очистить"
+        } else if d.returning {
+            "К снимку"
+        } else {
+            "Закрыть"
+        };
+        text(
+            item.hDC,
+            RECT {
+                left: inner.left + at(16.0),
+                ..inner
+            },
+            label,
+            d.font,
+            color(t.text),
+        );
         return;
     }
-    let Some(entry) = d.entries.get(item.CtlID as usize - FIRST) else { return };
+    let Some(entry) = d.entries.get(item.CtlID as usize - FIRST) else {
+        return;
+    };
     let pic = RECT {
         left: inner.left + at(8.0),
         top: inner.top + at(8.0),
@@ -519,14 +630,20 @@ fn draw_button(item: &DRAWITEMSTRUCT, d: &Data) {
 }
 fn stamp(ms: u64) -> String {
     let ticks = ms.saturating_mul(10000).saturating_add(116444736000000000);
-    let ft = FILETIME { dwLowDateTime: ticks as u32, dwHighDateTime: (ticks >> 32) as u32 };
+    let ft = FILETIME {
+        dwLowDateTime: ticks as u32,
+        dwHighDateTime: (ticks >> 32) as u32,
+    };
     let mut utc = SYSTEMTIME::default();
     let mut local = SYSTEMTIME::default();
     unsafe {
         if FileTimeToSystemTime(&ft, &mut utc).is_ok()
             && SystemTimeToTzSpecificLocalTime(None, &utc, &mut local).is_ok()
         {
-            return format!("{:02}.{:02} · {:02}:{:02}", local.wDay, local.wMonth, local.wHour, local.wMinute);
+            return format!(
+                "{:02}.{:02} · {:02}:{:02}",
+                local.wDay, local.wMonth, local.wHour, local.wMinute
+            );
         }
     }
     "Время неизвестно".into()
@@ -549,5 +666,39 @@ unsafe fn make_font(size: f32, scale: f32, weight: i32) -> HFONT {
             0,
             w!("Segoe UI"),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn recent_has_an_accessible_return_button_without_showing_the_window() {
+        unsafe {
+            let before = GetForegroundWindow();
+            let instance: HINSTANCE = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
+                .unwrap()
+                .into();
+            let window = Window::new(
+                instance,
+                HWND::default(),
+                WM_APP + 90,
+                HICON::default(),
+                HICON::default(),
+            )
+            .unwrap();
+            DATA.with(|d| d.borrow_mut().as_mut().unwrap().returning = true);
+            window.set_entries(Vec::new());
+            let button = GetDlgItem(Some(window.hwnd), BACK as i32).unwrap();
+            let mut name = [0u16; 64];
+            let len = GetWindowTextW(button, &mut name);
+            assert_eq!(String::from_utf16_lossy(&name[..len as usize]), "К снимку");
+            assert!(!IsWindowVisible(window.hwnd).as_bool());
+            assert_eq!(GetForegroundWindow(), before);
+            let _ = SendMessageW(window.hwnd, WM_COMMAND, Some(WPARAM(BACK)), Some(LPARAM(0)));
+            assert!(matches!(Window::take_request(&window), Some(Request::Close)));
+            drop(window);
+            assert_eq!(GetForegroundWindow(), before);
+        }
     }
 }

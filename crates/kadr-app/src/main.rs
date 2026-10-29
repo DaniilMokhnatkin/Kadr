@@ -15,6 +15,7 @@ mod config_watch;
 mod icons;
 #[cfg(test)]
 mod m2;
+mod pin_window;
 mod recent_window;
 mod recent_worker;
 mod snapshot;

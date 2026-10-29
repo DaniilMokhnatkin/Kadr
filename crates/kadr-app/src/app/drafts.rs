@@ -12,7 +12,8 @@ pub(super) struct DraftState {
     view: Option<(DocRect, DocRect)>,
 }
 impl App {
-    pub(super) fn hide_recent_before_capture(&self) {
+    pub(super) fn hide_recent_before_capture(&mut self) {
+        self.finish_paused();
         if let Some(window) = &self.recent_window
             && unsafe { IsWindowVisible(window.hwnd) }.as_bool()
         {
@@ -102,7 +103,6 @@ impl App {
         if self.loading_recent {
             return;
         }
-        self.close_session();
         self.recovery_notice = false;
         if self.recent_window.is_none() {
             match Window::new(
@@ -119,7 +119,11 @@ impl App {
                 }
             }
         }
-        self.recent_window.as_ref().unwrap().show(self.config.recent.enabled);
+        self.pause_capture();
+        self.recent_window
+            .as_ref()
+            .unwrap()
+            .show(self.config.recent.enabled, self.paused.is_some());
         if !self.recent.send(Command::List) {
             self.recent_window.as_ref().unwrap().error("Хранилище недоступно");
         }
@@ -128,16 +132,32 @@ impl App {
         let request = self.recent_window.as_ref().and_then(Window::take_request);
         match request {
             Some(Request::Load(id)) => {
+                if self
+                    .paused
+                    .as_ref()
+                    .and_then(|a| a.draft.as_ref())
+                    .is_some_and(|d| d.token.id == id)
+                {
+                    if let Some(window) = &self.recent_window {
+                        window.hide();
+                    }
+                    self.resume_capture();
+                    return;
+                }
                 self.loading_recent = true;
                 if !self.recent.send(Command::Load(id)) {
                     self.loading_recent = false;
                 }
             }
             Some(Request::Clear) => {
+                self.finish_paused();
                 self.close_session();
                 self.recent.send(Command::Clear);
             }
-            Some(Request::Close) => self.loading_recent = false,
+            Some(Request::Close) => {
+                self.loading_recent = false;
+                self.resume_capture();
+            }
             Some(Request::Refresh) => {
                 self.recent.send(Command::List);
             }
@@ -184,6 +204,7 @@ impl App {
                     if let Some(window) = &self.recent_window {
                         window.hide();
                     }
+                    self.finish_paused();
                     if let Err(e) = self.restore_draft(id, draft) {
                         log_warn!("восстановление: {e}");
                         self.notify("Не удалось восстановить снимок", &e.message());
@@ -199,6 +220,49 @@ impl App {
                 }
             }
         }
+    }
+    fn pause_capture(&mut self) {
+        if self.active.is_none() || self.paused.is_some() {
+            return;
+        }
+        if let Some(a) = &mut self.active {
+            a.drawing.finish_gesture();
+            a.drawing.finish_text();
+            a.session.pointer_up(doc_point(cursor_pos()));
+        }
+        self.flush_draft(true);
+        self.paused = self.active.take();
+        unsafe {
+            let _ = UnregisterHotKey(Some(self.hwnd), HK_ESC);
+            let _ = ReleaseCapture();
+        }
+        for o in &self.overlays {
+            overlay::set_cloaked(o.hwnd, true);
+        }
+    }
+    fn resume_capture(&mut self) {
+        if !resume_active(&mut self.active, &mut self.paused) {
+            return;
+        }
+        self.render_all();
+        unsafe {
+            for o in &self.overlays {
+                overlay::set_cloaked(o.hwnd, false);
+            }
+            if let Some(a) = &self.active {
+                let _ = SetForegroundWindow(self.overlays[a.hud_overlay].hwnd);
+            }
+            let _ = RegisterHotKey(Some(self.hwnd), HK_ESC, MOD_NOREPEAT, u32::from(VK_ESCAPE.0));
+        }
+    }
+    pub(super) fn finish_paused(&mut self) {
+        if self.paused.is_none() {
+            return;
+        }
+        let active = self.active.take();
+        self.active = self.paused.take();
+        self.close_session();
+        self.active = active;
     }
     fn restore_draft(&mut self, id: String, draft: Draft) -> Result<()> {
         if self.active.is_some() || self.overlays.is_empty() {
@@ -293,6 +357,13 @@ impl App {
         Ok(())
     }
 }
+fn resume_active(active: &mut Option<Active>, paused: &mut Option<Active>) -> bool {
+    if active.is_some() {
+        return false;
+    }
+    *active = paused.take();
+    active.is_some()
+}
 fn new_token() -> Token {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     Token {
@@ -364,6 +435,36 @@ fn archived_shapes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn returning_from_recent_keeps_selection_shapes_and_undo_history() {
+        let crop = DocRect::new(0, 0, 800, 600);
+        let mut session = Session::new(vec![crop], DocPoint::new(100, 100), 8, false);
+        session.restore_selection(Some(crop), false);
+        let mut drawing = Drawing::default();
+        drawing.set_tool(kadr_doc::annotation::Tool::Arrow);
+        drawing.down(DocPoint::new(100, 100), crop, 1);
+        drawing.up(DocPoint::new(200, 200), crop, false);
+        let mut paused = Some(Active {
+            session,
+            drawing,
+            frames: Vec::new(),
+            hud_overlay: 0,
+            hovered: None,
+            draft: None,
+            text_surrogate: None,
+        });
+        let mut active = None;
+        assert!(resume_active(&mut active, &mut paused));
+        assert!(paused.is_none());
+        let a = active.as_mut().unwrap();
+        assert_eq!(a.session.selection(), Some(crop));
+        assert_eq!(a.drawing.shapes().len(), 1);
+        a.drawing.undo();
+        assert!(a.drawing.shapes().is_empty());
+        a.drawing.redo();
+        assert_eq!(a.drawing.shapes().len(), 1);
+        assert!(!resume_active(&mut active, &mut paused));
+    }
     #[test]
     fn restoring_on_a_smaller_monitor_does_not_rewrite_unedited_coordinates_or_width() {
         use kadr_doc::annotation::{Annotation, Tool};
