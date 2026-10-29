@@ -19,11 +19,13 @@ mod interaction_bench;
 #[cfg(test)]
 mod m2;
 mod motion_bench;
+mod ocr;
 mod pin_window;
 mod recent_window;
 mod recent_worker;
 mod snapshot;
 mod thumbnail;
+mod translate;
 
 use std::error::Error;
 
