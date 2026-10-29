@@ -45,10 +45,21 @@ pub fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
         output += 1;
     }
-    let frames = [Arc::new(Image::new(
-        Rect::new(0, 0, 2560, 1440),
-        vec![160; 2560 * 1440 * 4],
-    ))];
+    // A busy, colourful backdrop: the frosted toolbar blurs whatever is under it, so a flat grey
+    // would hide both its look and its cost.
+    let mut pixels = Vec::with_capacity(2560 * 1440 * 4);
+    for y in 0..1440u32 {
+        for x in 0..2560u32 {
+            let stripe = if (x / 96 + y / 96) % 2 == 0 { 40 } else { 0 };
+            pixels.extend_from_slice(&[
+                (255 - y * 255 / 1440) as u8,
+                (x * 200 / 2560 + stripe) as u8,
+                (60 + y * 160 / 1440) as u8,
+                255,
+            ]);
+        }
+    }
+    let frames = [Arc::new(Image::new(Rect::new(0, 0, 2560, 1440), pixels))];
     let background = annotations::bitmap(&gpu, &frames[0])?;
     let target = unsafe {
         gpu.d2d.CreateBitmap(
@@ -158,7 +169,7 @@ pub fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
         if frame >= 10 {
             samples.push(start.elapsed().as_secs_f64() * 1000.0);
         }
-        if [0, 34, 35, 38, 42, 50, 68, 102, 108, 124, 238, 244, 270, 339].contains(&frame) {
+        if [0, 6, 16, 34, 40, 46, 56, 102, 108, 114, 120, 132, 238, 241, 244, 248, 254, 270, 339].contains(&frame) {
             let image = read(&gpu, &target)?;
             std::fs::write(
                 pictures.join(format!("frame-{frame:03}.png")),

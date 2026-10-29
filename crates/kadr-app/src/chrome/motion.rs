@@ -1,5 +1,5 @@
 use super::*;
-use kadr_render::motion::Spring;
+use kadr_render::motion::{Curve, Spring};
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -54,7 +54,7 @@ pub(super) fn begin(hwnd: HWND, value: bool) {
         let mut states = states.borrow_mut();
         let now = Instant::now();
         let s = states.entry(hwnd.0 as isize).or_insert_with(|| State {
-            spring: Spring::new(0.0, 48.0),
+            spring: Spring::with(0.0, Curve::HOVER_IN).precise(0.002),
             target: 0.0,
             epoch: now,
             next: now,
@@ -66,7 +66,9 @@ pub(super) fn begin(hwnd: HWND, value: bool) {
             // A pin/recent window may have moved from the 60 Hz screen to the 170 Hz screen.
             s.period = period(hwnd);
             s.target = value;
-            s.spring.target(value, s.epoch.elapsed().as_secs_f64());
+            // Same feel as the toolbar: lights up at once, lets go slowly.
+            let curve = if value > 0.5 { Curve::HOVER_IN } else { Curve::HOVER_OUT };
+            s.spring.target_with(value, curve, s.epoch.elapsed().as_secs_f64());
             s.dirty = true;
             s.next = now;
             unsafe {

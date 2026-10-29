@@ -1,15 +1,23 @@
+//! Toolbar choreography. The panel grows out of the selection edge with a soft pop; one selection
+//! pill and one swatch ring glide between items instead of cross-fading; hover lights up at once
+//! and lets go slowly; a new parameter row replaces the old one as a short cascade.
 use super::*;
-use crate::motion::Spring;
+use crate::motion::{Curve, Spring};
+
+/// Delay between neighbours of an entering row.
+const STAGGER: f64 = 0.014;
+/// Leaving parameters are gone (opacity < 0.02 with `FADE_OUT`) before different glyphs take their slots.
+const HANDOVER: f64 = 0.075;
 
 #[derive(Clone)]
 struct Bounds([Spring; 4]);
 impl Bounds {
-    fn new(r: D2D_RECT_F) -> Self {
-        Self([r.left, r.top, r.right, r.bottom].map(|v| Spring::new(v, 32.0)))
+    fn new(r: D2D_RECT_F, curve: Curve) -> Self {
+        Self([r.left, r.top, r.right, r.bottom].map(|v| Spring::with(v, curve)))
     }
-    fn target(&mut self, r: D2D_RECT_F, now: f64) {
+    fn target(&mut self, r: D2D_RECT_F, now: f64, start: f64) {
         for (s, v) in self.0.iter_mut().zip([r.left, r.top, r.right, r.bottom]) {
-            s.target(v, now);
+            s.target_at(v, now, start);
         }
     }
     fn value(&self, now: f64) -> D2D_RECT_F {
@@ -29,11 +37,16 @@ struct Control {
     opacity: Spring,
     hover: Spring,
     selected: Spring,
+    /// When the pointer arrived; tooltips wait for a resting pointer.
+    hover_since: f64,
     live: bool,
     exiting: bool,
     enabled: bool,
     property: bool,
 }
+/// A resting pointer gets a tooltip after this long; moving to a neighbour while one is shown does not wait.
+const TIP_DELAY: f64 = 0.5;
+const TIP_WARM: f64 = 0.3;
 pub(super) struct Button {
     pub button: ToolbarButton,
     pub rect: D2D_RECT_F,
@@ -48,6 +61,16 @@ pub(super) struct Button {
 pub(super) struct Layout {
     pub panel: D2D_RECT_F,
     pub opacity: f32,
+    /// Appearance transform around `anchor`: uniform scale, then vertical lift in pixels.
+    pub scale: f32,
+    pub lift: f32,
+    pub anchor: (f32, f32),
+    /// Pill under the selected tool of the main row.
+    pub indicator: Option<D2D_RECT_F>,
+    /// Slot of the selected colour; the ring is drawn there with that swatch's opacity.
+    pub swatch: Option<D2D_RECT_F>,
+    /// Tooltip target in panel coordinates and its opacity.
+    pub tip: Option<(ToolbarButton, D2D_RECT_F, f32)>,
     pub buttons: Vec<Button>,
     pub context: Option<Text>,
 }
@@ -62,28 +85,36 @@ impl Layout {
         let bottom = self
             .buttons
             .iter()
-            .filter(|c| {
-                c.live
-                    && matches!(
-                        c.button,
-                        ToolbarButton::Copy | ToolbarButton::Undo | ToolbarButton::Recent
-                    )
-            })
+            .filter(|c| c.live && matches!(c.button, ToolbarButton::Copy | ToolbarButton::Undo | ToolbarButton::Recent))
             .map(|c| c.rect.top)
             .min_by(f32::total_cmp)?;
-        let gap = self
-            .buttons
-            .first()
-            .map_or(4.0, |c| (c.rect.bottom - c.rect.top) / 10.0);
+        let gap = self.buttons.first().map_or(4.0, |c| (c.rect.bottom - c.rect.top) / 10.0);
         (bottom > top + 2.0 * gap).then_some(rect(self.panel.left, top + gap, self.panel.right, bottom - gap))
+    }
+    /// Screen point → panel coordinates (inverse of the appearance transform).
+    pub fn unproject(&self, x: f32, y: f32) -> (f32, f32) {
+        let (ax, ay) = self.anchor;
+        (ax + (x - ax) / self.scale, ay + (y - self.lift - ay) / self.scale)
+    }
+    /// Panel coordinates → screen; used for the tooltip, which is drawn untransformed.
+    pub fn project(&self, r: D2D_RECT_F) -> D2D_RECT_F {
+        let (ax, ay) = self.anchor;
+        let p = |x: f32, y: f32| (ax + (x - ax) * self.scale, ay + (y - ay) * self.scale + self.lift);
+        let (l, t) = p(r.left, r.top);
+        let (rr, b) = p(r.right, r.bottom);
+        rect(l, t, rr, b)
     }
 }
 #[derive(Default)]
 pub(super) struct State {
     panel: Option<Bounds>,
     opacity: Option<Spring>,
+    appear: Option<Spring>,
+    indicator: Option<Bounds>,
+    swatch: Option<Bounds>,
     controls: Vec<Control>,
     hovered: Option<ToolbarButton>,
+    last_tip: Option<f64>,
 }
 fn shifted(mut r: D2D_RECT_F, dy: f32) -> D2D_RECT_F {
     r.top += dy;
@@ -130,6 +161,44 @@ fn selected(b: ToolbarButton, property: bool, e: Option<EditorBar>) -> bool {
         _ => false,
     }
 }
+/// Ids follow the order of the target layout; a second occurrence of a button gets its own id.
+fn ids(target: &ToolbarLayout) -> Vec<usize> {
+    let mut occurrences = [0usize; 64];
+    target
+        .buttons
+        .iter()
+        .map(|(b, _, _)| {
+            let base = code(*b);
+            occurrences[base] += 1;
+            base + (occurrences[base] - 1) * 64
+        })
+        .collect()
+}
+/// Grow out of the selection edge the panel is attached to.
+fn anchor(panel: D2D_RECT_F, sel: D2D_RECT_F) -> ((f32, f32), f32) {
+    let x = (panel.left + panel.right) / 2.0;
+    if panel.top >= sel.bottom - 1.0 {
+        ((x, panel.top), -1.0)
+    } else if panel.bottom <= sel.top + 1.0 {
+        ((x, panel.bottom), 1.0)
+    } else {
+        ((x, (panel.top + panel.bottom) / 2.0), 0.0)
+    }
+}
+/// Slot of the first item matching `pick` in a pose.
+fn slot(buttons: &[(ToolbarButton, D2D_RECT_F, bool)], pick: impl Fn(ToolbarButton, bool) -> bool) -> Option<D2D_RECT_F> {
+    buttons.iter().find(|(b, _, p)| pick(*b, *p)).map(|(_, r, _)| *r)
+}
+fn glide(state: &mut Option<Bounds>, goal: Option<D2D_RECT_F>, now: f64) -> Option<D2D_RECT_F> {
+    match goal {
+        None => *state = None,
+        Some(r) => match state {
+            Some(b) => b.target(r, now, now),
+            None => *state = Some(Bounds::new(r, Curve::GLIDE)),
+        },
+    }
+    state.as_ref().map(|b| b.value(now))
+}
 
 impl State {
     pub fn clear(&mut self) {
@@ -138,10 +207,16 @@ impl State {
     pub fn active(&self, now: f64) -> bool {
         self.panel.as_ref().is_some_and(|p| p.active(now))
             || self.opacity.is_some_and(|p| p.active(now))
-            || self
-                .controls
-                .iter()
-                .any(|c| c.bounds.active(now) || c.opacity.active(now) || c.hover.active(now) || c.selected.active(now))
+            || self.appear.is_some_and(|p| p.active(now))
+            || self.indicator.as_ref().is_some_and(|p| p.active(now))
+            || self.swatch.as_ref().is_some_and(|p| p.active(now))
+            || self.controls.iter().any(|c| {
+                c.bounds.active(now)
+                    || c.opacity.active(now)
+                    || c.hover.active(now)
+                    || c.selected.active(now)
+                    || (c.live && c.hover.goal() > 0.5 && now - c.hover_since < TIP_DELAY + 0.2)
+            })
     }
     pub fn sample(
         &mut self,
@@ -155,87 +230,155 @@ impl State {
         if let Some(hover) = hover {
             self.hovered = hover;
         }
+        let ids = ids(target);
+        let poses: Vec<_> =
+            target.buttons.iter().zip(&ids).map(|((b, r, _), id)| (*b, *r, property(*b, id / 64))).collect();
+        let tool_goal = slot(&poses, |b, p| !p && matches!(b, ToolbarButton::Tool(_)) && selected(b, p, e));
+        let swatch_goal = slot(&poses, |b, p| matches!(b, ToolbarButton::Color(_)) && selected(b, p, e));
+        let (anchor_point, direction) = anchor(target.panel, target.sel);
         if !animate {
-            let mut counts = [0usize; 64];
             return Layout {
                 panel: target.panel,
                 opacity: 1.0,
+                scale: 1.0,
+                lift: 0.0,
+                anchor: anchor_point,
+                indicator: tool_goal,
+                swatch: swatch_goal,
+                tip: self
+                    .hovered
+                    .filter(|h| enabled(*h, e))
+                    .and_then(|h| poses.iter().find(|(b, _, _)| *b == h))
+                    .map(|(b, r, _)| (*b, *r, 1.0)),
                 context: target.context.clone(),
                 buttons: target
                     .buttons
                     .iter()
-                    .map(|(b, r, t)| Button {
+                    .zip(&ids)
+                    .map(|((b, r, t), id)| Button {
                         button: *b,
                         rect: *r,
                         label: t.clone(),
                         opacity: 1.0,
                         hover: f32::from(self.hovered == Some(*b)),
-                        selected: f32::from(selected(*b, property(*b, counts[code(*b)]), e)),
+                        selected: f32::from(selected(*b, property(*b, id / 64), e)),
                         live: true,
                         enabled: enabled(*b, e),
-                        property: {
-                            let n = counts[code(*b)];
-                            counts[code(*b)] += 1;
-                            property(*b, n)
-                        },
+                        property: property(*b, id / 64),
                     })
                     .collect(),
             };
         }
-        let panel = self
-            .panel
-            .get_or_insert_with(|| Bounds::new(shifted(target.panel, 8.0 * s)));
-        panel.target(target.panel, now);
-        let opacity = self.opacity.get_or_insert_with(|| Spring::new(0.0, 35.0));
+
+        // First pose: the panel appears as one object; its controls do not slide in on their own.
+        let fresh = self.panel.is_none();
+        let panel = self.panel.get_or_insert_with(|| Bounds::new(target.panel, Curve::LAYOUT));
+        panel.target(target.panel, now, now);
+        let opacity = self.opacity.get_or_insert_with(|| Spring::with(0.0, Curve::FADE).precise(0.002));
         opacity.target(1.0, now);
+        let appear = self.appear.get_or_insert_with(|| Spring::with(0.0, Curve::POP).precise(0.0005));
+        appear.target(1.0, now);
+
+        // A different parameter family hands over: the old one leaves first, the new one cascades in.
+        let handover = self.controls.iter().any(|c| {
+            c.property && !ids.contains(&c.id) && (!c.exiting || c.opacity.value(now) > 0.02)
+        });
         for c in &mut self.controls {
             c.live = false;
         }
-        let mut occurrences = [0usize; 64];
-        for (b, r, label) in &target.buttons {
-            let base = code(*b);
-            let id = base + occurrences[base] * 64;
-            occurrences[base] += 1;
+        let mut entering = 0;
+        for ((b, r, label), &id) in target.buttons.iter().zip(&ids) {
             let index = self.controls.iter().position(|c| c.id == id).unwrap_or_else(|| {
-                self.controls.push(Control {
+                let is_property = property(*b, id / 64);
+                let mut control = Control {
                     id,
                     button: *b,
-                    bounds: Bounds::new(shifted(*r, 8.0 * s)),
+                    bounds: Bounds::new(if fresh { *r } else { shifted(*r, 6.0 * s) }, Curve::LAYOUT),
                     destination: *r,
                     label: label.clone(),
-                    opacity: Spring::new(0.0, 35.0),
-                    hover: Spring::new(0.0, 48.0),
-                    selected: Spring::new(0.0, 40.0),
+                    opacity: Spring::with(if fresh { 1.0 } else { 0.0 }, Curve::FADE_IN).precise(0.002),
+                    hover: Spring::with(0.0, Curve::HOVER_IN).precise(0.002),
+                    selected: Spring::with(0.0, Curve::FADE).precise(0.002),
+                    hover_since: now,
                     live: true,
                     exiting: false,
                     enabled: enabled(*b, e),
-                    property: property(*b, id / 64),
-                });
+                    property: is_property,
+                };
+                if !fresh {
+                    let start = now + if handover && is_property { HANDOVER } else { 0.0 } + STAGGER * entering as f64;
+                    entering += 1;
+                    control.bounds.target(*r, now, start);
+                    control.opacity.target_at(1.0, now, start);
+                }
+                self.controls.push(control);
                 self.controls.len() - 1
             });
             let c = &mut self.controls[index];
             c.live = true;
-            c.exiting = false;
             c.enabled = enabled(*b, e);
             c.destination = *r;
             c.label = label.clone();
-            c.bounds.target(*r, now);
-            c.opacity.target(1.0, now);
-            c.hover.target(f32::from(c.enabled && self.hovered == Some(*b)), now);
+            if c.exiting {
+                // Came back while leaving: continue from the current pose, no restart.
+                c.exiting = false;
+                c.opacity.target_with(1.0, Curve::FADE, now);
+            }
+            // Same goal keeps a pending staggered start; a new one moves now.
+            c.bounds.target(*r, now, now);
+            let hovered = f32::from(c.enabled && self.hovered == Some(*b));
+            if hovered > c.hover.goal() {
+                c.hover_since = now;
+            }
+            let curve = if hovered > c.hover.goal() { Curve::HOVER_IN } else { Curve::HOVER_OUT };
+            c.hover.target_with(hovered, curve, now);
             c.selected.target(f32::from(selected(*b, c.property, e)), now);
         }
         for c in &mut self.controls {
             if !c.live && !c.exiting {
                 c.exiting = true;
-                c.opacity.target(0.0, now);
-                c.bounds.target(shifted(c.destination, -6.0 * s), now);
+                c.opacity.target_with(0.0, Curve::FADE_OUT, now);
+                c.bounds.target(shifted(c.destination, -3.0 * s), now, now);
             }
         }
-        self.controls
-            .retain(|c| c.live || c.opacity.active(now) || c.opacity.value(now) > 0.001);
+        self.controls.retain(|c| c.live || c.opacity.active(now) || c.opacity.value(now) > 0.001);
+
+        let indicator = glide(&mut self.indicator, tool_goal, now);
+        // The ring appears with its row instead of flying in, and stays in place while the row
+        // leaves: it fades with its swatch rather than vanishing a frame early.
+        let swatch = match (&self.swatch, swatch_goal) {
+            (None, Some(r)) => {
+                self.swatch = Some(Bounds::new(r, Curve::GLIDE));
+                Some(r)
+            }
+            (_, None) => self.swatch.as_ref().map(|b| b.value(now)),
+            _ => glide(&mut self.swatch, swatch_goal, now),
+        };
+        let appear = appear.value(now);
+        let warm = self.last_tip.is_some_and(|t| now - t < TIP_WARM);
+        let tip = self
+            .controls
+            .iter()
+            .filter(|c| c.live && c.enabled && c.hover.goal() > 0.5)
+            .max_by(|a, b| a.hover_since.total_cmp(&b.hover_since))
+            .map(|c| {
+                let wait = if warm { 0.0 } else { TIP_DELAY };
+                let shown = (((now - c.hover_since - wait) / 0.12) as f32).clamp(0.0, 1.0);
+                (c.button, c.bounds.value(now), shown * c.opacity.value(now).clamp(0.0, 1.0))
+            })
+            .filter(|(_, _, a)| *a > 0.001);
+        if tip.is_some_and(|(_, _, a)| a > 0.5) {
+            self.last_tip = Some(now);
+        }
         Layout {
+            tip,
             panel: panel.value(now),
             opacity: opacity.value(now).clamp(0.0, 1.0),
+            scale: 0.94 + 0.06 * appear,
+            lift: (1.0 - appear) * 8.0 * s * direction,
+            anchor: anchor_point,
+            indicator,
+            swatch,
             context: target.context.clone(),
             buttons: self
                 .controls
@@ -244,12 +387,7 @@ impl State {
                     button: c.button,
                     rect: c.bounds.value(now),
                     label: c.label.clone(),
-                    // Fade the old property family before revealing the new glyphs in the same slots.
-                    opacity: if c.property {
-                        (c.opacity.value(now) * 2.0 - 1.0).clamp(0.0, 1.0)
-                    } else {
-                        c.opacity.value(now).clamp(0.0, 1.0)
-                    },
+                    opacity: c.opacity.value(now).clamp(0.0, 1.0),
                     hover: c.hover.value(now).clamp(0.0, 1.0),
                     selected: c.selected.value(now).clamp(0.0, 1.0),
                     live: c.live,
@@ -257,6 +395,54 @@ impl State {
                     property: c.property,
                 })
                 .collect(),
+        }
+    }
+}
+
+/// Overlay-wide motion outside the toolbar: the screen dims in once per session, and the window
+/// highlight glides between windows while the user is still picking one.
+#[derive(Default)]
+pub(super) struct Chrome {
+    dim: Option<Spring>,
+    highlight: Option<Bounds>,
+}
+impl Chrome {
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+    pub fn active(&self, now: f64) -> bool {
+        self.dim.is_some_and(|s| s.active(now)) || self.highlight.as_ref().is_some_and(|b| b.active(now))
+    }
+    /// 0 → 1 over the first frames after the overlay is shown.
+    pub fn dim(&mut self, now: f64, animate: bool) -> f32 {
+        if !animate {
+            return 1.0;
+        }
+        let spring = self.dim.get_or_insert_with(|| {
+            let mut s = Spring::with(0.0, Curve::DIM).precise(0.002);
+            s.target(1.0, now);
+            s
+        });
+        spring.value(now)
+    }
+    /// Gliding only while hovering windows; a drawn or dragged selection follows the hand exactly.
+    pub fn highlight(&mut self, goal: Option<D2D_RECT_F>, glide: bool, now: f64, animate: bool) -> Option<D2D_RECT_F> {
+        match goal {
+            Some(r) if animate && glide => {
+                match &mut self.highlight {
+                    Some(b) => b.target(r, now, now),
+                    None => self.highlight = Some(Bounds::new(r, Curve::TRACK)),
+                }
+                // Whole pixels: four scrim rectangles meet at this edge without seams.
+                self.highlight.as_ref().map(|b| {
+                    let r = b.value(now);
+                    rect(r.left.round(), r.top.round(), r.right.round(), r.bottom.round())
+                })
+            }
+            _ => {
+                self.highlight = goal.map(|r| Bounds::new(r, Curve::TRACK));
+                goal
+            }
         }
     }
 }

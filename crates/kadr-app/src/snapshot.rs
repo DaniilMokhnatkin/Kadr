@@ -98,6 +98,7 @@ fn run_tool(path: &str, scale: f32, editor: bool, tool: kadr_doc::annotation::To
                     selected: None,
                     text_edit: None,
                 }),
+                glide: false,
             },
         };
         ctx.SetTarget(&target);

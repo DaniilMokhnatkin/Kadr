@@ -332,6 +332,7 @@ impl App {
                 toolbar: Some(Toolbar::default()),
                 hud: Some(&hud),
                 drawing: None,
+                glide: false,
             };
             if let Err(e) = overlay.present(gpu, &self.shared, &self.theme, marks) {
                 log_warn!("прогрев рендера: {e}");
@@ -895,6 +896,7 @@ impl App {
                     selected: active.drawing.selected_bounds(),
                     text_edit: active.drawing.text_selection(),
                 }),
+                glide: session.selection().is_none(),
             };
             let result = if nonblocking {
                 overlay.try_present(gpu, &self.shared, &self.theme, marks)

@@ -34,6 +34,14 @@ pub struct Theme {
     pub frame: D2D1_COLOR_F,
     /// Тёмная волосяная линия снаружи рамки: отделяет её от светлого содержимого.
     pub frame_outline: D2D1_COLOR_F,
+    /// Tint over the blurred screenshot behind the toolbar. Alpha 1 turns the material opaque.
+    pub glass: D2D1_COLOR_F,
+    /// Edge of floating surfaces; a darker line than `border`, but translucent so it reads on any backdrop.
+    pub hairline: D2D1_COLOR_F,
+    /// Light rim just inside the edge.
+    pub sheen: D2D1_COLOR_F,
+    /// Shadow ink; alpha 0 disables shadows (high contrast).
+    pub shadow: D2D1_COLOR_F,
 }
 
 impl Theme {
@@ -48,18 +56,24 @@ impl Theme {
     fn porcelain() -> Self {
         Self {
             scrim: rgb(0x000000, 0.42),
-            surface: rgb(0xfafafc, 1.0),
+            surface: rgb(0xfbfbfd, 1.0),
             border: rgb(0xd6d6dc, 1.0),
-            control: rgb(0xeeeef2, 1.0),
-            selected: rgb(0xe0edff, 1.0),
+            // Pills sit on glass: nearly opaque so contrast does not depend on the screenshot.
+            control: rgb(0xe6e6eb, 0.92),
+            selected: rgb(0xdbe7fb, 1.0),
             on_selected: rgb(0x005fcc, 1.0),
-            accent: rgb(0x005fcc, 1.0),
+            accent: rgb(0x0a6cdf, 1.0),
             on_accent: rgb(0xffffff, 1.0),
             disabled: rgb(0x929298, 1.0),
             text: rgb(0x1d1d1f, 1.0),
-            text_muted: rgb(0x636369, 1.0),
+            // Darker than before: on glass over a black screen the worst backdrop is ~#d7d7d9.
+            text_muted: rgb(0x56565c, 1.0),
             frame: rgb(0xffffff, 1.0),
             frame_outline: rgb(0x000000, 0.6),
+            glass: rgb(0xf7f7f9, 0.84),
+            hairline: rgb(0x000000, 0.13),
+            sheen: rgb(0xffffff, 0.55),
+            shadow: rgb(0x000000, 1.0),
         }
     }
 
@@ -81,6 +95,10 @@ impl Theme {
             text_muted: text,
             frame: sys(COLOR_HIGHLIGHT),
             frame_outline: window,
+            glass: window,
+            hairline: text,
+            sheen: rgb(0x000000, 0.0),
+            shadow: rgb(0x000000, 0.0),
         }
     }
 }

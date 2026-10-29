@@ -2,9 +2,13 @@
 //! Координаты — физические пиксели поверхности; размеры из `theme::dip` умножаются на масштаб.
 
 use windows::Win32::Foundation::RECT;
-use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
+use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_BORDER_MODE_HARD, D2D1_COLOR_F, D2D1_COMPOSITE_MODE_SOURCE_OVER};
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_ROUNDED_RECT, ID2D1Bitmap1,
+    CLSID_D2D1GaussianBlur, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_GAUSSIANBLUR_PROP_BORDER_MODE,
+    D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+    D2D1_LAYER_OPTIONS1_NONE, D2D1_LAYER_PARAMETERS1, D2D1_PROPERTY_TYPE_ENUM, D2D1_PROPERTY_TYPE_FLOAT, D2D1_ROUNDED_RECT,
+    ID2D1Bitmap1, ID2D1Effect, ID2D1Geometry, ID2D1Layer,
     ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
@@ -12,8 +16,9 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_LINE_METRICS, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE,
     DWRITE_WORD_WRAPPING_NO_WRAP, IDWriteFontCollection, IDWriteTextFormat, IDWriteTextLayout,
 };
-use windows::core::{PCWSTR, Result, w};
-use windows_numerics::Vector2;
+use std::mem::ManuallyDrop;
+use windows::core::{Interface, PCWSTR, Result, w};
+use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::annotations::{self, Cache, View};
 use crate::gpu::{Gpu, Shared};
@@ -37,6 +42,9 @@ pub struct TextStyles {
     button: Style,
     toolbar: std::cell::RefCell<Option<(ToolbarKey, Option<ToolbarLayout>)>>,
     motion: std::cell::RefCell<transition::State>,
+    chrome: std::cell::RefCell<transition::Chrome>,
+    /// Frosted backdrop of the toolbar; created on first use by this surface's device context.
+    backdrop: std::cell::RefCell<Option<ID2D1Effect>>,
     animate: std::cell::Cell<bool>,
     epoch: std::time::Instant,
     time_override: std::cell::Cell<Option<f64>>,
@@ -58,6 +66,8 @@ impl TextStyles {
             button: style(DWRITE_FONT_WEIGHT_REGULAR, dip::TITLE, false)?,
             toolbar: Default::default(),
             motion: Default::default(),
+            chrome: Default::default(),
+            backdrop: Default::default(),
             animate: std::cell::Cell::new(false),
             epoch: std::time::Instant::now(),
             time_override: std::cell::Cell::new(None),
@@ -69,11 +79,17 @@ impl TextStyles {
             self.reset_motion();
         }
     }
+    /// New session or closed overlay: every transition starts over, including the dim-in.
     pub fn reset_motion(&self) {
+        self.motion.borrow_mut().clear();
+        self.chrome.borrow_mut().clear();
+    }
+    fn reset_toolbar_motion(&self) {
         self.motion.borrow_mut().clear();
     }
     pub fn animations_pending(&self) -> bool {
-        self.animate.get() && self.motion.borrow().active(self.animation_time())
+        let now = self.animation_time();
+        self.animate.get() && (self.motion.borrow().active(now) || self.chrome.borrow().active(now))
     }
     pub fn set_animation_time(&self, seconds: Option<f64>) {
         self.time_override.set(seconds);
@@ -211,6 +227,8 @@ pub struct Marks<'a> {
     pub toolbar: Option<Toolbar>,
     pub hud: Option<&'a Hud>,
     pub drawing: Option<View<'a>>,
+    /// The highlight is a hovered window, not a selection: let it glide between windows.
+    pub glide: bool,
 }
 
 pub struct Scene<'a> {
@@ -231,8 +249,12 @@ pub fn draw(
     cache: &mut Cache,
 ) -> Result<()> {
     if scene.marks.toolbar.is_none() {
-        text.reset_motion();
+        text.reset_toolbar_motion();
     }
+    let now = text.animation_time();
+    let animate = text.animate.get();
+    let dim = text.chrome.borrow_mut().dim(now, animate);
+    let scrim = fade(theme.scrim, dim);
     let full = rect(0.0, 0.0, scene.size.0 as f32, scene.size.1 as f32);
     unsafe {
         match scene.frame {
@@ -278,14 +300,15 @@ pub fn draw(
             (s.bottom - oy) as f32,
         )
     });
+    let selection = text.chrome.borrow_mut().highlight(selection, scene.marks.glide, now, animate);
 
     match selection.and_then(|s| intersect(s, full)) {
-        None => fill(gpu, theme.scrim, full),
+        None => fill(gpu, scrim, full),
         Some(c) => {
-            fill(gpu, theme.scrim, rect(0.0, 0.0, full.right, c.top));
-            fill(gpu, theme.scrim, rect(0.0, c.bottom, full.right, full.bottom));
-            fill(gpu, theme.scrim, rect(0.0, c.top, c.left, c.bottom));
-            fill(gpu, theme.scrim, rect(c.right, c.top, full.right, c.bottom));
+            fill(gpu, scrim, rect(0.0, 0.0, full.right, c.top));
+            fill(gpu, scrim, rect(0.0, c.bottom, full.right, full.bottom));
+            fill(gpu, scrim, rect(0.0, c.top, c.left, c.bottom));
+            fill(gpu, scrim, rect(c.right, c.top, full.right, c.bottom));
         }
     }
 
@@ -311,7 +334,7 @@ pub fn draw(
         let label = format!("{} × {}", screen.right - screen.left, screen.bottom - screen.top);
         size_label(gpu, shared, text, theme, scene, sel, line + outline, &label)?;
         if let Some(toolbar) = scene.marks.toolbar {
-            draw_toolbar(gpu, shared, text, theme, scene, sel, toolbar)?;
+            draw_toolbar(gpu, shared, text, theme, scene, sel, toolbar, scrim)?;
         }
     }
 
@@ -327,6 +350,8 @@ pub fn draw(
 #[derive(Clone)]
 struct ToolbarLayout {
     panel: D2D_RECT_F,
+    /// Selection the panel is attached to: the panel grows out of that edge.
+    sel: D2D_RECT_F,
     buttons: Vec<(ToolbarButton, D2D_RECT_F, Text)>,
     context: Option<Text>,
 }
@@ -519,6 +544,7 @@ fn build_toolbar_layout(
         .transpose()?;
     Ok(Some(ToolbarLayout {
         panel: rect(x, y, x + panel_w, y + panel_h),
+        sel,
         buttons,
         context,
     }))
@@ -547,7 +573,7 @@ pub fn toolbar_hit(
     );
     let target = toolbar_layout(shared, text, size, scale, sel, editor).ok()??;
     let layout = text.displayed(&target, editor, None, scale);
-    let (x, y) = ((at.0 - ox) as f32, (at.1 - oy) as f32);
+    let (x, y) = layout.unproject((at.0 - ox) as f32, (at.1 - oy) as f32);
     let clip = layout.property_clip();
     if let Some(c) = layout.buttons.iter().rev().find(|c| {
         c.opacity > 0.02
@@ -567,8 +593,10 @@ pub fn toolbar_hit(
     (x >= r.left && x < r.right && y >= r.top && y < r.bottom).then_some(ToolbarButton::Surface)
 }
 
-/// Основное действие — белая заливка (editorial: «filled white on black»), остальные — текстом,
-/// с тоновой подложкой при наведении.
+/// Floating glass panel: the screenshot shows through it blurred and tinted, under a soft shadow and a
+/// hairline edge. It grows out of the selection edge; one pill and one ring glide between choices.
+/// The primary action keeps the only saturated fill.
+#[allow(clippy::too_many_arguments)]
 fn draw_toolbar(
     gpu: &Gpu,
     shared: &Shared,
@@ -577,28 +605,51 @@ fn draw_toolbar(
     scene: &Scene,
     sel: D2D_RECT_F,
     toolbar: Toolbar,
+    scrim: D2D1_COLOR_F,
 ) -> Result<()> {
     let size = (scene.size.0 as f32, scene.size.1 as f32);
-    let Some(layout) = toolbar_layout(shared, text, size, scene.scale, sel, toolbar.editor)? else {
-        text.reset_motion();
+    let Some(target) = toolbar_layout(shared, text, size, scene.scale, sel, toolbar.editor)? else {
+        text.reset_toolbar_motion();
         return Ok(());
     };
     let s = scene.scale;
-    let layout = text.displayed(&layout, toolbar.editor, Some(toolbar.hovered), s);
-    let mut material = *theme;
-    material.surface = fade(theme.surface, layout.opacity);
-    material.border = fade(theme.border, layout.opacity);
-    panel(gpu, &material, layout.panel, dip::RADIUS_MD * s, s);
+    let layout = text.displayed(&target, toolbar.editor, Some(toolbar.hovered), s);
+    let a0 = layout.opacity;
+    let (ax, ay) = layout.anchor;
+    let k = layout.scale;
+    let mut previous = Matrix3x2::default();
     unsafe {
-        gpu.d2d.PushAxisAlignedClip(
-            &layout.panel,
-            windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-        );
+        gpu.d2d.GetTransform(&mut previous);
+        gpu.d2d.SetTransform(&Matrix3x2 {
+            M11: k,
+            M12: 0.0,
+            M21: 0.0,
+            M22: k,
+            M31: ax * (1.0 - k),
+            M32: ay * (1.0 - k) + layout.lift,
+        });
+    }
+    let p = layout.panel;
+    let inside = p.left >= sel.left && p.top >= sel.top && p.right <= sel.right && p.bottom <= sel.bottom;
+    let painted = glass(gpu, shared, text, theme, scene.frame, p, 16.0 * s, s, a0, (!inside).then_some(scrim));
+    unsafe {
+        gpu.d2d.PushAxisAlignedClip(&p, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    }
+    if let Some(r) = layout.indicator {
+        fill_rounded(gpu, fade(theme.selected, a0), r, 10.0 * s);
     }
     let property_clip = layout.property_clip();
+    let selected_color = toolbar.editor.map(|e| e.color);
+    // Parameters fade with the opening row: no sliver of a swatch shows through a two-pixel gap.
+    let openness = |r: &D2D_RECT_F| {
+        property_clip.map_or(0.0, |clip| {
+            let open = (clip.bottom - clip.top) / (r.bottom - r.top).max(1.0);
+            ((open - 0.4) / 0.6).clamp(0.0, 1.0)
+        })
+    };
     for c in &layout.buttons {
         let (button, r, label) = (&c.button, &c.rect, &c.label);
-        let a = layout.opacity * c.opacity;
+        let a = a0 * c.opacity * if c.property { openness(r) } else { 1.0 };
         if a < 0.001 {
             continue;
         }
@@ -607,10 +658,7 @@ fn draw_toolbar(
                 continue;
             };
             unsafe {
-                gpu.d2d.PushAxisAlignedClip(
-                    &clip,
-                    windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                );
+                gpu.d2d.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             }
         }
         if let ToolbarButton::Color(i) = button {
@@ -621,78 +669,77 @@ fn draw_toolbar(
                 b: rgb[2] as f32 / 255.0,
                 a,
             };
-            if c.hover > 0.01 || c.selected > 0.01 {
-                fill_rounded(gpu, fade(theme.control, a * c.hover.max(c.selected)), *r, 8.0 * s);
-            }
-            let cx = (r.left + r.right) / 2.0;
-            let cy = (r.top + r.bottom) / 2.0;
+            // The swatch itself swells a little under the pointer instead of getting a box around it.
+            let radius = (9.0 + 1.5 * c.hover) * s;
             unsafe {
-                let e = windows::Win32::Graphics::Direct2D::D2D1_ELLIPSE {
-                    point: Vector2::new(cx, cy),
-                    radiusX: 9.0 * s,
-                    radiusY: 9.0 * s,
+                let e = D2D1_ELLIPSE {
+                    point: Vector2::new((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0),
+                    radiusX: radius,
+                    radiusY: radius,
                 };
                 gpu.brush.SetColor(&ink);
                 gpu.d2d.FillEllipse(&e, &gpu.brush);
-                gpu.brush.SetColor(&fade(theme.text_muted, a));
-                gpu.d2d.DrawEllipse(&e, &gpu.brush, 0.7 * s, None::<&ID2D1StrokeStyle>);
-                if c.selected > 0.01 {
-                    let e = windows::Win32::Graphics::Direct2D::D2D1_ELLIPSE {
-                        radiusX: 12.0 * s,
-                        radiusY: 12.0 * s,
-                        ..e
-                    };
-                    gpu.brush.SetColor(&fade(theme.text, a * c.selected));
-                    gpu.d2d.DrawEllipse(&e, &gpu.brush, 1.5 * s, None::<&ID2D1StrokeStyle>);
-                }
+                gpu.brush.SetColor(&fade(theme.hairline, a));
+                gpu.d2d.DrawEllipse(&e, &gpu.brush, s, None::<&ID2D1StrokeStyle>);
             }
-            if c.property {
-                unsafe {
-                    gpu.d2d.PopAxisAlignedClip();
-                }
-            }
-            continue;
-        }
-        let ink = if !c.enabled {
-            fade(theme.disabled, a)
-        } else if *button == ToolbarButton::Copy {
-            fill_rounded(gpu, fade(theme.accent, a), *r, 10.0 * s);
-            fade(theme.on_accent, a)
         } else {
-            if c.hover > 0.01 {
-                fill_rounded(gpu, fade(theme.control, a * c.hover), *r, 8.0 * s);
-            }
-            if c.selected > 0.01 {
-                fill_rounded(gpu, fade(theme.selected, a * c.selected), *r, 8.0 * s);
-                unsafe {
-                    gpu.brush.SetColor(&fade(theme.on_selected, a * c.selected));
-                    gpu.d2d.DrawRoundedRectangle(
-                        &D2D1_ROUNDED_RECT {
-                            rect: inflate(*r, -s),
-                            radiusX: 7.0 * s,
-                            radiusY: 7.0 * s,
-                        },
-                        &gpu.brush,
-                        s,
-                        None::<&ID2D1StrokeStyle>,
-                    );
+            let ink = if !c.enabled {
+                fade(theme.disabled, a)
+            } else if *button == ToolbarButton::Copy {
+                fill_rounded(gpu, fade(mix(theme.accent, theme.on_accent, 0.12 * c.hover), a), *r, 10.0 * s);
+                fade(theme.on_accent, a)
+            } else {
+                // Main-row tools take their tint from how much of the gliding pill covers them, so
+                // the colour travels with the pill instead of jumping ahead of it.
+                let tint = match (c.property, layout.indicator) {
+                    (false, Some(p)) if matches!(button, ToolbarButton::Tool(_)) => {
+                        ((p.right.min(r.right) - p.left.max(r.left)) / (r.right - r.left).max(1.0)).clamp(0.0, 1.0)
+                    }
+                    (false, None) if matches!(button, ToolbarButton::Tool(_)) => 0.0,
+                    _ => c.selected,
+                };
+                if c.hover > 0.01 {
+                    fill_rounded(gpu, fade(theme.control, a * c.hover * (1.0 - tint)), *r, 10.0 * s);
                 }
+                if c.property && c.selected > 0.01 {
+                    fill_rounded(gpu, fade(theme.selected, a * c.selected), *r, 10.0 * s);
+                }
+                fade(mix(theme.text, theme.on_selected, tint), a)
+            };
+            if label.w > 0.0 {
+                draw_text(
+                    gpu,
+                    label,
+                    r.left + (r.right - r.left - label.w) / 2.0,
+                    r.top + (r.bottom - r.top - label.h) / 2.0,
+                    ink,
+                );
+            } else {
+                glyphs::draw(gpu, *button, *r, ink, s);
             }
-            fade(mix(theme.text, theme.on_selected, c.selected), a)
-        };
-        if label.w > 0.0 {
-            draw_text(
-                gpu,
-                label,
-                r.left + (r.right - r.left - label.w) / 2.0,
-                r.top + (r.bottom - r.top - label.h) / 2.0,
-                ink,
-            );
-        } else {
-            glyphs::draw(gpu, *button, *r, ink, s);
         }
         if c.property {
             unsafe {
+                gpu.d2d.PopAxisAlignedClip();
+            }
+        }
+    }
+    if let (Some(r), Some(clip)) = (layout.swatch, property_clip) {
+        let ring = layout
+            .buttons
+            .iter()
+            .find(|c| matches!(c.button, ToolbarButton::Color(i) if Some(i) == selected_color))
+            .map_or(0.0, |c| c.opacity * openness(&c.rect));
+        if ring > 0.001 {
+            unsafe {
+                gpu.d2d.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                let e = D2D1_ELLIPSE {
+                    point: Vector2::new((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0),
+                    radiusX: 13.0 * s,
+                    radiusY: 13.0 * s,
+                };
+                gpu.brush.SetColor(&fade(theme.text, a0 * ring));
+                gpu.d2d.DrawEllipse(&e, &gpu.brush, 1.75 * s, None::<&ID2D1StrokeStyle>);
                 gpu.d2d.PopAxisAlignedClip();
             }
         }
@@ -704,11 +751,7 @@ fn draw_toolbar(
             .buttons
             .iter()
             .filter(|c| {
-                c.live
-                    && matches!(
-                        c.button,
-                        ToolbarButton::Color(_) | ToolbarButton::Width | ToolbarButton::Strength
-                    )
+                c.live && matches!(c.button, ToolbarButton::Color(_) | ToolbarButton::Width | ToolbarButton::Strength)
             })
             .collect();
         if let Some(c) = properties.first() {
@@ -721,23 +764,19 @@ fn draw_toolbar(
                     context,
                     x,
                     c.rect.top + (c.rect.bottom - c.rect.top - context.h) / 2.0,
-                    fade(theme.text_muted, layout.opacity * context_opacity),
+                    fade(theme.text_muted, a0 * context_opacity),
                 );
             }
         }
     }
     unsafe {
         gpu.d2d.PopAxisAlignedClip();
+        gpu.d2d.SetTransform(&previous);
     }
-    // Tooltip comes in after the hover highlight and fades as the pointer moves away.
-    if let Some(control) = layout
-        .buttons
-        .iter()
-        .filter(|c| c.live && c.enabled && c.hover > 0.6)
-        .max_by(|a, b| a.hover.total_cmp(&b.hover))
-    {
-        let hovered = control.button;
-        let tip_opacity = layout.opacity * control.opacity * ((control.hover - 0.6) / 0.4).clamp(0.0, 1.0);
+    painted?;
+    // A resting pointer gets its tooltip; drawn untransformed, next to where the button is on screen.
+    if let Some((hovered, r, tip_opacity)) = layout.tip {
+        let tip_opacity = tip_opacity * a0;
         let value = match hovered {
             ToolbarButton::Copy => "Копировать · Enter / Ctrl+C".into(),
             ToolbarButton::Save => "Сохранить · Ctrl+S".into(),
@@ -751,25 +790,138 @@ fn draw_toolbar(
             _ => hovered.label().into(),
         };
         let tip = measure(shared, &text.label, &value)?;
-        let rw = tip.w + 24.0 * s;
-        let rh = tip.h + 16.0 * s;
-        let target = control.rect;
+        let rw = tip.w + 20.0 * s;
+        let rh = tip.h + 12.0 * s;
+        let shown = layout.project(layout.panel);
+        let target = layout.project(r);
         let x = ((target.left + target.right - rw) / 2.0).clamp(8.0 * s, (size.0 - rw - 8.0 * s).max(8.0 * s));
-        let y = if layout.panel.top > rh + 16.0 * s {
-            layout.panel.top - rh - 8.0 * s
-        } else {
-            layout.panel.bottom + 8.0 * s
-        };
+        let y = if shown.top > rh + 16.0 * s { shown.top - rh - 8.0 * s } else { shown.bottom + 8.0 * s };
         if y + rh <= size.1 {
-            let y = y + 4.0 * s * (1.0 - tip_opacity);
+            let y = y + 3.0 * s * (1.0 - tip_opacity);
             let mut tip_theme = *theme;
             tip_theme.surface = fade(theme.surface, tip_opacity);
-            tip_theme.border = fade(theme.border, tip_opacity);
+            tip_theme.hairline = fade(theme.hairline, tip_opacity);
             panel(gpu, &tip_theme, rect(x, y, x + rw, y + rh), 8.0 * s, s);
-            draw_text(gpu, &tip, x + 12.0 * s, y + 8.0 * s, fade(theme.text, tip_opacity));
+            draw_text(gpu, &tip, x + 10.0 * s, y + 6.0 * s, fade(theme.text, tip_opacity));
         }
     }
     Ok(())
+}
+
+/// Frosted material: blurred screenshot, the scrim it sits on, then a light tint. Falls back to an
+/// opaque surface without a frame (fixtures) or in high contrast.
+#[allow(clippy::too_many_arguments)]
+fn glass(
+    gpu: &Gpu,
+    shared: &Shared,
+    text: &TextStyles,
+    theme: &Theme,
+    frame: Option<&ID2D1Bitmap1>,
+    r: D2D_RECT_F,
+    radius: f32,
+    s: f32,
+    opacity: f32,
+    scrim: Option<D2D1_COLOR_F>,
+) -> Result<()> {
+    shadow(gpu, theme.shadow, r, radius, s, opacity, true);
+    let rounded = D2D1_ROUNDED_RECT { rect: r, radiusX: radius, radiusY: radius };
+    match frame.filter(|_| theme.glass.a < 1.0) {
+        Some(frame) => unsafe {
+            let effect = backdrop(gpu, text, frame, s)?;
+            let geometry: ID2D1Geometry = shared.d2d.CreateRoundedRectangleGeometry(&rounded)?.cast()?;
+            let mut params = D2D1_LAYER_PARAMETERS1 {
+                contentBounds: r,
+                geometricMask: ManuallyDrop::new(Some(geometry)),
+                maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                maskTransform: Matrix3x2::identity(),
+                opacity,
+                opacityBrush: ManuallyDrop::new(None),
+                layerOptions: D2D1_LAYER_OPTIONS1_NONE,
+            };
+            gpu.d2d.PushLayer(&params, None::<&ID2D1Layer>);
+            gpu.d2d.DrawImage(
+                &effect.GetOutput()?,
+                Some(&Vector2 { X: r.left, Y: r.top }),
+                Some(&r),
+                D2D1_INTERPOLATION_MODE_LINEAR,
+                D2D1_COMPOSITE_MODE_SOURCE_OVER,
+            );
+            if let Some(scrim) = scrim {
+                fill(gpu, scrim, r);
+            }
+            fill(gpu, theme.glass, r);
+            gpu.d2d.PopLayer();
+            ManuallyDrop::drop(&mut params.geometricMask);
+            ManuallyDrop::drop(&mut params.opacityBrush);
+        },
+        None => fill_rounded(gpu, fade(theme.surface, opacity), r, radius),
+    }
+    edge(gpu, theme, r, radius, s, opacity);
+    Ok(())
+}
+
+/// Blur of this surface's frozen frame, reused across frames; only its input changes.
+fn backdrop(gpu: &Gpu, text: &TextStyles, frame: &ID2D1Bitmap1, s: f32) -> Result<ID2D1Effect> {
+    let mut slot = text.backdrop.borrow_mut();
+    if slot.is_none() {
+        unsafe {
+            let effect = gpu.d2d.CreateEffect(&CLSID_D2D1GaussianBlur)?;
+            effect.SetValue(
+                D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION.0 as u32,
+                D2D1_PROPERTY_TYPE_FLOAT,
+                &(20.0 * s).to_le_bytes(),
+            )?;
+            // Hard edges: the monitor border does not fade the material to transparent.
+            effect.SetValue(
+                D2D1_GAUSSIANBLUR_PROP_BORDER_MODE.0 as u32,
+                D2D1_PROPERTY_TYPE_ENUM,
+                &(D2D1_BORDER_MODE_HARD.0 as u32).to_le_bytes(),
+            )?;
+            *slot = Some(effect);
+        }
+    }
+    let effect = slot.clone().expect("created above");
+    unsafe {
+        effect.SetInput(0, frame, true);
+    }
+    Ok(effect)
+}
+
+/// Soft shadow from stacked translucent rings: a wide ambient one and, for floating panels, a tight
+/// contact shade. Cheaper than a shadow effect and identical at every refresh rate.
+fn shadow(gpu: &Gpu, color: D2D1_COLOR_F, r: D2D_RECT_F, radius: f32, s: f32, opacity: f32, floating: bool) {
+    if color.a <= 0.0 || opacity <= 0.0 {
+        return;
+    }
+    let layers: &[(f32, f32, f32, usize)] =
+        if floating { &[(28.0, 12.0, 0.20, 14), (3.0, 1.0, 0.10, 3)] } else { &[(8.0, 3.0, 0.12, 6)] };
+    for &(spread, drop, alpha, steps) in layers {
+        for i in 0..steps {
+            let t = (i + 1) as f32 / steps as f32;
+            let grow = spread * s * t;
+            let dy = drop * s * t;
+            let ring = rect(r.left - grow, r.top - grow + dy, r.right + grow, r.bottom + grow + dy);
+            fill_rounded(gpu, fade(color, opacity * alpha / steps as f32 * (1.0 - t * 0.5)), ring, radius + grow);
+        }
+    }
+}
+
+/// Hairline outside and a faint light rim inside give the slab its thickness.
+fn edge(gpu: &Gpu, theme: &Theme, r: D2D_RECT_F, radius: f32, s: f32, opacity: f32) {
+    let line = px(dip::BORDER, s);
+    let half = line / 2.0;
+    let rounded = |r: D2D_RECT_F, radius: f32| D2D1_ROUNDED_RECT { rect: r, radiusX: radius, radiusY: radius };
+    unsafe {
+        gpu.brush.SetColor(&fade(theme.hairline, opacity));
+        gpu.d2d.DrawRoundedRectangle(&rounded(inflate(r, -half), radius - half), &gpu.brush, line, None::<&ID2D1StrokeStyle>);
+        gpu.brush.SetColor(&fade(theme.sheen, opacity));
+        gpu.d2d.DrawRoundedRectangle(
+            &rounded(inflate(r, -line - half), radius - line - half),
+            &gpu.brush,
+            line,
+            None::<&ID2D1StrokeStyle>,
+        );
+    }
 }
 
 fn fade(mut c: D2D1_COLOR_F, a: f32) -> D2D1_COLOR_F {
@@ -1191,23 +1343,13 @@ fn draw_text(gpu: &Gpu, text: &Text, x: f32, y: f32, color: D2D1_COLOR_F) {
     }
 }
 
-/// Непрозрачная панель с рамкой в 1 px — глубина только рамкой, без теней (editorial).
+/// Small opaque card (size label, tooltip, HUD): a short soft shadow, the surface and a hairline.
+/// Opacity comes from `theme.surface.a`, so a fading card fades its shadow too.
 fn panel(gpu: &Gpu, theme: &Theme, r: D2D_RECT_F, radius: f32, scale: f32) {
-    let stroke = px(dip::BORDER, scale);
-    let half = stroke / 2.0;
-    let inner = rect(r.left + half, r.top + half, r.right - half, r.bottom - half);
-    let rounded = |r| D2D1_ROUNDED_RECT {
-        rect: r,
-        radiusX: radius,
-        radiusY: radius,
-    };
-    unsafe {
-        gpu.brush.SetColor(&theme.surface);
-        gpu.d2d.FillRoundedRectangle(&rounded(r), &gpu.brush);
-        gpu.brush.SetColor(&theme.border);
-        gpu.d2d
-            .DrawRoundedRectangle(&rounded(inner), &gpu.brush, stroke, None::<&ID2D1StrokeStyle>);
-    }
+    let opacity = theme.surface.a;
+    shadow(gpu, theme.shadow, r, radius, scale, opacity, false);
+    fill_rounded(gpu, theme.surface, r, radius);
+    edge(gpu, theme, r, radius, scale, opacity);
 }
 
 /// Кольцо толщиной `width` вокруг `inner`. Заливкой прямоугольников, а не обводкой, —
@@ -1443,6 +1585,7 @@ mod toolbar_tests {
                 &scene,
                 rect(100.0, 100.0, 900.0, 500.0),
                 bar,
+                Theme::current().scrim,
             )
             .unwrap();
             gpu.d2d.EndDraw(None, None).unwrap();
