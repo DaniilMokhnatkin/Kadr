@@ -1,6 +1,8 @@
 use super::*;
 use kadr_doc::annotation::Tool;
+use kadr_editor::pointer::Sample;
 use windows::Win32::Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GMMP_USE_DISPLAY_POINTS, GetMouseMovePointsEx, MOUSEMOVEPOINT};
 use windows::Win32::UI::Input::KeyboardAndMouse::{VK_DELETE, VK_F2};
 impl App {
     pub(super) fn drawing_pointer(&mut self, hwnd: HWND, msg: u32, p: DocPoint) -> bool {
@@ -10,6 +12,42 @@ impl App {
         let Some(crop) = active.session.selection() else {
             return false;
         };
+        let current = Sample {
+            point: p,
+            time: unsafe { GetMessageTime() } as u32,
+        };
+        if msg == WM_LBUTTONDOWN {
+            self.pointer_history.begin(current);
+        }
+        let shift = mods().shift;
+        if matches!(msg, WM_MOUSEMOVE | WM_LBUTTONUP) && active.drawing.busy() && active.drawing.tool.is_path() {
+            let query = MOUSEMOVEPOINT {
+                x: p.x & 65535,
+                y: p.y & 65535,
+                time: if msg == WM_MOUSEMOVE { current.time } else { 0 },
+                dwExtraInfo: 0,
+            };
+            let mut history = [MOUSEMOVEPOINT::default(); 64];
+            let count = unsafe {
+                GetMouseMovePointsEx(
+                    size_of::<MOUSEMOVEPOINT>() as u32,
+                    &query,
+                    &mut history,
+                    GMMP_USE_DISPLAY_POINTS,
+                )
+            };
+            let samples: Vec<_> = history
+                .iter()
+                .take(count.max(0) as usize)
+                .map(|s| Sample {
+                    point: DocPoint::new(s.x as u16 as i16 as i32, s.y as u16 as i16 as i32),
+                    time: s.time,
+                })
+                .collect();
+            for point in self.pointer_history.recover(&samples, current) {
+                active.drawing.motion(point, crop, shift);
+            }
+        }
         let handled = match msg {
             WM_LBUTTONDOWN => {
                 let mut seed = [0; 8];
@@ -39,8 +77,11 @@ impl App {
             _ => false,
         };
         if handled {
-            self.schedule_draft();
-            self.render_all();
+            active.session.observe_cursor(p);
+            if msg != WM_MOUSEMOVE {
+                self.schedule_draft();
+            }
+            self.request_redraw();
         }
         handled
     }
@@ -118,13 +159,13 @@ impl App {
                 let index = Tool::ALL.iter().position(|t| *t == d.tool).unwrap_or(0);
                 d.set_tool(Tool::ALL[(index + if modifiers.shift { 13 } else { 1 }) % 14]);
                 self.schedule_draft();
-                self.render_all();
+                self.request_redraw();
                 return true;
             }
             if (0x31..=0x36).contains(&vk) {
                 d.set_color((vk - 0x31) as usize);
                 self.schedule_draft();
-                self.render_all();
+                self.request_redraw();
                 return true;
             }
             let tool = match vk {
@@ -153,7 +194,7 @@ impl App {
             return false;
         }
         self.schedule_draft();
-        self.render_all();
+        self.request_redraw();
         true
     }
     pub(super) fn on_text(&mut self, unit: u16) {
@@ -183,7 +224,7 @@ impl App {
         if let Some(ch) = ch.filter(|c| *c != '\r' && *c != '\n') {
             active.drawing.text_char(ch);
             self.schedule_draft();
-            self.render_all();
+            self.request_redraw();
         }
     }
     pub(super) fn editor_wheel(&mut self, delta: i32) {
@@ -198,7 +239,7 @@ impl App {
             d.set_width((d.width as i32 + delta.signum()).clamp(1, 12) as u32);
         }
         self.schedule_draft();
-        self.render_all();
+        self.request_redraw();
     }
     pub(super) fn editor_button(&mut self, button: ToolbarButton) {
         let Some(active) = &mut self.active else {
@@ -215,6 +256,6 @@ impl App {
             _ => {}
         }
         self.schedule_draft();
-        self.render_all();
+        self.request_redraw();
     }
 }

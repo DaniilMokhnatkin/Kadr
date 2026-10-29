@@ -50,6 +50,7 @@ use kadr_win::{log, log_info, log_warn, wide};
 
 mod drafts;
 mod editor_input;
+mod pacing;
 mod pins;
 mod settings;
 
@@ -145,6 +146,8 @@ pub struct App {
     pins: Vec<crate::pin_window::Window>,
     paused: Option<Active>,
     icons: crate::icons::Icons,
+    pointer_history: kadr_editor::pointer::History,
+    frames: RefCell<kadr_editor::pacing::Frames>,
 }
 
 /// Итог фонового сохранения: путь или путь с текстом ошибки.
@@ -241,6 +244,8 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
             icons,
             pins: Vec::new(),
             paused: None,
+            pointer_history: Default::default(),
+            frames: Default::default(),
         };
         app.build_outputs();
         app.log_startup();
@@ -264,14 +269,7 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
             let _ = PostMessageW(Some(hwnd), WM_APP_BENCH, WPARAM(count as usize), LPARAM(0));
         }
 
-        let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            if crate::recent_window::dialog_message(&msg) || crate::pin_window::dialog_message(&msg) {
-                continue;
-            }
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
+        pacing::message_loop();
         APP.with(|cell| cell.borrow_mut().take());
     }
     Ok(())
@@ -279,6 +277,7 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
 
 impl App {
     fn build_outputs(&mut self) {
+        self.frames.borrow_mut().clear();
         self.overlays.clear();
         self.outputs.clear();
         self.gpus.clear();
@@ -789,6 +788,8 @@ impl App {
     }
 
     fn close_session(&mut self) {
+        self.frames.borrow_mut().clear();
+        self.shared.clear_annotation_cache();
         self.flush_draft(false);
         let Some(active) = self.active.take() else {
             return;
@@ -842,7 +843,11 @@ impl App {
     }
 
     fn render_all(&self) {
-        let Some(active) = &self.active else { return };
+        self.frames.borrow_mut().clear();
+        self.render_scene(None, false);
+    }
+    fn render_scene(&self, only: Option<usize>, nonblocking: bool) -> bool {
+        let Some(active) = &self.active else { return true };
         let session = &active.session;
         let hud = session.hud_visible().then(|| self.hud());
         let magnifier = (session.show_magnifier()
@@ -859,6 +864,9 @@ impl App {
         });
         let selection = session.highlight().map(win_rect);
         for (i, overlay) in self.overlays.iter().enumerate() {
+            if only.is_some_and(|index| index != i) {
+                continue;
+            }
             let gpu = &self.gpus[self.outputs[overlay.output].gpu];
             let marks = Marks {
                 selection,
@@ -880,10 +888,18 @@ impl App {
                     text_edit: active.drawing.text_selection(),
                 }),
             };
-            if let Err(e) = overlay.present(gpu, &self.shared, &self.theme, marks) {
-                log_warn!("рендер оверлея: {e}");
+            let result = if nonblocking {
+                overlay.try_present(gpu, &self.shared, &self.theme, marks)
+            } else {
+                overlay.present(gpu, &self.shared, &self.theme, marks).map(|_| true)
+            };
+            match result {
+                Ok(false) => return false,
+                Err(e) => log_warn!("рендер оверлея: {e}"),
+                _ => {}
             }
         }
+        true
     }
 
     fn hud(&self) -> Hud {
@@ -928,15 +944,15 @@ impl App {
         }
     }
 
-    fn on_pointer(&mut self, hwnd: HWND, msg: u32) {
-        let hit = self.toolbar_at(cursor_pos());
+    fn on_pointer(&mut self, hwnd: HWND, msg: u32, p: DocPoint) {
+        let hit = self.toolbar_at(POINT { x: p.x, y: p.y });
         let Some(active) = &mut self.active else {
             return;
         };
         // Кнопки панели перехватывают мышь раньше выделения: нажатие сразу выполняет действие.
         if active.hovered != hit {
             active.hovered = hit;
-            self.render_all();
+            self.request_redraw();
         }
         if let Some(button) = hit {
             if msg == WM_LBUTTONDOWN {
@@ -944,7 +960,6 @@ impl App {
             }
             return;
         }
-        let p = doc_point(cursor_pos());
         if self.drawing_pointer(hwnd, msg, p) {
             return;
         }
@@ -994,10 +1009,13 @@ impl App {
     }
 
     fn apply(&mut self, action: Action) {
+        if matches!(action, Action::None) {
+            return;
+        }
         self.schedule_draft();
         match action {
             Action::None => {}
-            Action::Redraw => self.render_all(),
+            Action::Redraw => self.request_redraw(),
             Action::Close => self.close_session(),
             Action::Copy => self.export(Export::Copy),
             Action::Save => self.export(Export::Save),
@@ -1366,7 +1384,14 @@ unsafe extern "system" fn host_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
 
 unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     let handled = match msg {
-        WM_LBUTTONDOWN | WM_LBUTTONUP | WM_MOUSEMOVE => with_app(|app| app.on_pointer(hwnd, msg)),
+        WM_LBUTTONDOWN | WM_LBUTTONUP | WM_MOUSEMOVE => {
+            let mut origin = POINT::default();
+            unsafe {
+                let _ = windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut origin);
+            }
+            let point = kadr_editor::pointer::message_point(lp.0, doc_point(origin));
+            with_app(|app| app.on_pointer(hwnd, msg, point))
+        }
         WM_RBUTTONUP => with_app(|app| app.on_key(VK_ESCAPE.0, true)),
         WM_CHAR => with_app(|app| app.on_text(wp.0 as u16)),
         WM_MOUSEWHEEL => with_app(|app| app.editor_wheel(((wp.0 >> 16) as u16 as i16) as i32)),

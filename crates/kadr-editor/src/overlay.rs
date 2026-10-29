@@ -2,10 +2,10 @@
 //! поэтому показ на горячем пути — это только снятие маскировки с уже отрисованного окна.
 
 use kadr_render::annotations::Cache;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 
-use windows::Win32::Foundation::{HINSTANCE, HWND, POINT, RECT};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HINSTANCE, HWND, POINT, RECT, WAIT_OBJECT_0};
 use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET, ID2D1Bitmap1,
 };
@@ -16,10 +16,12 @@ use windows::Win32::Graphics::Dwm::{
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{
-    DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT_FLIP_DISCARD,
-    DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIOutput, IDXGISurface, IDXGISwapChain1,
+    DXGI_ERROR_WAS_STILL_DRAWING, DXGI_PRESENT, DXGI_PRESENT_DO_NOT_WAIT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
+    DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT, DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
+    IDXGIOutput, IDXGISurface, IDXGISwapChain1, IDXGISwapChain2,
 };
 use windows::Win32::Graphics::Gdi::HMONITOR;
+use windows::Win32::System::Threading::WaitForSingleObject;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos, ShowWindow,
@@ -45,6 +47,8 @@ pub struct Overlay {
     _visual: IDCompositionVisual,
     _composition: IDCompositionTarget,
     annotation_cache: RefCell<Cache>,
+    latency: Option<HANDLE>,
+    retry_present: Cell<bool>,
 }
 
 impl Overlay {
@@ -84,7 +88,7 @@ impl Overlay {
             set_bool_attribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, true);
             let _ = ShowWindow(hwnd, SW_SHOWNA);
 
-            let desc = DXGI_SWAP_CHAIN_DESC1 {
+            let mut desc = DXGI_SWAP_CHAIN_DESC1 {
                 Width: width as u32,
                 Height: height as u32,
                 Format: DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -94,11 +98,25 @@ impl Overlay {
                 Scaling: DXGI_SCALING_STRETCH,
                 SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
                 AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+                Flags: DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0 as u32,
                 ..Default::default()
             };
             let swapchain = gpu
                 .factory
-                .CreateSwapChainForComposition(&gpu.device, &desc, None::<&IDXGIOutput>)?;
+                .CreateSwapChainForComposition(&gpu.device, &desc, None::<&IDXGIOutput>)
+                .or_else(|_| {
+                    desc.Flags = 0;
+                    gpu.factory
+                        .CreateSwapChainForComposition(&gpu.device, &desc, None::<&IDXGIOutput>)
+                })?;
+            let latency = if desc.Flags != 0 {
+                let chain: IDXGISwapChain2 = swapchain.cast()?;
+                chain.SetMaximumFrameLatency(1)?;
+                let handle = chain.GetFrameLatencyWaitableObject();
+                (!handle.is_invalid()).then_some(handle)
+            } else {
+                None
+            };
             let surface: IDXGISurface = swapchain.GetBuffer(0)?;
             let props = bitmap_props(D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW);
             let target = gpu.d2d.CreateBitmapFromDxgiSurface(&surface, Some(&raw const props))?;
@@ -122,6 +140,8 @@ impl Overlay {
                 _visual: visual,
                 _composition: composition,
                 annotation_cache: RefCell::new(Cache::default()),
+                latency,
+                retry_present: Cell::new(false),
             })
         }
     }
@@ -158,6 +178,31 @@ impl Overlay {
     }
 
     pub fn present(&self, gpu: &Gpu, shared: &Shared, theme: &Theme, marks: Marks) -> Result<()> {
+        if !self.retry_present.get()
+            && let Some(handle) = self.latency
+        {
+            unsafe {
+                let _ = WaitForSingleObject(handle, 100);
+            }
+        }
+        self.paint(gpu, shared, theme, marks, false).map(|_| ())
+    }
+    pub fn latency_handle(&self) -> Option<HANDLE> {
+        self.latency
+    }
+    pub fn ready(&self) -> bool {
+        self.retry_present.get()
+            || self
+                .latency
+                .is_none_or(|h| unsafe { WaitForSingleObject(h, 0) == WAIT_OBJECT_0 })
+    }
+    pub fn needs_retry(&self) -> bool {
+        self.retry_present.get()
+    }
+    pub fn try_present(&self, gpu: &Gpu, shared: &Shared, theme: &Theme, marks: Marks) -> Result<bool> {
+        self.paint(gpu, shared, theme, marks, true)
+    }
+    fn paint(&self, gpu: &Gpu, shared: &Shared, theme: &Theme, marks: Marks, nonblocking: bool) -> Result<bool> {
         let scene = Scene {
             frame: self.frame.as_ref(),
             origin: (self.rect.left, self.rect.top),
@@ -181,8 +226,15 @@ impl Overlay {
             );
             gpu.d2d.EndDraw(None, None)?;
             drawn?;
-            // Без ожидания vsync: DWM сам возьмёт самый свежий кадр (flip-discard).
-            self.swapchain.Present(0, DXGI_PRESENT(0)).ok()
+            let result = self.swapchain.Present(
+                if nonblocking { 1 } else { 0 },
+                if nonblocking {
+                    DXGI_PRESENT_DO_NOT_WAIT
+                } else {
+                    DXGI_PRESENT(0)
+                },
+            );
+            present_result(result, nonblocking, &self.retry_present)
         }
     }
 
@@ -220,6 +272,9 @@ impl Drop for Overlay {
     fn drop(&mut self) {
         unsafe {
             let _ = DestroyWindow(self.hwnd);
+            if let Some(handle) = self.latency.take() {
+                let _ = CloseHandle(handle);
+            }
         }
     }
 }
@@ -246,4 +301,25 @@ fn monitor_scale(monitor: HMONITOR) -> f32 {
         let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut x, &mut y);
     }
     x as f32 / 96.0
+}
+fn present_result(result: windows::core::HRESULT, nonblocking: bool, retry: &Cell<bool>) -> Result<bool> {
+    if nonblocking && result == DXGI_ERROR_WAS_STILL_DRAWING {
+        retry.set(true);
+        return Ok(false);
+    }
+    result.ok()?;
+    retry.set(false);
+    Ok(true)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn busy_present_retains_readiness_until_success() {
+        let retry = Cell::new(false);
+        assert!(!present_result(DXGI_ERROR_WAS_STILL_DRAWING, true, &retry).unwrap());
+        assert!(retry.get());
+        assert!(present_result(windows::core::HRESULT(0), true, &retry).unwrap());
+        assert!(!retry.get());
+    }
 }
