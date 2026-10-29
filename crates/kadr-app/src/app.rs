@@ -54,6 +54,7 @@ mod editor_input;
 mod pacing;
 mod pins;
 mod settings;
+mod smart;
 mod text;
 
 const HK_PRTSC: i32 = 1;
@@ -147,6 +148,7 @@ pub struct App {
     thumb_pending: Option<crate::thumbnail::Shot>,
     /// Bubble waiting for the overlay to leave: where to show it and what it says so far.
     bubble_pending: Option<(DocRect, crate::bubble::Content)>,
+    smart: smart::Smart,
     text_tx: Sender<text::TextResult>,
     text_rx: Receiver<text::TextResult>,
     warm_override: Option<bool>,
@@ -253,6 +255,7 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
             pending_config: None,
             thumb_pending: None,
             bubble_pending: None,
+            smart: Default::default(),
             text_tx,
             text_rx,
             warm_override,
@@ -894,6 +897,7 @@ impl App {
             Magnifier { at: (at.x, at.y), rgb }
         });
         let exit_pose = self.exit_pose();
+        let smart_fx = self.smart_fx();
         let (magnifier, hud) = if exit_pose.is_some() { (None, None) } else { (magnifier, hud) };
         let selection = session.highlight().map(win_rect);
         for (i, overlay) in self.overlays.iter().enumerate() {
@@ -908,7 +912,7 @@ impl App {
                     && active.drawing.selected.is_none(),
                 toolbar: session.show_toolbar().then_some(Toolbar {
                     hovered: active.hovered,
-                    editor: Some(editor_bar(&active.drawing)),
+                    editor: Some(editor_bar(&active.drawing, self.smart_ui(&active.drawing))),
                 }),
                 magnifier: magnifier.as_ref(),
                 hud: if i == active.hud_overlay { hud.as_ref() } else { None },
@@ -922,6 +926,7 @@ impl App {
                 }),
                 glide: session.selection().is_none(),
                 hint: session.selection().is_none() && exit_pose.is_none() && overlay.contains(cursor_pos()),
+                smart: Some(kadr_render::scene::SmartFx { scanning: smart_fx.0, areas: &smart_fx.1 }),
                 exit: exit_pose.map_or(0.0, |(e, _)| e),
                 flash: exit_pose.is_some_and(|(_, f)| f),
             };
@@ -1300,7 +1305,7 @@ impl App {
         let selection = win_rect(active.session.selection()?);
         self.overlays
             .iter()
-            .find_map(|o| o.toolbar_hit(&self.shared, selection, p, Some(editor_bar(&active.drawing))))
+            .find_map(|o| o.toolbar_hit(&self.shared, selection, p, Some(editor_bar(&active.drawing, self.smart_ui(&active.drawing)))))
     }
 
     fn press(&mut self, button: ToolbarButton) {
@@ -1314,6 +1319,7 @@ impl App {
             ToolbarButton::Recent => self.show_recent(),
             ToolbarButton::Text => self.copy_text(),
             ToolbarButton::Translate => self.translate_selection(),
+            ToolbarButton::Smart => self.toggle_smart(),
             _ => self.editor_button(button),
         }
     }
@@ -1679,7 +1685,7 @@ fn yes(value: bool) -> &'static str {
     if value { "да" } else { "нет" }
 }
 
-fn editor_bar(d: &Drawing) -> kadr_render::scene::EditorBar {
+fn editor_bar(d: &Drawing, smart: kadr_render::scene::SmartUi) -> kadr_render::scene::EditorBar {
     kadr_render::scene::EditorBar {
         tool: d.tool,
         color: d.color,
@@ -1687,5 +1693,6 @@ fn editor_bar(d: &Drawing) -> kadr_render::scene::EditorBar {
         strength: d.strength,
         undo: d.can_undo(),
         redo: d.can_redo(),
+        smart,
     }
 }

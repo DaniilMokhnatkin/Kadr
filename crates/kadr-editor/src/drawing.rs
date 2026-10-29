@@ -16,6 +16,8 @@ pub struct Drawing {
     pub selected: Option<usize>,
     /// The shape just drawn: changing colour or width right after drawing restyles it, as in Markup.
     last: Option<u64>,
+    /// Blurs added by «Скрыть данные»; the button is «on» while any of them is in the document.
+    smart: Vec<u64>,
     text: Option<usize>,
     text_before: Option<Arc<Vec<Annotation>>>,
     text_input: TextInput,
@@ -42,6 +44,7 @@ impl Default for Drawing {
             edit: None,
             selected: None,
             last: None,
+            smart: Vec::new(),
             text: None,
             text_before: None,
             text_input: TextInput::default(),
@@ -129,6 +132,39 @@ impl Drawing {
         }
         self.redo.clear();
         self.revision += 1;
+    }
+    /// Smart blurs present in the document (undo may have taken them away).
+    pub fn smart_shapes(&self) -> Vec<Rect> {
+        self.shapes.iter().filter(|s| self.smart.contains(&s.id)).map(Annotation::rect).collect()
+    }
+    /// Blurs over found personal data: one history step, at the current strength.
+    pub fn add_smart(&mut self, rects: &[Rect], mut seed: impl FnMut() -> u64) {
+        self.finish_text();
+        self.cancel_drag();
+        let before = self.snapshot();
+        self.smart.clear();
+        for r in rects {
+            if self.shapes.len() >= 256 {
+                break;
+            }
+            let mut shape = Annotation::new(self.next_id, Tool::Blur, Point::new(r.left, r.top));
+            self.next_id += 1;
+            shape.points[1] = [r.right - 1, r.bottom - 1];
+            shape.strength = self.strength;
+            shape.seed = seed();
+            self.smart.push(shape.id);
+            self.shapes.push(shape);
+        }
+        self.record(before);
+    }
+    /// Takes the smart blurs away again, also one step; manual blurs stay.
+    pub fn remove_smart(&mut self) {
+        self.finish_text();
+        self.cancel_drag();
+        let before = self.snapshot();
+        self.shapes.retain(|s| !self.smart.contains(&s.id));
+        self.selected = None;
+        self.record(before);
     }
     pub fn set_tool(&mut self, tool: Tool) {
         self.finish_text();
@@ -497,6 +533,28 @@ mod tests {
         d.up(Point::new(20, 20), C, false);
         assert!(!d.can_redo());
     }
+    #[test]
+    fn smart_blurs_come_and_go_as_one_step_each_and_leave_manual_blurs_alone() {
+        let mut d = Drawing::default();
+        d.set_tool(Tool::Blur);
+        d.down(Point::new(10, 10), C, 1);
+        d.up(Point::new(60, 40), C, false);
+        let mut n = 0;
+        d.add_smart(&[Rect::new(100, 100, 180, 120), Rect::new(100, 200, 260, 220)], || {
+            n += 1;
+            n
+        });
+        assert_eq!(d.shapes().len(), 3);
+        assert_eq!(d.smart_shapes(), [Rect::new(100, 100, 180, 120), Rect::new(100, 200, 260, 220)]);
+        d.remove_smart();
+        assert_eq!(d.shapes().len(), 1);
+        assert!(d.smart_shapes().is_empty());
+        d.undo();
+        assert_eq!(d.smart_shapes().len(), 2, "undo brings them back");
+        d.undo();
+        assert!(d.smart_shapes().is_empty() && d.shapes().len() == 1);
+    }
+
     #[test]
     fn colour_change_restyles_text_being_typed_and_the_shape_just_drawn() {
         let mut d = Drawing::default();

@@ -136,6 +136,7 @@ pub fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
                             strength: 1,
                             undo: true,
                             redo: false,
+                            smart: Default::default(),
                         }),
                     }),
                     ..Default::default()

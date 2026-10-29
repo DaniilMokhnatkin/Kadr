@@ -13,6 +13,8 @@ pub struct Line {
     pub text: String,
     /// In the coordinates of the recognised image's `rect` (desktop pixels).
     pub rect: Rect,
+    /// Each word with its own box, for marking exactly the sensitive part of a line.
+    pub words: Vec<(String, Rect)>,
 }
 
 /// Recognises `image`; lines come back in reading order with desktop coordinates.
@@ -53,8 +55,10 @@ fn readings(image: &Image) -> Result<Vec<(bool, Vec<Line>)>> {
             let line = lines.GetAt(i)?;
             let words = line.Words()?;
             let mut bounds: Option<Rect> = None;
+            let mut boxes = Vec::new();
             for j in 0..words.Size()? {
-                let r = words.GetAt(j)?.BoundingRect()?;
+                let word = words.GetAt(j)?;
+                let r = word.BoundingRect()?;
                 let rect = Rect::new(
                     image.rect.left + (r.X as f64 / k) as i32,
                     image.rect.top + (r.Y as f64 / k) as i32,
@@ -62,9 +66,10 @@ fn readings(image: &Image) -> Result<Vec<(bool, Vec<Line>)>> {
                     image.rect.top + ((r.Y + r.Height) as f64 / k).ceil() as i32,
                 );
                 bounds = Some(bounds.map_or(rect, |b| b.union(&rect)));
+                boxes.push((word.Text()?.to_string(), rect));
             }
             if let Some(rect) = bounds {
-                out.push(Line { text: line.Text()?.to_string(), rect });
+                out.push(Line { text: line.Text()?.to_string(), rect, words: boxes });
             }
         }
         readings.push((cyrillic, out));
@@ -195,7 +200,7 @@ pub fn paragraph_at(lines: &[Line], p: Point) -> Option<(String, Rect)> {
 mod tests {
     use super::*;
     fn line(text: &str, l: i32, t: i32, r: i32, b: i32) -> Line {
-        Line { text: text.into(), rect: Rect::new(l, t, r, b) }
+        Line { text: text.into(), rect: Rect::new(l, t, r, b), words: Vec::new() }
     }
     #[test]
     fn paragraph_under_the_click_joins_its_wrapped_lines_only() {

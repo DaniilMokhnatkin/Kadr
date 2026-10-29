@@ -170,6 +170,8 @@ pub enum ToolbarButton {
     Text,
     /// Recognise and translate into Russian.
     Translate,
+    /// Find and blur personal data in the selection; again to take the blur away.
+    Smart,
     Close,
     Tool(Tool),
     Color(usize),
@@ -201,6 +203,7 @@ impl ToolbarButton {
             Self::Recent => "Недавние",
             Self::Text => "Скопировать текст",
             Self::Translate => "Перевести",
+            Self::Smart => "Скрыть данные",
             Self::Close => "Закрыть",
             Self::Tool(tool) => tool.label(),
             Self::Color(_) => "Цвет",
@@ -226,6 +229,26 @@ pub struct EditorBar {
     pub strength: u8,
     pub undo: bool,
     pub redo: bool,
+    pub smart: SmartUi,
+}
+
+/// Per found area: screen rect, how much of the original still shows over the blur (1 → 0 as it
+/// appears, 0 → 1 as it goes), and the strength of its accent outline.
+#[derive(Clone, Copy)]
+pub struct SmartFx<'a> {
+    pub scanning: bool,
+    pub areas: &'a [(RECT, f32, f32)],
+}
+
+/// «Скрыть данные»: the pill's state, from idle to searching to hidden (with how many).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum SmartUi {
+    #[default]
+    Off,
+    Scanning,
+    On(u16),
+    /// Searched, nothing to hide; shown for a moment.
+    Empty,
 }
 
 /// Что нарисовать поверх кадра. Одинаково для всех мониторов: каждый рисует свою часть.
@@ -243,6 +266,8 @@ pub struct Marks<'a> {
     pub glide: bool,
     /// Show the «Alt + click» hint on this surface (pointer here, nothing selected yet).
     pub hint: bool,
+    /// «Скрыть данные» in motion: the search sweep, and blurs dissolving in or out.
+    pub smart: Option<SmartFx<'a>>,
     /// Closing motion, eased 0 → 1: chrome and dimming fade, the toolbar folds into the selection.
     pub exit: f32,
     /// The capture was exported: the selection flashes once as the overlay leaves.
@@ -334,6 +359,9 @@ pub fn draw(
             }
         }
         drawn?;
+    }
+    if let Some(fx) = scene.marks.smart {
+        draw_smart(gpu, theme, scene, fx, text.animation_time());
     }
 
     let (ox, oy) = (scene.origin.0, scene.origin.1);
@@ -461,7 +489,7 @@ fn build_toolbar_layout(
     let pad = 12.0 * s;
     let gap = 4.0 * s;
     let side = 40.0 * s;
-    let panel_w = (544.0 * s).min((w - 16.0 * s).max(1.0));
+    let panel_w = (if editor.is_some() { 712.0 } else { 544.0 } * s).min((w - 16.0 * s).max(1.0));
     let content_w = (panel_w - 2.0 * pad).max(side);
     let mut buttons = Vec::new();
     let empty = measure(shared, &text.button, "")?;
@@ -544,6 +572,7 @@ fn build_toolbar_layout(
             ToolbarButton::SaveAs,
             ToolbarButton::Save,
             ToolbarButton::Close,
+            ToolbarButton::Smart,
             ToolbarButton::Copy,
         ]
     } else {
@@ -564,15 +593,16 @@ fn build_toolbar_layout(
             .map(|b| {
                 (
                     b,
-                    if b == ToolbarButton::Copy {
-                        "Копировать".into()
-                    } else {
-                        String::new()
+                    match b {
+                        ToolbarButton::Copy => "Копировать".into(),
+                        ToolbarButton::Smart => smart_label(editor.map(|e| e.smart).unwrap_or_default()),
+                        _ => String::new(),
                     },
-                    if b == ToolbarButton::Copy {
-                        (120.0 * s).min(content_w)
-                    } else {
-                        side
+                    match b {
+                        ToolbarButton::Copy => (120.0 * s).min(content_w),
+                        // The one labelled action besides Copy: wide enough to read at a glance.
+                        ToolbarButton::Smart => (164.0 * s).min(content_w),
+                        _ => side,
                     },
                 )
             })
@@ -743,6 +773,20 @@ fn draw_toolbar(
                 gpu.brush.SetColor(&fade(theme.hairline, a));
                 gpu.d2d.DrawEllipse(&e, &gpu.brush, s, None::<&ID2D1StrokeStyle>);
             }
+        } else if *button == ToolbarButton::Smart {
+            // Always filled, so it reads as a feature and not as one more icon. On, it takes the
+            // selection tint; while searching a glint runs through it.
+            let state = toolbar.editor.map(|e| e.smart).unwrap_or_default();
+            let base = mix(theme.control, theme.selected, c.selected);
+            fill_rounded(gpu, fade(mix(base, theme.tint_strong, 0.5 * c.hover * (1.0 - c.selected)), a), *r, 10.0 * s);
+            if state == SmartUi::Scanning {
+                let phase = (text.animation_time() * 0.9).fract() as f32;
+                shimmer(gpu, *r, phase, 70.0 * s, if theme.dark { 0.22 } else { 0.55 } * a, 10.0 * s);
+            }
+            let ink = fade(mix(theme.text, theme.on_selected, c.selected), a);
+            let icon = rect(r.left + 4.0 * s, r.top, r.left + 36.0 * s, r.bottom);
+            glyphs::draw(gpu, *button, icon, ink, s);
+            draw_text(gpu, label, icon.right, r.top + (r.bottom - r.top - label.h) / 2.0, ink);
         } else {
             let ink = if !c.enabled {
                 fade(theme.disabled, a)
@@ -845,6 +889,7 @@ fn draw_toolbar(
             ToolbarButton::Pin => "Закрепить · Ctrl+D".into(),
             ToolbarButton::Text => "Скопировать текст · Ctrl+Shift+C".into(),
             ToolbarButton::Translate => "Перевести на русский · Ctrl+T".into(),
+            ToolbarButton::Smart => "Найти и размыть почту, телефоны, карты, IP и ключи".into(),
             ToolbarButton::Recent => "Недавние · Ctrl+H".into(),
             ToolbarButton::Close => "Закрыть · Esc".into(),
             ToolbarButton::Width => "Толщина · [ / ] · колесо".into(),
@@ -1534,6 +1579,88 @@ fn intersect(a: D2D_RECT_F, b: D2D_RECT_F) -> Option<D2D_RECT_F> {
     );
     (r.right > r.left && r.bottom > r.top).then_some(r)
 }
+/// What the «Скрыть данные» pill says in each state.
+fn smart_label(state: SmartUi) -> String {
+    match state {
+        SmartUi::Off => "Скрыть данные".into(),
+        SmartUi::Scanning => "Ищу данные…".into(),
+        SmartUi::On(n) => format!("Скрыто · {n}"),
+        SmartUi::Empty => "Не найдено".into(),
+    }
+}
+
+/// A soft band of light passing across `r` (phase 0 → 1), as on a loading placeholder.
+fn shimmer(gpu: &Gpu, r: D2D_RECT_F, phase: f32, band: f32, alpha: f32, radius: f32) {
+    use windows::Win32::Graphics::Direct2D::Common::D2D1_GRADIENT_STOP;
+    use windows::Win32::Graphics::Direct2D::{
+        D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, ID2D1RenderTarget,
+    };
+    let cx = r.left - band + (r.right - r.left + 2.0 * band) * phase;
+    let light = |a: f32| D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a };
+    let stops = [
+        D2D1_GRADIENT_STOP { position: 0.0, color: light(0.0) },
+        D2D1_GRADIENT_STOP { position: 0.5, color: light(alpha) },
+        D2D1_GRADIENT_STOP { position: 1.0, color: light(0.0) },
+    ];
+    // The device context overloads these; the render target's simple forms are the ones needed.
+    let target: &ID2D1RenderTarget = &gpu.d2d;
+    unsafe {
+        let Ok(collection) = target.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) else {
+            return;
+        };
+        let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+            startPoint: Vector2::new(cx - band, r.top),
+            endPoint: Vector2::new(cx + band, r.bottom),
+        };
+        let Ok(brush) = target.CreateLinearGradientBrush(&props, None, &collection) else { return };
+        gpu.d2d.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: r, radiusX: radius, radiusY: radius }, &brush);
+    }
+}
+
+/// Found areas reveal their blur through a dissolve of the original pixels, each with a brief
+/// accent outline; while searching, a band of light sweeps the selection.
+fn draw_smart(gpu: &Gpu, theme: &Theme, scene: &Scene, fx: SmartFx, now: f64) {
+    let (ox, oy) = (scene.origin.0 as f32, scene.origin.1 as f32);
+    let s = scene.scale;
+    let local = |r: RECT| rect(r.left as f32 - ox, r.top as f32 - oy, r.right as f32 - ox, r.bottom as f32 - oy);
+    for (area, cover, glow) in fx.areas {
+        let r = local(*area);
+        if *cover > 0.002
+            && let Some(frame) = scene.frame
+        {
+            unsafe {
+                gpu.d2d.DrawBitmap(
+                    frame,
+                    Some(&raw const r),
+                    cover.clamp(0.0, 1.0),
+                    D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+                    Some(&raw const r),
+                    None,
+                );
+            }
+        }
+        if *glow > 0.01 {
+            let ring = inflate(r, 2.0 * s);
+            fill_rounded(gpu, fade(theme.accent, 0.10 * glow), ring, 6.0 * s);
+            unsafe {
+                gpu.brush.SetColor(&fade(theme.accent, 0.85 * glow));
+                gpu.d2d.DrawRoundedRectangle(
+                    &D2D1_ROUNDED_RECT { rect: ring, radiusX: 6.0 * s, radiusY: 6.0 * s },
+                    &gpu.brush,
+                    1.5 * s,
+                    None::<&ID2D1StrokeStyle>,
+                );
+            }
+        }
+    }
+    if fx.scanning
+        && let Some(sel) = scene.marks.selection.map(local)
+    {
+        let phase = (now * 0.9).fract() as f32;
+        shimmer(gpu, sel, phase, 180.0 * s, 0.22, 0.0);
+    }
+}
+
 #[cfg(test)]
 mod toolbar_tests {
     use super::*;
@@ -1549,6 +1676,7 @@ mod toolbar_tests {
             strength: 1,
             undo: true,
             redo: false,
+            smart: Default::default(),
         };
         let sel = rect(100.0, 100.0, 900.0, 500.0);
         let palette = toolbar_layout(&shared, &text, (1280.0, 720.0), 1.0, sel, Some(e))
@@ -1592,6 +1720,7 @@ mod toolbar_tests {
             strength: 1,
             undo: true,
             redo: false,
+            smart: Default::default(),
         };
         let first = toolbar_layout(&shared, &text, (1280.0, 720.0), 1.0, sel, Some(e))
             .unwrap()
@@ -1674,6 +1803,7 @@ mod toolbar_tests {
                 strength: 1,
                 undo: false,
                 redo: false,
+                smart: Default::default(),
             }),
         };
         unsafe {
@@ -1716,6 +1846,7 @@ mod toolbar_tests {
             strength: 1,
             undo: false,
             redo: false,
+            smart: Default::default(),
         });
         let r = RECT {
             left: 0,
@@ -1776,6 +1907,7 @@ mod toolbar_tests {
             strength: 1,
             undo: false,
             redo: false,
+            smart: Default::default(),
         };
         let layout = toolbar_layout(
             &shared,
@@ -1831,6 +1963,7 @@ mod toolbar_tests {
                         strength: 1,
                         undo: true,
                         redo: false,
+                        smart: Default::default(),
                     };
                     let layout = toolbar_layout(
                         &shared,
@@ -1870,6 +2003,7 @@ mod toolbar_tests {
                 strength: 1,
                 undo: false,
                 redo: false,
+                smart: Default::default(),
             });
             let layout = toolbar_layout(&shared, &text, size, s, selection, editor)
                 .unwrap()
@@ -1912,3 +2046,4 @@ mod toolbar_tests {
         }
     }
 }
+

@@ -96,6 +96,7 @@ pub(super) unsafe fn message_loop() {
             let mut waits = (Vec::new(), false);
             with_app(|a| {
                 a.tick_exit();
+                a.tick_smart();
                 a.draw_ready(woken.take());
                 waits = a.frame_waits();
             });

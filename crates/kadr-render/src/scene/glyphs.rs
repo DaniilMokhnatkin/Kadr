@@ -166,6 +166,12 @@ pub(super) fn draw(gpu: &Gpu, button: ToolbarButton, r: D2D_RECT_F, ink: D2D1_CO
             ellipse(13.0, 13.0, 8.0, 8.0);
             path(&[(13.0, 8.0), (13.0, 13.0), (17.0, 15.0)]);
         }
+        // An eye under a stroke: «hide what should not be seen».
+        ToolbarButton::Smart => {
+            path(&[(3.0, 12.0), (7.0, 7.5), (12.0, 6.0), (17.0, 7.5), (21.0, 12.0), (17.0, 16.5), (12.0, 18.0), (7.0, 16.5), (3.0, 12.0)]);
+            ellipse(12.0, 12.0, 2.6, 2.6);
+            line(4.5, 19.5, 19.5, 4.5);
+        }
         // Scan corners around a T: «text from the picture».
         ToolbarButton::Text => {
             path(&[(3.0, 8.0), (3.0, 3.0), (8.0, 3.0)]);

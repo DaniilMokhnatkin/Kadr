@@ -7,6 +7,8 @@ use crate::bubble::{self, Content};
 pub(super) enum TextResult {
     Copied(String),
     Translated { text: String, from: String, to: String, anchor: Option<DocRect> },
+    /// «Скрыть данные»: the search generation and the areas found.
+    Smart(u64, std::result::Result<Vec<DocRect>, String>),
     Failed(String),
 }
 
@@ -91,6 +93,13 @@ impl App {
 
     pub(super) fn on_text_result(&mut self) {
         while let Ok(result) = self.text_rx.try_recv() {
+            let result = match result {
+                TextResult::Smart(job, found) => {
+                    self.on_smart_found(job, found);
+                    continue;
+                }
+                other => other,
+            };
             let (content, anchor) = match result {
                 TextResult::Copied(text) => {
                     match clipboard::put_text(self.hwnd, &text) {
@@ -104,6 +113,7 @@ impl App {
                     log_info!("перевод с «{from}»: {} символов", text.chars().count());
                     (Content::Translated { text, from, to }, anchor)
                 }
+                TextResult::Smart(..) => continue,
                 TextResult::Failed(e) => {
                     log_warn!("текст с экрана: {e}");
                     (Content::Failed(e), None)

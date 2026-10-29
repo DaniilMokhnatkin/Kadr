@@ -57,6 +57,12 @@ fn run_tool(
         pixels.clone(),
     ))];
     let shapes = if editor { sample_shapes(scale) } else { Vec::new() };
+    // Smart blur mid-way: the blurred sample area is still dissolving in, with its outline.
+    let smart_areas = [(
+        RECT { left: at(840.0), top: at(550.0), right: at(1161.0), bottom: at(651.0) },
+        0.35f32,
+        0.7f32,
+    )];
     let hud = sample_hud();
     // Курсор у правого нижнего угла, как при растягивании: видны и маркеры, и лупа.
     let cursor = (at(1268.0), at(698.0));
@@ -93,6 +99,7 @@ fn run_tool(
                         strength: 1,
                         undo: true,
                         redo: false,
+                        smart: scene::SmartUi::On(2),
                     }),
                 }),
                 hud: if editor { None } else { Some(&hud) },
@@ -108,6 +115,7 @@ fn run_tool(
                 exit: exit.unwrap_or(0.0),
                 flash: exit.is_some(),
                 hint: !editor,
+                smart: editor.then_some(scene::SmartFx { scanning: false, areas: &smart_areas }),
             },
         };
         ctx.SetTarget(&target);

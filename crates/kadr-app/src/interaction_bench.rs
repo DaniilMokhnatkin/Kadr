@@ -111,6 +111,7 @@ pub fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
         strength: 1,
         undo: false,
         redo: false,
+        smart: Default::default(),
     });
     let start = Instant::now();
     for _ in 0..400 {
