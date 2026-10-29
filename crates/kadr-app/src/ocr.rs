@@ -97,9 +97,35 @@ fn overlap(a: Rect, b: Rect) -> f32 {
     area(i) / (area(a) + area(b) - area(i)).max(1.0)
 }
 
-/// One reading from two recognizers, line by line. The Latin-only recognizer turns Cyrillic into
-/// look-alike letters and digits («CKonhp0BaTb»), so it may never win on a Cyrillic line; the
-/// Cyrillic recognizer is weaker on English, so a Latin line takes the Latin reading.
+/// A word the Latin recognizer read as a believable Latin word: letters with normal casing
+/// («raptor», «Raptor», «KADR»), digits only around them («Win11»). Its readings of Cyrillic
+/// break these rules («norv1H», «napoJlb», «TeKCT»).
+fn plausible_latin(w: &str) -> bool {
+    let w = w.trim_matches(|c: char| !c.is_alphanumeric());
+    let letters: String = w.chars().filter(char::is_ascii_alphabetic).collect();
+    if letters.is_empty() || !w.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+    let core = w.trim_matches(|c: char| c.is_ascii_digit());
+    let digits_inside = core.chars().any(|c| c.is_ascii_digit());
+    let rest = &letters[1..];
+    let casing = rest.chars().all(|c| c.is_ascii_lowercase()) || letters.chars().all(|c| c.is_ascii_uppercase());
+    !digits_inside && casing
+}
+
+fn whole_cyrillic(w: &str) -> bool {
+    let w = w.trim_matches(|c: char| !c.is_alphanumeric());
+    !w.is_empty()
+        && w.chars().all(|c| {
+            let l = c.to_lowercase().next().unwrap_or(c);
+            ('а'..='я').contains(&l) || "ёєіїўђћјљњџ".contains(l)
+        })
+}
+
+/// One reading from two recognizers, word by word. The Latin-only recognizer turns Cyrillic into
+/// look-alikes («CKonhp0BaTb», «norv1H»); the Cyrillic one turns English into Cyrillic
+/// look-alikes («Немо» for «Hello»). Each word takes the reading that is a real word in its
+/// script; when both are, the line's clear words decide. So «Логин Raptor» stays as written.
 fn merge(readings: Vec<(bool, Vec<Line>)>) -> Vec<Line> {
     let latin = readings.iter().find(|(c, _)| !c).map(|(_, l)| l.clone());
     let Some(mut base) = readings.into_iter().find(|(c, _)| *c).map(|(_, l)| l) else {
@@ -114,16 +140,56 @@ fn merge(readings: Vec<(bool, Vec<Line>)>) -> Vec<Line> {
             .map(|(i, l)| (i, overlap(line.rect, l.rect)))
             .filter(|(_, o)| *o > 0.3)
             .max_by(|a, b| a.1.total_cmp(&b.1));
-        if let Some((i, _)) = best {
-            used[i] = true;
-            let words = line.text.split(|c: char| !c.is_alphanumeric()).filter(|w| w.chars().any(char::is_alphabetic)).count();
-            // Mostly whole Cyrillic words: a Russian line. Otherwise the Latin reader knows better.
-            if clean_words(&line.text, true) * 2 <= words {
-                *line = latin[i].clone();
-            }
+        let Some((i, _)) = best else { continue };
+        used[i] = true;
+        let other = &latin[i];
+        // Pair every word with the Latin reading of the same spot.
+        let pairs: Vec<(usize, Option<usize>)> = line
+            .words
+            .iter()
+            .enumerate()
+            .map(|(k, (_, r))| {
+                let m = other
+                    .words
+                    .iter()
+                    .enumerate()
+                    .map(|(j, (_, b))| (j, overlap(*r, *b)))
+                    .filter(|(_, o)| *o > 0.3)
+                    .max_by(|a, b| a.1.total_cmp(&b.1))
+                    .map(|(j, _)| j);
+                (k, m)
+            })
+            .collect();
+        let verdict = |k: usize, m: Option<usize>| -> (bool, bool) {
+            let cyr = whole_cyrillic(&line.words[k].0);
+            let lat = m.is_some_and(|j| plausible_latin(&other.words[j].0));
+            (cyr, lat)
+        };
+        let cyr_clear = pairs.iter().filter(|(k, m)| matches!(verdict(*k, *m), (true, false))).count();
+        let lat_clear = pairs.iter().filter(|(k, m)| matches!(verdict(*k, *m), (false, true))).count();
+        let mut words = Vec::with_capacity(pairs.len());
+        for (k, m) in pairs {
+            let take_latin = match verdict(k, m) {
+                (false, true) => true,
+                (true, true) => lat_clear > cyr_clear,
+                _ => false,
+            };
+            words.push(match (take_latin, m) {
+                (true, Some(j)) => other.words[j].clone(),
+                _ => line.words[k].clone(),
+            });
         }
+        if line.words.is_empty() {
+            // No word boxes (tests, odd engines): fall back to the whole line.
+            if clean_words(&line.text, true) * 2 <= line.text.split_whitespace().count() {
+                *line = other.clone();
+            }
+            continue;
+        }
+        line.text = words.iter().map(|(w, _)| w.as_str()).collect::<Vec<_>>().join(" ");
+        line.words = words;
     }
-    // Lines only the Latin recognizer saw, as long as they are not Cyrillic in disguise.
+    // Lines only the Latin recognizer saw.
     base.extend(latin.into_iter().zip(used).filter(|(_, u)| !u).map(|(l, _)| l));
     base.sort_by_key(|l| (l.rect.top / 4, l.rect.left));
     base
@@ -257,6 +323,24 @@ mod tests {
 Hello Kadr 2026")).unwrap());
         assert!(all.contains("Скопировать") && all.contains("текст"), "{all:?}");
         assert!(all.contains("Hello") && all.contains("2026"), "{all:?}");
+    }
+    #[test]
+    fn login_and_password_without_colons_are_found_after_real_recognition() {
+        let Ok(engines) = engines() else { return };
+        if !engines.iter().any(|(c, _)| *c) {
+            return;
+        }
+        for dark in [false, true] {
+            let lines = recognize(&render_with("Логин Raptor
+Пароль FSDfSSR*EUITS4", 20, dark)).unwrap();
+            let kinds: Vec<_> = crate::sensitive::find(&lines).into_iter().map(|(k, _)| k).collect();
+            assert_eq!(
+                kinds,
+                [crate::sensitive::Kind::Login, crate::sensitive::Kind::Password],
+                "dark {dark}: {:?}",
+                lines.iter().map(|l| &l.text).collect::<Vec<_>>()
+            );
+        }
     }
     /// White text image via GDI, offset on the desktop to check coordinate mapping.
     #[test]

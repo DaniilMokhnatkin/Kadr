@@ -19,6 +19,8 @@ pub enum Kind {
     Inn,
     /// The value written after a label such as «Пароль:».
     Password,
+    /// The value after «Логин», «Login:», «Username:».
+    Login,
 }
 
 /// Boxes to blur, one per finding, slightly padded so glyph edges are covered too.
@@ -84,18 +86,25 @@ pub fn find(lines: &[Line]) -> Vec<(Kind, Rect)> {
             if taken[i] {
                 continue;
             }
-            match label(raw[i], raw.get(i + 1).copied()) {
-                Some(Label::Inline) => mark(i, i + 1, Kind::Password, &mut taken, &mut out),
-                Some(Label::Next) => {
+            let Some((how, field)) = label(raw[i], raw.get(i + 1).copied()) else { continue };
+            let kind = if field == Field::Login { Kind::Login } else { Kind::Password };
+            match how {
+                Label::Inline => mark(i, i + 1, kind, &mut taken, &mut out),
+                Label::Next => {
                     let mut j = i + 1;
                     if raw.get(j).is_some_and(|w| matches!(*w, ":" | "=")) {
                         j += 1;
                     }
                     if j < raw.len() && !taken[j] {
-                        mark(j, j + 1, Kind::Password, &mut taken, &mut out);
+                        mark(j, j + 1, kind, &mut taken, &mut out);
                     }
                 }
-                None => {}
+                Label::Bare => {
+                    let j = i + 1;
+                    if j < raw.len() && !taken[j] && looks_like_value(raw[i], raw[j]) {
+                        mark(j, j + 1, kind, &mut taken, &mut out);
+                    }
+                }
             }
         }
         for (i, (w, _)) in words.iter().enumerate() {
@@ -177,29 +186,66 @@ fn ipv6(w: &str) -> bool {
     valid && groups.len() <= 9 && (compressed && groups.len() >= 3 || groups.len() >= 6)
 }
 
-/// Labels whose value is a secret; the value is the next word, or the rest of «pin=1234».
-const LABELS: [&str; 20] = [
+/// Labels whose value is a secret, and labels whose value is a login.
+const SECRET_LABELS: [&str; 20] = [
     "пароль", "password", "passwd", "pass", "pwd", "пин", "pin", "пин-код", "pin-код", "код", "otp", "token", "токен",
     "secret", "секрет", "ключ", "key", "apikey", "api_key", "api-key",
 ];
+const LOGIN_LABELS: [&str; 7] = ["логин", "login", "username", "user", "пользователь", "учётка", "аккаунт"];
+
+#[derive(Clone, Copy, PartialEq)]
+enum Field {
+    Secret,
+    Login,
+}
 
 enum Label {
     /// «password=hunter2»: the word itself holds the value.
     Inline,
     /// «Пароль:» or «Пароль :»: the value is the next word.
     Next,
+    /// «Пароль FSDf*4»: no separator, so the next word counts only if it looks like a value.
+    Bare,
 }
 
-fn label(word: &str, next: Option<&str>) -> Option<Label> {
+fn field(head: &str) -> Option<Field> {
+    if SECRET_LABELS.contains(&head) {
+        Some(Field::Secret)
+    } else if LOGIN_LABELS.contains(&head) {
+        Some(Field::Login)
+    } else {
+        None
+    }
+}
+
+fn label(word: &str, next: Option<&str>) -> Option<(Label, Field)> {
     let lower = word.to_lowercase();
     if let Some(k) = lower.find([':', '=']) {
         let head = lower[..k].trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '_');
-        if !LABELS.contains(&head) {
-            return None;
-        }
-        return Some(if lower[k + 1..].trim().is_empty() { Label::Next } else { Label::Inline });
+        let f = field(head)?;
+        return Some((if lower[k + 1..].trim().is_empty() { Label::Next } else { Label::Inline }, f));
     }
-    (LABELS.contains(&lower.as_str()) && matches!(next, Some(":" | "="))).then_some(Label::Next)
+    let f = field(lower.trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '_'))?;
+    Some((if matches!(next, Some(":" | "=")) { Label::Next } else { Label::Bare }, f))
+}
+
+fn cyrillic(c: char) -> bool {
+    ('\u{0400}'..='\u{04FF}').contains(&c)
+}
+
+/// After a label without a colon: a value looks generated or foreign to the sentence around it.
+/// «Пароль изменён», «Логин или пароль неверны», «Password must be…» stay sharp.
+fn looks_like_value(label: &str, value: &str) -> bool {
+    let v = value.trim_matches(|c: char| ",;!?()[]{}«»\"'".contains(c));
+    if v.chars().count() < 3 {
+        return false;
+    }
+    let digits = v.chars().any(|c| c.is_ascii_digit());
+    let symbols = v.chars().any(|c| !c.is_alphanumeric());
+    let inner_upper = v.chars().skip(1).any(char::is_uppercase) && v.chars().any(char::is_lowercase);
+    // A Latin word right after a Russian label is a value, not the rest of a Russian sentence.
+    let foreign = label.chars().any(cyrillic) && !v.chars().any(cyrillic);
+    digits || symbols || inner_upper || foreign
 }
 
 fn luhn(digits: &str) -> bool {
@@ -302,7 +348,9 @@ mod tests {
         assert_eq!(kinds("Card 4111 1111 1111 1111 exp 12/27"), [Kind::Card]);
         assert_eq!(kinds("server 192.168.1.20:8080 is up"), [Kind::Ip]);
         assert_eq!(kinds("IBAN DE89 3704 0044 0532 0130 00"), [Kind::Iban]);
-        assert_eq!(kinds("key sk-proj-4f9aZ81kLq0x77Y2bN token"), [Kind::Secret]);
+        // After the label «key» it is the labelled value; alone it is still a secret.
+        assert_eq!(kinds("key sk-proj-4f9aZ81kLq0x77Y2bN token"), [Kind::Password]);
+        assert_eq!(kinds("use sk-proj-4f9aZ81kLq0x77Y2bN here"), [Kind::Secret]);
         assert_eq!(kinds("ghp_16C7e42F292c6912E7710c838347Ae178B4a"), [Kind::Secret]);
         assert_eq!(kinds("Звоните 89123456789 вечером"), [Kind::Phone]);
         assert_eq!(kinds("Паспорт 4510 123456 выдан"), [Kind::Passport]);
@@ -316,6 +364,12 @@ mod tests {
         assert_eq!(kinds("Password : hunter2"), [Kind::Password]);
         assert_eq!(kinds("pin=4815 ok"), [Kind::Password]);
         assert_eq!(kinds("Код: 573 920"), [Kind::Password]);
+        // Without a colon, as people actually write it.
+        assert_eq!(kinds("Логин Raptor"), [Kind::Login]);
+        assert_eq!(kinds("Пароль FSDfSSR*EUITS4"), [Kind::Password]);
+        assert_eq!(kinds("Login: raptor"), [Kind::Login]);
+        assert_eq!(kinds("username raptor_92"), [Kind::Login]);
+        assert_eq!(kinds("Пароль qwerty"), [Kind::Password]);
         // The value is blurred, not the label.
         let (_, r) = find(&[line("Пароль: секрет")])[0];
         assert!(r.left >= 70, "{r:?}");
@@ -335,6 +389,10 @@ mod tests {
             "Card 4111 1111 1111 1112 is not Luhn-valid",
             "Заказ №12345 на 3 400 ₽",
             "Пароль изменён вчера",
+            "Логин или пароль неверны",
+            "Password must be 8 characters",
+            "User guide and login help",
+            "Пароль должен быть длиннее",
             "Ключевые слова: скриншот",
             "Время 12:30:45 и 09:15",
             "Номер 1234567890 не ИНН",
