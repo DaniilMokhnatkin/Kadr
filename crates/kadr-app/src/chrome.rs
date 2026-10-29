@@ -104,54 +104,6 @@ pub fn track(hwnd: HWND) {
     }
 }
 
-/// Render the actual GDI painters offscreen; never creates or activates a window.
-pub fn snapshot(width: i32, height: i32, paint: impl FnOnce(HDC, RECT)) -> windows::core::Result<kadr_doc::Image> {
-    unsafe {
-        let dc = CreateCompatibleDC(None);
-        if dc.is_invalid() {
-            return Err(windows::core::Error::from_thread());
-        }
-        let info = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: width,
-                biHeight: -height,
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let mut bits = std::ptr::null_mut();
-        let bitmap = match CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0) {
-            Ok(b) => b,
-            Err(e) => {
-                let _ = DeleteDC(dc);
-                return Err(e);
-            }
-        };
-        let old = SelectObject(dc, bitmap.into());
-        paint(
-            dc,
-            RECT {
-                left: 0,
-                top: 0,
-                right: width,
-                bottom: height,
-            },
-        );
-        let _ = GdiFlush();
-        let mut pixels = std::slice::from_raw_parts(bits as *const u8, (width * height * 4) as usize).to_vec();
-        for p in pixels.as_chunks_mut::<4>().0 {
-            p[3] = 255;
-        }
-        SelectObject(dc, old);
-        let _ = DeleteObject(bitmap.into());
-        let _ = DeleteDC(dc);
-        Ok(kadr_doc::Image::new(kadr_doc::Rect::new(0, 0, width, height), pixels))
-    }
-}
 unsafe extern "system" fn hover_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM, id: usize, _data: usize) -> LRESULT {
     if msg == WM_MOUSEMOVE {
         let mut track = TRACKMOUSEEVENT {

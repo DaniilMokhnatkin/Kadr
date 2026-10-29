@@ -15,6 +15,7 @@ path = "src/main.rs"
 uiaccess = []
 
 [dependencies]
+windows-numerics.workspace = true
 kadr-win.workspace = true
 kadr-doc.workspace = true
 kadr-capture.workspace = true

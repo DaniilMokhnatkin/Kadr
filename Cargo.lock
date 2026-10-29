@@ -84,6 +84,7 @@ dependencies = [
  "kadr-win",
  "png",
  "windows",
+ "windows-numerics",
 ]
 
 [[package]]
