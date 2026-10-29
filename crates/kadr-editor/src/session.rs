@@ -62,6 +62,8 @@ pub struct Session {
     /// Радиус захвата маркеров в физических пикселях.
     grab: i32,
     selection: Option<Rect>,
+    /// После выбора окна/монитора можно сразу нарисовать область внутри него.
+    auto_selected: bool,
     hover: Option<Rect>,
     cursor: Point,
     drag: Option<Drag>,
@@ -78,6 +80,7 @@ impl Session {
             windows: Vec::new(),
             grab,
             selection: None,
+            auto_selected: false,
             hover: None,
             cursor,
             drag: None,
@@ -129,7 +132,7 @@ impl Session {
 
     pub fn pointer_down(&mut self, p: Point) -> Action {
         self.cursor = p;
-        self.drag = Some(match self.selection.and_then(|s| hit_handle(&s, p, self.grab).map(|h| (s, h))) {
+        self.drag = Some(match self.selection.and_then(|s| self.handle_at(p).map(|h| (s, h))) {
             Some((start, handle)) => Drag::Handle { handle, from: p, start },
             None => Drag::Create { anchor: p, moved: false, space: None },
         });
@@ -150,10 +153,12 @@ impl Session {
                 }
                 if *moved {
                     self.selection = Rect::spanning(*anchor, p).intersect(&self.bounds);
+                    self.auto_selected = false;
                 }
             }
             Some(Drag::Handle { handle, from, start }) => {
                 self.selection = Some(drag_handle(start, *handle, *from, p, &self.bounds));
+                self.auto_selected = false;
             }
             None if self.selection.is_none() => self.hover = self.pick(p),
             None => {}
@@ -166,6 +171,7 @@ impl Session {
         if let Some(Drag::Create { moved: false, .. }) = self.drag {
             // Клик без движения выбирает окно под курсором, а на рабочем столе — весь монитор.
             self.selection = self.pick(p);
+            self.auto_selected = true;
         }
         self.drag = None;
         Action::Redraw
@@ -180,6 +186,7 @@ impl Session {
             Key::Char('s') if mods.ctrl => self.commit(if mods.shift { Action::SaveAs } else { Action::Save }),
             Key::Char('a') if mods.ctrl => {
                 self.selection = self.monitor_at(self.cursor).or(Some(self.bounds));
+                self.auto_selected = true;
                 Action::Redraw
             }
             Key::Char('h') => {
@@ -210,7 +217,7 @@ impl Session {
         let handle = match &self.drag {
             Some(Drag::Handle { handle, .. }) => Some(*handle),
             Some(Drag::Create { .. }) => None,
-            None => self.selection.and_then(|s| hit_handle(&s, p, self.grab)),
+            None => self.handle_at(p),
         };
         match handle {
             None => CursorKind::Cross,
@@ -222,6 +229,11 @@ impl Session {
         }
     }
 
+    fn handle_at(&self, p: Point) -> Option<Handle> {
+        self.selection.and_then(|s| hit_handle(&s, p, self.grab))
+            .filter(|handle| !self.auto_selected || *handle != Handle::Move)
+    }
+
     /// Экспорт без выделения берёт подсвеченное окно — Enter на окне сразу копирует его.
     fn commit(&mut self, action: Action) -> Action {
         self.selection = self.selection.or(self.hover);
@@ -231,6 +243,7 @@ impl Session {
     /// Стрелки двигают выделение, с Ctrl — меняют его размер; с Shift шаг 10 px.
     fn nudge(&mut self, key: Key, mods: Mods) -> Action {
         let Some(sel) = self.selection else { return Action::None };
+        self.auto_selected = false;
         let step = if mods.shift { 10 } else { 1 };
         let (dx, dy) = match key {
             Key::Left => (-step, 0),
@@ -291,6 +304,46 @@ mod tests {
         let mut s = session();
         drag(&mut s, (500, 500), (501, 501));
         assert_eq!(s.selection(), Some(WINDOW), "сдвиг меньше порога — это клик");
+    }
+
+    #[test]
+    fn dragging_inside_clicked_window_starts_a_smaller_selection() {
+        let mut s = session();
+        drag(&mut s, (500, 500), (500, 500));
+        assert_eq!(s.selection(), Some(WINDOW));
+        assert_eq!(s.cursor_kind(Point::new(300, 300)), CursorKind::Cross);
+        drag(&mut s, (300, 300), (420, 360));
+        assert_eq!(s.selection(), Some(Rect::new(300, 300, 421, 361)));
+    }
+
+    #[test]
+    fn dragging_inside_clicked_monitor_or_select_all_can_draw_again() {
+        let mut s = session();
+        drag(&mut s, (2000, 1000), (2000, 1000));
+        assert_eq!(s.selection(), Some(MAIN));
+        drag(&mut s, (300, 300), (420, 360));
+        assert_eq!(s.selection(), Some(Rect::new(300, 300, 421, 361)));
+        s.key_down(Key::Char('a'), Mods { ctrl: true, shift: false });
+        drag(&mut s, (300, 300), (400, 400));
+        assert_eq!(s.selection(), Some(Rect::new(300, 300, 401, 401)));
+    }
+
+    #[test]
+    fn manually_drawn_selection_still_moves_from_inside() {
+        let mut s = session();
+        drag(&mut s, (300, 300), (420, 360));
+        assert_eq!(s.cursor_kind(Point::new(350, 330)), CursorKind::Move);
+        drag(&mut s, (350, 330), (370, 350));
+        assert_eq!(s.selection(), Some(Rect::new(320, 320, 441, 381)));
+    }
+
+    #[test]
+    fn clicked_window_can_still_be_resized_by_its_handles() {
+        let mut s = session();
+        drag(&mut s, (500, 500), (500, 500));
+        assert_eq!(s.cursor_kind(Point::new(900, 700)), CursorKind::SizeNWSE);
+        drag(&mut s, (900, 700), (850, 650));
+        assert_eq!(s.selection(), Some(Rect::new(100, 100, 850, 650)));
     }
 
     #[test]
