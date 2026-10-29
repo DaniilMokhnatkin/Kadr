@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering::Relaxed};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::Arc;
 
 use windows::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
@@ -44,6 +45,7 @@ use kadr_win::{log, log_info, log_warn, wide};
 use crate::{capture_mode::Mode, config_watch::Watcher};
 
 mod settings;
+mod drafts;
 
 const HK_PRTSC: i32 = 1;
 const HK_BACKUP: i32 = 2;
@@ -51,6 +53,7 @@ const HK_ESC: i32 = 3;
 const HK_FULLSCREEN: i32 = 4;
 const HK_WINDOW: i32 = 5;
 const HK_LAST_REGION: i32 = 6;
+const HK_RECENT: i32 = 7;
 
 const WM_APP_TRAY: u32 = WM_APP + 1;
 const WM_APP_HOOK: u32 = WM_APP + 2;
@@ -58,7 +61,10 @@ const WM_APP_BENCH: u32 = WM_APP + 3;
 /// Фоновое сохранение закончилось — результат ждёт в канале.
 const WM_APP_SAVED: u32 = WM_APP + 4;
 const WM_APP_CONFIG: u32 = WM_APP + 5;
+const WM_APP_RECENT: u32 = WM_APP + 6;
+const WM_APP_RECENT_UI: u32 = WM_APP + 7;
 const TIMER_HOOK_CHECK: usize = 1;
+const TIMER_DRAFT: usize = 2;
 
 const CMD_CAPTURE: usize = 10;
 const CMD_WARM: usize = 11;
@@ -68,6 +74,7 @@ const CMD_EXIT: usize = 14;
 const CMD_FULLSCREEN: usize = 15;
 const CMD_LAST_REGION: usize = 16;
 const CMD_CONFIG: usize = 17;
+const CMD_RECENT: usize = 18;
 
 const HOST_CLASS: PCWSTR = w!("KadrHost");
 
@@ -83,10 +90,11 @@ thread_local! {
 struct Active {
     session: Session,
     /// Копии кадров мониторов в памяти — для лупы и экспорта. Появляются сразу после показа.
-    frames: Vec<Image>,
+    frames: Vec<Arc<Image>>,
     hud_overlay: usize,
     /// Кнопка панели под курсором — для подсветки.
     hovered: Option<ToolbarButton>,
+    draft: Option<drafts::DraftState>,
 }
 
 pub struct App {
@@ -109,7 +117,7 @@ pub struct App {
     last: Option<Timing>,
     stats: Stats,
     /// Картинка в буфере обмена: из неё по запросу кодируется PNG (отложенный рендеринг).
-    clipboard: Option<Image>,
+    clipboard: Option<Arc<Image>>,
     saved_tx: Sender<Saved>,
     saved_rx: Receiver<Saved>,
     last_saved: Option<PathBuf>,
@@ -120,10 +128,18 @@ pub struct App {
     warm_override: Option<bool>,
     /// Последняя вручную выделенная область; быстрый снимок монитора её не заменяет.
     last_region: Option<DocRect>,
+    recent: crate::recent_worker::Worker,
+    recent_window: Option<crate::recent_window::Window>,
+    loading_recent: bool,
+    recovery_notice: bool,
+    bench_mode: bool,
 }
 
 /// Итог фонового сохранения: путь или путь с текстом ошибки.
-type Saved = std::result::Result<PathBuf, (PathBuf, String)>;
+struct Saved {
+    result: std::result::Result<PathBuf, (PathBuf, String)>,
+    draft: Option<crate::recent_worker::Token>,
+}
 
 enum Export {
     Copy,
@@ -170,6 +186,7 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
         let (config, config_error) = config::load(&config_path);
         let warm = warm_override.unwrap_or(config.capture.warm);
         let watcher = Watcher::start(config_path.clone(), hwnd, WM_APP_CONFIG);
+        let recent = crate::recent_worker::Worker::start(hwnd, WM_APP_RECENT, config.recent.max, bench.is_some());
         let mut app = App {
             hwnd,
             instance,
@@ -197,6 +214,11 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
             pending_config: None,
             warm_override,
             last_region: None,
+            recent,
+            recent_window: None,
+            loading_recent: false,
+            recovery_notice: false,
+            bench_mode: bench.is_some(),
         };
         app.build_outputs();
         app.log_startup();
@@ -216,6 +238,7 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            if crate::recent_window::dialog_message(&msg) { continue; }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
@@ -349,6 +372,7 @@ impl App {
 
     fn on_hotkey(&mut self, id: i32, queue_ms: u32) {
         match id {
+            HK_RECENT => self.show_recent(),
             HK_ESC => self.close_session(),
             HK_PRTSC | HK_BACKUP | HK_FULLSCREEN | HK_WINDOW | HK_LAST_REGION => {
                 let foreground = privileges::foreground_exe();
@@ -391,6 +415,11 @@ impl App {
     }
 
     fn on_timer(&mut self, id: usize) {
+        if id == TIMER_DRAFT {
+            unsafe { let _ = KillTimer(Some(self.hwnd), TIMER_DRAFT); }
+            self.flush_draft(true);
+            return;
+        }
         if id != TIMER_HOOK_CHECK {
             return;
         }
@@ -404,9 +433,12 @@ impl App {
 
     fn on_tray(&mut self, event: u32) {
         match event {
-            WM_LBUTTONUP => self.open_session("трей", 0, "—"),
+            WM_LBUTTONUP => self.show_recent(),
             WM_RBUTTONUP | WM_CONTEXTMENU => self.show_menu(),
-            NIN_BALLOONUSERCLICK => self.open_last_saved(),
+            NIN_BALLOONUSERCLICK => {
+                if self.recovery_notice { self.recovery_notice = false; self.show_recent(); }
+                else { self.open_last_saved(); }
+            }
             _ => {}
         }
     }
@@ -423,6 +455,8 @@ impl App {
             let enabled = if self.last_region.is_some() { MF_ENABLED } else { MF_GRAYED };
             let _ = AppendMenuW(menu, MF_STRING | enabled, CMD_LAST_REGION, PCWSTR(label.as_ptr()));
             let _ = AppendMenuW(menu, MF_STRING, CMD_CONFIG, w!("Настройки…"));
+            let label = wide(&format!("Недавние…\t{}", self.config.hotkeys.recent));
+            let _ = AppendMenuW(menu, MF_STRING, CMD_RECENT, PCWSTR(label.as_ptr()));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(menu, MF_STRING | check(self.warm), CMD_WARM, w!("Прогретый дубликатор"));
             let _ = AppendMenuW(menu, MF_STRING | check(self.hook.is_some()), CMD_HOOK, w!("Наблюдатель LL-хука"));
@@ -438,6 +472,7 @@ impl App {
             command.0 as usize
         };
         match command {
+            CMD_RECENT => self.show_recent(),
             CMD_CAPTURE => self.open_session("трей", 0, "—"),
             CMD_FULLSCREEN => self.capture_mode(Mode::Fullscreen, 0, "трей"),
             CMD_LAST_REGION => self.capture_mode(Mode::LastRegion, 0, "трей"),
@@ -467,12 +502,13 @@ impl App {
     }
 
     fn capture_mode(&mut self, mode: Mode, queue_ms: u32, foreground: &str) {
-        if self.active.is_some() { return; }
+        if self.active.is_some() || self.loading_recent { return; }
         let monitors: Vec<_> = self.outputs.iter().map(Output::bounds).collect();
         let region = mode.region(&monitors, doc_point(cursor_pos()), capture::foreground_window(), self.last_region);
         match region {
             Ok(None) => self.open_session("область", queue_ms, foreground),
             Ok(Some(region)) => {
+                self.hide_recent_before_capture();
                 let t = perf::now();
                 let image = self.capture_image(region);
                 if !self.warm {
@@ -480,6 +516,8 @@ impl App {
                 }
                 match image {
                     Ok(image) => {
+                        let image = Arc::new(image);
+                        self.remember_quick(&image);
                         self.copy_image(image);
                         log_info!("быстрый снимок {mode:?}: {}×{}, {:.1} мс", region.width(), region.height(), perf::ms(t, perf::now()));
                     }
@@ -507,9 +545,10 @@ impl App {
 
     /// Горячий путь: захват → рендер в замаскированные окна → снятие маскировки.
     fn open_session(&mut self, source: &'static str, queue_ms: u32, foreground: &str) {
-        if self.active.is_some() || self.overlays.is_empty() {
+        if self.active.is_some() || self.loading_recent || self.overlays.is_empty() {
             return;
         }
+        self.hide_recent_before_capture();
         let t0 = perf::now();
         let mut dup_ms = 0.0;
         for out in &mut self.outputs {
@@ -528,7 +567,7 @@ impl App {
         let hud_overlay = self.overlay_at(cursor).unwrap_or(0);
         let monitors = self.outputs.iter().map(Output::bounds).collect();
         let session = Session::new(monitors, doc_point(cursor), self.grab(), self.perf_hud);
-        self.active = Some(Active { session, frames: Vec::new(), hud_overlay, hovered: None });
+        self.active = Some(Active { session, frames: Vec::new(), hud_overlay, hovered: None, draft: None });
         self.source = source;
         self.render_all();
         let t2 = perf::now();
@@ -602,6 +641,7 @@ impl App {
     }
 
     fn close_session(&mut self) {
+        self.flush_draft(false);
         let Some(active) = self.active.take() else { return };
         if let Some(selection) = active.session.selection() { self.last_region = Some(selection); }
         unsafe {
@@ -623,12 +663,12 @@ impl App {
     /// После показа: копии кадров в память (лупа, экспорт) и окна для подсветки. Горячий путь их не ждёт.
     fn after_show(&mut self) {
         let t = perf::now();
-        let frames: Vec<Image> = self
+        let frames: Vec<Arc<Image>> = self
             .outputs
             .iter()
             .filter_map(|out| {
                 let gpu = &self.gpus[out.gpu];
-                out.read_pixels(&gpu.device, &gpu.context).map_err(|e| log_warn!("копия кадра {}: {e}", out.name)).ok()
+                out.read_pixels(&gpu.device, &gpu.context).map(Arc::new).map_err(|e| log_warn!("копия кадра {}: {e}", out.name)).ok()
             })
             .collect();
         let t_frames = perf::now();
@@ -643,6 +683,7 @@ impl App {
             active.frames = frames;
             active.session.set_windows(windows);
         }
+        self.start_draft();
     }
 
     fn render_all(&self) {
@@ -745,6 +786,7 @@ impl App {
     }
 
     fn apply(&mut self, action: Action) {
+        self.schedule_draft();
         match action {
             Action::None => {}
             Action::Redraw => self.render_all(),
@@ -760,15 +802,17 @@ impl App {
     /// Оверлей закрывается до диалога: в режиме uiAccess он лежит выше любых обычных окон.
     fn export(&mut self, how: Export) {
         let Some(image) = self.selected_image() else { return };
+        self.flush_draft(true);
+        let draft = self.active.as_ref().and_then(|a| a.draft.as_ref().map(|d| d.token.clone()));
         self.close_session();
         match how {
-            Export::Copy => self.copy_image(image),
+            Export::Copy => self.copy_image(Arc::new(image)),
             Export::Save => {
                 let path = file::unique_path(&self.save_folder(), &file::timestamp_name());
-                self.save(path, image);
+                self.save(path, image, draft);
             }
             Export::SaveAs => match file::ask_path(&self.save_folder(), &file::timestamp_name()) {
-                Ok(Some(path)) => self.save(path, image),
+                Ok(Some(path)) => self.save(path, image, draft),
                 Ok(None) => {}
                 Err(e) => log_warn!("диалог «Сохранить как»: {e}"),
             },
@@ -780,7 +824,7 @@ impl App {
         if folder.is_empty() { file::default_folder() } else { PathBuf::from(folder) }
     }
 
-    fn copy_image(&mut self, image: Image) {
+    fn copy_image(&mut self, image: Arc<Image>) {
         match clipboard::put_image(self.hwnd, &image) {
             Ok(()) => {
                 log_info!("в буфере обмена: {}×{}", image.width(), image.height());
@@ -800,15 +844,15 @@ impl App {
             log_warn!("экспорт: копии кадров в памяти нет");
             return None;
         }
-        Some(Image::compose(&active.frames, selection))
+        Some(Image::compose(active.frames.iter().map(Arc::as_ref), selection))
     }
 
     /// Кодирование и запись — в фоне: оверлей уже закрыт, ждать нечего.
-    fn save(&self, path: PathBuf, image: Image) {
+    fn save(&self, path: PathBuf, image: Image, draft: Option<crate::recent_worker::Token>) {
         let (tx, host) = (self.saved_tx.clone(), self.hwnd.0 as isize);
         std::thread::spawn(move || {
             let result = file::write_png(&path, &image).map(|()| path.clone()).map_err(|e| (path, e.to_string()));
-            let _ = tx.send(result);
+            let _ = tx.send(Saved { result, draft });
             unsafe {
                 let _ = PostMessageW(Some(HWND(host as *mut _)), WM_APP_SAVED, WPARAM(0), LPARAM(0));
             }
@@ -816,8 +860,8 @@ impl App {
     }
 
     fn on_saved(&mut self) {
-        while let Ok(result) = self.saved_rx.try_recv() {
-            match result {
+        while let Ok(saved) = self.saved_rx.try_recv() {
+            match saved.result {
                 Ok(path) => {
                     log_info!("сохранено: {}", path.display());
                     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -825,6 +869,7 @@ impl App {
                         self.notify("Снимок сохранён", &format!("{name}\nНажмите, чтобы открыть папку"));
                     }
                     self.last_saved = Some(path);
+                    if let Some(draft) = saved.draft { self.recent.send(crate::recent_worker::Command::Remove(draft)); }
                 }
                 Err((path, e)) => {
                     log_warn!("не удалось сохранить {}: {e}", path.display());
@@ -1006,6 +1051,8 @@ unsafe extern "system" fn host_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         WM_APP_BENCH => with_app(|app| app.run_bench(wp.0 as u32)),
         WM_APP_SAVED => with_app(App::on_saved),
         WM_APP_CONFIG => with_app(App::on_config),
+        WM_APP_RECENT => with_app(App::on_recent),
+        WM_APP_RECENT_UI => with_app(App::on_recent_ui),
         WM_RENDERFORMAT => with_app(|app| {
             if let Some(image) = &app.clipboard {
                 clipboard::render(wp.0 as u32, image);
@@ -1082,7 +1129,12 @@ unsafe fn register_class(
 }
 
 fn single_instance() -> Option<HANDLE> {
-    let handle = unsafe { CreateMutexW(None, true, w!("Local\\Kadr")) }.ok()?;
+    // Изолированные проверки debug-сборки не завершают установленный экземпляр пользователя.
+    let dev = if cfg!(debug_assertions) { std::env::var("KADR_DEV_INSTANCE").ok() } else { None };
+    let name = dev.filter(|s| !s.is_empty() && s.len()<=32 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b==b'-'))
+        .map_or_else(|| "Local\\Kadr".to_string(), |s| format!("Local\\Kadr.Dev.{s}"));
+    let name=wide(&name);
+    let handle = unsafe { CreateMutexW(None, true, PCWSTR(name.as_ptr())) }.ok()?;
     (unsafe { GetLastError() } != ERROR_ALREADY_EXISTS).then_some(handle)
 }
 

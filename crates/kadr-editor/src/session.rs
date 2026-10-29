@@ -102,6 +102,14 @@ impl Session {
         self.selection
     }
 
+    pub fn is_auto_selected(&self) -> bool { self.auto_selected }
+
+    pub fn restore_selection(&mut self, selection: Option<Rect>, automatic: bool) {
+        self.selection = selection.and_then(|r| r.intersect(&self.bounds));
+        self.auto_selected = automatic;
+        self.drag = None;
+    }
+
     /// Что вырезать из затемнения и обвести: выделение, а пока его нет — окно под курсором.
     pub fn highlight(&self) -> Option<Rect> {
         self.selection.or(self.hover)

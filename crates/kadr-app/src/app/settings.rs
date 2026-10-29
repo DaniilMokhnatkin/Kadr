@@ -5,7 +5,7 @@ impl App {
     pub(super) fn register_hotkeys(&self) -> Vec<String> {
         let mut keys = Vec::new();
         for (id, (_, text)) in
-            [HK_PRTSC, HK_FULLSCREEN, HK_WINDOW, HK_LAST_REGION].into_iter().zip(self.config.hotkeys.entries())
+            [HK_PRTSC, HK_FULLSCREEN, HK_WINDOW, HK_LAST_REGION, HK_RECENT].into_iter().zip(self.config.hotkeys.entries())
         {
             if let Ok(Some(key)) = hotkey::parse(text) {
                 keys.push((id, key, text));
@@ -29,7 +29,7 @@ impl App {
     }
 
     pub(super) fn unregister_hotkeys(&self) {
-        for id in [HK_PRTSC, HK_BACKUP, HK_FULLSCREEN, HK_WINDOW, HK_LAST_REGION] {
+        for id in [HK_PRTSC, HK_BACKUP, HK_FULLSCREEN, HK_WINDOW, HK_LAST_REGION, HK_RECENT] {
             unsafe {
                 let _ = UnregisterHotKey(Some(self.hwnd), id);
             }
@@ -77,6 +77,7 @@ impl App {
             }
         }
         self.set_warm(self.warm_override.unwrap_or(self.config.capture.warm));
+        self.recent.send(crate::recent_worker::Command::Limit(self.config.recent.max));
         log_info!("настройки применены: {}", self.config_path.display());
     }
 

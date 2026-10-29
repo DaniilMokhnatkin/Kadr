@@ -57,8 +57,12 @@ impl Overlay {
         let r = rect;
         let (width, height) = (r.right - r.left, r.bottom - r.top);
         unsafe {
+            // Только изолированный debug-сеанс: окна доступны нативным UI-тестам.
+            let tool_style = if cfg!(debug_assertions) && std::env::var_os("KADR_DEV_INSTANCE").is_some() {
+                Default::default()
+            } else { WS_EX_TOOLWINDOW };
             let hwnd = CreateWindowExW(
-                WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOREDIRECTIONBITMAP,
+                WS_EX_TOPMOST | tool_style | WS_EX_NOREDIRECTIONBITMAP,
                 CLASS,
                 w!("Kadr"),
                 WS_POPUP,
@@ -125,6 +129,17 @@ impl Overlay {
 
     pub fn clear_frame(&mut self) {
         self.frame = None;
+    }
+
+    /// Загруженный черновик уже находится в памяти CPU, захват живого экрана не нужен.
+    pub fn set_image(&mut self, gpu: &Gpu, image: &kadr_doc::Image) -> Result<()> {
+        let size = windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_U {
+            width: image.width(), height: image.height(),
+        };
+        self.frame = Some(unsafe { gpu.d2d.CreateBitmap(size,
+            Some(image.bgra.as_ptr() as *const c_void), image.width()*4,
+            &bitmap_props(D2D1_BITMAP_OPTIONS_NONE))? });
+        Ok(())
     }
 
     pub fn present(&self, gpu: &Gpu, shared: &Shared, theme: &Theme, marks: Marks) -> Result<()> {
