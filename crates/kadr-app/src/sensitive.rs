@@ -21,6 +21,8 @@ pub enum Kind {
     Password,
     /// The value after «Логин», «Login:», «Username:».
     Login,
+    /// A one-time code on its own line, under «Вот твой код» or «Your verification code».
+    Code,
 }
 
 /// Boxes to blur, one per finding, slightly padded so glyph edges are covered too.
@@ -30,7 +32,7 @@ pub fn find(lines: &[Line]) -> Vec<(Kind, Rect)> {
         let words: Vec<(String, Rect)> = line
             .words
             .iter()
-            .map(|(w, r)| (w.trim_matches(|c: char| ",;:!?()[]{}«»\"'".contains(c)).to_string(), *r))
+            .map(|(w, r)| (w.trim_matches(|c: char| ",;:!?()[]{}<>«»\"'".contains(c)).to_string(), *r))
             .collect();
         let mut taken = vec![false; words.len()];
         let mark = |from: usize, to: usize, kind: Kind, taken: &mut Vec<bool>, out: &mut Vec<(Kind, Rect)>| {
@@ -125,7 +127,39 @@ pub fn find(lines: &[Line]) -> Vec<(Kind, Rect)> {
             }
         }
     }
+    codes_on_their_own_line(lines, &mut out);
     out
+}
+
+/// Words that announce a one-time code on a nearby line.
+const CODE_WORDS: [&str; 12] = [
+    "код", "code", "pin", "пин", "otp", "парол", "password", "подтвержд", "verification", "одноразов", "2fa",
+    "passcode",
+];
+
+/// «Вот твой код» / «758062»: a 4–8 digit number alone on its line, with a code mentioned on one of
+/// the three lines above or the line below, close enough to belong together.
+fn codes_on_their_own_line(lines: &[Line], out: &mut Vec<(Kind, Rect)>) {
+    for (i, line) in lines.iter().enumerate() {
+        let compact: String = line.text.chars().filter(|c| !c.is_whitespace() && *c != '-').collect();
+        if !(4..=8).contains(&compact.len()) || !compact.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        if out.iter().any(|(_, r)| r.intersect(&line.rect).is_some()) {
+            continue;
+        }
+        let reach = line.rect.height().max(8) * 8;
+        let near = lines[i.saturating_sub(3)..(i + 2).min(lines.len())].iter().any(|other| {
+            !std::ptr::eq(other, line)
+                && (other.rect.top - line.rect.bottom).abs().min((line.rect.top - other.rect.bottom).abs()) <= reach
+                && CODE_WORDS.iter().any(|w| other.text.to_lowercase().contains(w))
+        });
+        if near {
+            let r = line.rect;
+            let pad = (r.height() / 6).max(2);
+            out.push((Kind::Code, Rect::new(r.left - pad, r.top - pad, r.right + pad, r.bottom + pad)));
+        }
+    }
 }
 
 /// What a run of digit groups is, most specific first: checksums beat shapes.
@@ -338,6 +372,12 @@ mod tests {
             .collect();
         Line { text: text.into(), rect: Rect::new(0, 100, x, 120), words }
     }
+    fn line_at(text: &str, top: i32) -> Line {
+        let mut l = line(text);
+        l.rect = Rect::new(l.rect.left, top, l.rect.right, top + 20);
+        l.words.iter_mut().for_each(|(_, r)| *r = Rect::new(r.left, top, r.right, top + 20));
+        l
+    }
     fn kinds(text: &str) -> Vec<Kind> {
         find(&[line(text)]).into_iter().map(|(k, _)| k).collect()
     }
@@ -378,6 +418,26 @@ mod tests {
         // «Email» and «me:» are 0..50 and 60..90; the address is 100..160, padded by 3.
         assert!(r.left >= 95 && r.right <= 165, "{r:?}");
     }
+    #[test]
+    fn a_code_on_its_own_line_under_a_heading_is_hidden() {
+        // The letter from the screenshot: heading, the code in a box, an instruction under it.
+        let letter = [
+            line_at("Иви <info@notify.ivi.ru>", 100),
+            line_at("Вот твой код", 300),
+            line_at("758062", 350),
+            line_at("Введи эти цифры на экране входа или регистрации", 400),
+        ];
+        let found: Vec<Kind> = find(&letter).into_iter().map(|(k, _)| k).collect();
+        assert_eq!(found, [Kind::Email, Kind::Code]);
+        assert_eq!(kinds_of(&[line_at("Your verification code", 0), line_at("483 921", 40)]), [Kind::Code]);
+        // A lone number with no code nearby, or a code word far away, stays sharp.
+        assert!(kinds_of(&[line_at("Итого", 0), line_at("758062", 40)]).is_empty());
+        assert!(kinds_of(&[line_at("Код страны", 0), line_at("2026", 2000)]).is_empty());
+    }
+    fn kinds_of(lines: &[Line]) -> Vec<Kind> {
+        find(lines).into_iter().map(|(k, _)| k).collect()
+    }
+
     #[test]
     fn ordinary_text_dates_and_versions_are_left_alone() {
         for text in [
