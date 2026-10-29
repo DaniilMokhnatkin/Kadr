@@ -132,6 +132,57 @@ fn interrupted_state_replacement_keeps_previous_document_and_recovers_once() {
     store.clear().unwrap();
     fs::remove_dir(&store.root).unwrap();
 }
+#[test]
+fn clear_waits_for_delete_pending_handles_and_keeps_unknown_files() {
+    let store = setup("delete-pending");
+    store.create("abc-77", 100, &frames(), &document()).unwrap();
+    let handle = fs::File::open(store.root.join("abc-77/frames.enc")).unwrap();
+    let closer = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        drop(handle);
+    });
+    let cleared = store.clear();
+    closer.join().unwrap();
+    assert!(cleared.is_ok(), "pending handle: {cleared:?}");
+    store.create("abc-78", 101, &frames(), &document()).unwrap();
+    fs::write(store.root.join("abc-78/foreign.txt"), b"keep me").unwrap();
+    assert!(store.clear().is_err());
+    assert_eq!(fs::read(store.root.join("abc-78/foreign.txt")).unwrap(), b"keep me");
+    fs::remove_file(store.root.join("abc-78/foreign.txt")).unwrap();
+    fs::remove_dir(store.root.join("abc-78")).unwrap();
+    fs::remove_dir(store.root).unwrap();
+}
+#[test]
+fn retries_transient_not_empty_only_for_empty_directories() {
+    let store = setup("retry-empty");
+    let mut calls = 0;
+    // Fault injection: такой же OS error 145, который вернул полный прогон.
+    remove_empty_dir(&store.root, |dir| {
+        calls += 1;
+        if calls == 1 {
+            Err(io::Error::from(io::ErrorKind::DirectoryNotEmpty))
+        } else {
+            fs::remove_dir(dir)
+        }
+    })
+    .unwrap();
+    assert_eq!(calls, 2);
+    assert!(!store.root.exists());
+    fs::create_dir(&store.root).unwrap();
+    fs::write(store.root.join("foreign.txt"), b"keep").unwrap();
+    calls = 0;
+    assert!(
+        remove_empty_dir(&store.root, |dir| {
+            calls += 1;
+            fs::remove_dir(dir)
+        })
+        .is_err()
+    );
+    assert_eq!(calls, 1);
+    assert_eq!(fs::read(store.root.join("foreign.txt")).unwrap(), b"keep");
+    fs::remove_file(store.root.join("foreign.txt")).unwrap();
+    fs::remove_dir(store.root).unwrap();
+}
 
 #[test]
 fn abrupt_process_exit_leaves_recoverable_open_draft() {

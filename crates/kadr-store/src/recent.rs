@@ -300,7 +300,21 @@ fn remove_files(dir: &Path) -> io::Result<()> {
             }
         }
     }
-    fs::remove_dir(dir)
+    remove_empty_dir(dir, |path| fs::remove_dir(path))
+}
+/// NTFS/сканер может ненадолго вернуть DirectoryNotEmpty уже пустому каталогу.
+/// Повторяем только удаление пустого каталога, не удаляем неизвестное содержимое.
+fn remove_empty_dir(dir: &Path, mut remove: impl FnMut(&Path) -> io::Result<()>) -> io::Result<()> {
+    for delay in [2, 4, 8, 16, 32] {
+        match remove(dir) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::DirectoryNotEmpty && fs::read_dir(dir)?.next().is_none() => {
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    remove(dir)
 }
 fn read_limited(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     if fs::symlink_metadata(path)?.file_type().is_symlink() {
