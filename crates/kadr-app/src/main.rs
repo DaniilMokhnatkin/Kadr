@@ -13,6 +13,7 @@ mod app;
 mod capture_mode;
 mod chrome;
 mod config_watch;
+mod glass;
 mod icons;
 mod interaction_bench;
 #[cfg(test)]

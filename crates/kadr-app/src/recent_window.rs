@@ -2,23 +2,18 @@
 //! GDI, so nothing flickers, and every state change (opening cascade, hover lift, focus ring,
 //! button press, clear confirmation) is a spring. The title bar is our own; DWM keeps the shadow,
 //! rounded corners and dragging.
-use kadr_render::gpu::{Gpu, Shared};
+use crate::glass::{self, Device, Surface, client_size, fade, fill, inflate, inside, mix, rect, rgb, scaled_about, shadow, stroke, text};
+use kadr_render::gpu::Shared;
 use kadr_render::motion::{Curve, Spring};
 use kadr_render::theme::Theme;
 use kadr_store::recent::Entry;
 use std::cell::RefCell;
-use std::mem::ManuallyDrop;
 use std::time::Instant;
 use windows::Win32::Foundation::{FILETIME, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SYSTEMTIME, WPARAM};
-use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
-};
+use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Direct2D::*;
-use windows::Win32::Graphics::DirectComposition::{IDCompositionTarget, IDCompositionVisual};
 use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dwm::*;
-use windows::Win32::Graphics::Dxgi::Common::*;
-use windows::Win32::Graphics::Dxgi::*;
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, PAINTSTRUCT,
     ScreenToClient,
@@ -31,7 +26,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{Interface, PCWSTR, Result, w};
+use windows::core::{PCWSTR, Result, w};
 use windows_numerics::{Matrix3x2, Vector2};
 
 pub enum Request {
@@ -67,15 +62,6 @@ struct Layout {
     cards: Vec<D2D_RECT_F>,
 }
 
-fn rect(left: f32, top: f32, right: f32, bottom: f32) -> D2D_RECT_F {
-    D2D_RECT_F { left, top, right, bottom }
-}
-fn inside(r: D2D_RECT_F, x: f32, y: f32) -> bool {
-    x >= r.left && x < r.right && y >= r.top && y < r.bottom
-}
-fn inflate(r: D2D_RECT_F, by: f32) -> D2D_RECT_F {
-    rect(r.left - by, r.top - by, r.right + by, r.bottom + by)
-}
 
 fn columns(width: f32, s: f32) -> usize {
     if width / s >= 760.0 { 4 } else { 3 }
@@ -214,28 +200,17 @@ struct Card {
 
 /// Device resources: created on first show, kept while the app runs.
 struct Ui {
-    shared: Shared,
-    gpu: Gpu,
+    device: Device,
     fonts: Fonts,
 }
 impl Ui {
     fn new(s: f32) -> Result<Self> {
-        let shared = Shared::new()?;
-        let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1()? };
-        let adapter = unsafe { factory.EnumAdapters1(0)? };
-        let gpu = Gpu::new(&shared, &adapter, "recent".into())?;
-        let fonts = Fonts::new(&shared, s)?;
-        Ok(Self { shared, gpu, fonts })
+        let device = Device::new("recent")?;
+        let fonts = Fonts::new(&device.shared, s)?;
+        Ok(Self { device, fonts })
     }
 }
 
-struct Surface {
-    swapchain: IDXGISwapChain1,
-    target: Option<ID2D1Bitmap1>,
-    size: (u32, u32),
-    _visual: IDCompositionVisual,
-    _composition: IDCompositionTarget,
-}
 
 struct State {
     hwnd: HWND,
@@ -450,7 +425,7 @@ impl Window {
                 .map(|(i, e)| {
                     let bitmap = ui.and_then(|ui| {
                         let p = e.preview.as_ref()?;
-                        let b = kadr_render::annotations::bitmap(&ui.gpu, p).ok()?;
+                        let b = kadr_render::annotations::bitmap(&ui.device.gpu, p).ok()?;
                         Some((b, p.width() as f32, p.height() as f32))
                     });
                     // Cards cascade in: each rises and fades in a little after its neighbour.
@@ -555,83 +530,14 @@ fn close(hwnd: HWND) {
     request(Request::Close);
 }
 
-fn client_size(hwnd: HWND) -> (u32, u32) {
-    let mut r = RECT::default();
-    unsafe {
-        let _ = GetClientRect(hwnd, &mut r);
-    }
-    ((r.right - r.left).max(1) as u32, (r.bottom - r.top).max(1) as u32)
-}
 
-fn target_props(options: D2D1_BITMAP_OPTIONS) -> D2D1_BITMAP_PROPERTIES1 {
-    D2D1_BITMAP_PROPERTIES1 {
-        pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
-        dpiX: 96.0,
-        dpiY: 96.0,
-        bitmapOptions: options,
-        colorContext: ManuallyDrop::new(None),
-    }
-}
 
-/// Creates device resources and the composition swap chain on first paint; resizes it after.
-fn ensure_surface(st: &mut State) -> Result<()> {
-    if st.ui.is_none() {
-        st.ui = Some(Ui::new(st.scale)?);
-    }
-    let ui = st.ui.as_ref().unwrap();
-    let size = client_size(st.hwnd);
-    match &mut st.surface {
-        Some(s) if s.size == size && s.target.is_some() => {}
-        Some(s) => unsafe {
-            ui.gpu.d2d.SetTarget(None);
-            s.target = None;
-            s.swapchain.ResizeBuffers(0, size.0, size.1, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG(0))?;
-            let surface: IDXGISurface = s.swapchain.GetBuffer(0)?;
-            let props = target_props(D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW);
-            s.target = Some(ui.gpu.d2d.CreateBitmapFromDxgiSurface(&surface, Some(&raw const props))?);
-            s.size = size;
-        },
-        None => unsafe {
-            let desc = DXGI_SWAP_CHAIN_DESC1 {
-                Width: size.0,
-                Height: size.1,
-                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-                BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-                BufferCount: 2,
-                Scaling: DXGI_SCALING_STRETCH,
-                SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-                // Transparent pixels let the acrylic through.
-                AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
-                ..Default::default()
-            };
-            let swapchain =
-                ui.gpu.factory.CreateSwapChainForComposition(&ui.gpu.device, &desc, None::<&IDXGIOutput>)?;
-            let surface: IDXGISurface = swapchain.GetBuffer(0)?;
-            let props = target_props(D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW);
-            let target = ui.gpu.d2d.CreateBitmapFromDxgiSurface(&surface, Some(&raw const props))?;
-            let composition = ui.gpu.dcomp.CreateTargetForHwnd(st.hwnd, true)?;
-            let visual = ui.gpu.dcomp.CreateVisual()?;
-            visual.SetContent(&swapchain)?;
-            composition.SetRoot(&visual)?;
-            ui.gpu.dcomp.Commit()?;
-            st.surface = Some(Surface {
-                swapchain,
-                target: Some(target),
-                size,
-                _visual: visual,
-                _composition: composition,
-            });
-        },
-    }
-    Ok(())
-}
 
 /// Thumbnails that were set before the device existed get their bitmaps now.
 fn ensure_bitmaps(st: &mut State, previews: &mut Vec<(usize, kadr_doc::Image)>) {
     let Some(ui) = st.ui.as_ref() else { return };
     for (i, image) in previews.drain(..) {
-        if let (Some(card), Ok(b)) = (st.cards.get_mut(i), kadr_render::annotations::bitmap(&ui.gpu, &image)) {
+        if let (Some(card), Ok(b)) = (st.cards.get_mut(i), kadr_render::annotations::bitmap(&ui.device.gpu, &image)) {
             card.bitmap = Some((b, image.width() as f32, image.height() as f32));
         }
     }
@@ -646,7 +552,16 @@ fn paint_window(hwnd: HWND) {
     DATA.with(|d| {
         let Ok(mut state) = d.try_borrow_mut() else { return };
         let Some(st) = state.as_mut() else { return };
-        if let Err(e) = ensure_surface(st) {
+        if st.ui.is_none() {
+            match Ui::new(st.scale) {
+                Ok(ui) => st.ui = Some(ui),
+                Err(e) => {
+                    kadr_win::log_warn!("«Недавние»: устройство: {e}");
+                    return;
+                }
+            }
+        }
+        if let Err(e) = glass::ensure(&mut st.surface, &st.ui.as_ref().unwrap().device, st.hwnd) {
             kadr_win::log_warn!("«Недавние»: поверхность: {e}");
             return;
         }
@@ -654,16 +569,7 @@ fn paint_window(hwnd: HWND) {
         let ui = st.ui.as_ref().unwrap();
         let surface = st.surface.as_ref().unwrap();
         let size = (surface.size.0 as f32, surface.size.1 as f32);
-        let animating = unsafe {
-            if let Some(target) = &surface.target {
-                ui.gpu.d2d.SetTarget(target);
-            }
-            ui.gpu.d2d.BeginDraw();
-            let animating = paint(ui, st, size, st.now(), false);
-            let _ = ui.gpu.d2d.EndDraw(None, None);
-            let _ = surface.swapchain.Present(1, DXGI_PRESENT(0));
-            animating
-        };
+        let animating = glass::frame(&ui.device, surface, || paint(ui, st, size, st.now(), false));
         if animating {
             unsafe {
                 let _ = InvalidateRect(Some(hwnd), None, false);
@@ -672,72 +578,10 @@ fn paint_window(hwnd: HWND) {
     });
 }
 
-fn fill(gpu: &Gpu, c: D2D1_COLOR_F, r: D2D_RECT_F, radius: f32) {
-    unsafe {
-        gpu.brush.SetColor(&c);
-        gpu.d2d.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: r, radiusX: radius, radiusY: radius }, &gpu.brush);
-    }
-}
-fn stroke(gpu: &Gpu, c: D2D1_COLOR_F, r: D2D_RECT_F, radius: f32, width: f32) {
-    unsafe {
-        gpu.brush.SetColor(&c);
-        gpu.d2d.DrawRoundedRectangle(
-            &D2D1_ROUNDED_RECT { rect: r, radiusX: radius, radiusY: radius },
-            &gpu.brush,
-            width,
-            None::<&ID2D1StrokeStyle>,
-        );
-    }
-}
-fn text(gpu: &Gpu, format: &IDWriteTextFormat, value: &str, r: D2D_RECT_F, c: D2D1_COLOR_F) {
-    let utf16: Vec<u16> = value.encode_utf16().collect();
-    unsafe {
-        gpu.brush.SetColor(&c);
-        gpu.d2d.DrawText(
-            &utf16,
-            format,
-            &r,
-            &gpu.brush,
-            D2D1_DRAW_TEXT_OPTIONS_NONE,
-            DWRITE_MEASURING_MODE_NATURAL,
-        );
-    }
-}
-fn fade(mut c: D2D1_COLOR_F, a: f32) -> D2D1_COLOR_F {
-    c.a *= a.clamp(0.0, 1.0);
-    c
-}
-fn mix(a: D2D1_COLOR_F, b: D2D1_COLOR_F, t: f32) -> D2D1_COLOR_F {
-    let t = t.clamp(0.0, 1.0);
-    D2D1_COLOR_F { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t, a: a.a + (b.a - a.a) * t }
-}
-const fn rgb(hex: u32, a: f32) -> D2D1_COLOR_F {
-    D2D1_COLOR_F {
-        r: ((hex >> 16) & 0xff) as f32 / 255.0,
-        g: ((hex >> 8) & 0xff) as f32 / 255.0,
-        b: (hex & 0xff) as f32 / 255.0,
-        a,
-    }
-}
-/// Soft shadow from stacked rounded rings, as in the overlay toolbar.
-fn shadow(gpu: &Gpu, r: D2D_RECT_F, radius: f32, s: f32, spread: f32, drop: f32, alpha: f32) {
-    let steps = 8;
-    for i in 0..steps {
-        let t = (i + 1) as f32 / steps as f32;
-        let grow = spread * s * t;
-        let dy = drop * s * t;
-        let ring = rect(r.left - grow, r.top - grow + dy, r.right + grow, r.bottom + grow + dy);
-        fill(gpu, rgb(0x000000, alpha / steps as f32 * (1.0 - t * 0.5)), ring, radius + grow);
-    }
-}
-fn scaled_about(r: D2D_RECT_F, k: f32, dy: f32) -> Matrix3x2 {
-    let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
-    Matrix3x2 { M11: k, M12: 0.0, M21: 0.0, M22: k, M31: cx * (1.0 - k), M32: cy * (1.0 - k) + dy }
-}
 
 /// Draws the whole window; returns whether anything is still moving.
 fn paint(ui: &Ui, st: &State, size: (f32, f32), now: f64, opaque: bool) -> bool {
-    let gpu = &ui.gpu;
+    let gpu = &ui.device.gpu;
     let ctx = &gpu.d2d;
     let theme = Theme::current();
     let s = st.scale;
@@ -747,10 +591,6 @@ fn paint(ui: &Ui, st: &State, size: (f32, f32), now: f64, opaque: bool) -> bool 
         moving |= spring.active(now);
         spring.value(now)
     };
-    unsafe {
-        ctx.SetTransform(&Matrix3x2::identity());
-        ctx.Clear(Some(&rgb(0x000000, 0.0)));
-    }
     let full = rect(0.0, 0.0, size.0, size.1);
     if opaque || theme.glass.a >= 1.0 {
         fill(gpu, rgb(0xf3f3f6, 1.0), full, 0.0);
@@ -773,7 +613,7 @@ fn paint(ui: &Ui, st: &State, size: (f32, f32), now: f64, opaque: bool) -> bool 
     let (hover, press) = (sample(&st.buttons[0].0), sample(&st.buttons[0].1));
     let c = l.close;
     unsafe {
-        ctx.SetTransform(&scaled_about(c, 1.0 - 0.08 * press, 0.0));
+        ctx.SetTransform(&scaled_about(c, 1.0 - 0.08 * press, 0.0, 0.0));
     }
     fill(gpu, fade(rgb(0x000000, 0.07), hover), inflate(c, -2.0 * s), 14.0 * s);
     let (cx, cy, k) = ((c.left + c.right) / 2.0, (c.top + c.bottom) / 2.0, 5.0 * s);
@@ -795,7 +635,7 @@ fn paint(ui: &Ui, st: &State, size: (f32, f32), now: f64, opaque: bool) -> bool 
     if let Some(b) = l.back {
         let (hover, press) = (sample(&st.buttons[1].0), sample(&st.buttons[1].1));
         unsafe {
-            ctx.SetTransform(&scaled_about(b, 1.0 - 0.04 * press, 0.0));
+            ctx.SetTransform(&scaled_about(b, 1.0 - 0.04 * press, 0.0, 0.0));
         }
         shadow(gpu, b, 9.0 * s, s, 4.0, 1.5, 0.10 + 0.06 * hover);
         fill(gpu, mix(theme.accent, theme.on_accent, 0.12 * hover), b, 9.0 * s);
@@ -811,7 +651,7 @@ fn paint(ui: &Ui, st: &State, size: (f32, f32), now: f64, opaque: bool) -> bool 
     let danger = sample(&st.danger);
     let b = l.clear;
     unsafe {
-        ctx.SetTransform(&scaled_about(b, 1.0 - 0.04 * press, 0.0));
+        ctx.SetTransform(&scaled_about(b, 1.0 - 0.04 * press, 0.0, 0.0));
     }
     let neutral = mix(rgb(0x000000, 0.06), rgb(0x000000, 0.10), hover);
     fill(gpu, mix(neutral, rgb(0xd70015, 1.0), danger), b, 9.0 * s);
@@ -839,56 +679,17 @@ fn paint(ui: &Ui, st: &State, size: (f32, f32), now: f64, opaque: bool) -> bool 
         let k = 1.0 + 0.03 * hover - if pressed { 0.02 } else { 0.0 };
         let rise = (1.0 - enter) * 14.0 * s - 2.0 * s * hover;
         unsafe {
-            ctx.SetTransform(&scaled_about(*r, k, rise));
+            ctx.SetTransform(&scaled_about(*r, k, 0.0, rise));
         }
         shadow(gpu, *r, radius, s, 6.0 + 10.0 * hover, 2.0 + 5.0 * hover, (0.12 + 0.10 * hover) * opacity);
-        let rounded = D2D1_ROUNDED_RECT { rect: *r, radiusX: radius, radiusY: radius };
-        let geometry = unsafe { ui.shared.d2d.CreateRoundedRectangleGeometry(&rounded) }
-            .ok()
-            .and_then(|g| g.cast::<ID2D1Geometry>().ok());
-        let mut params = D2D1_LAYER_PARAMETERS1 {
-            contentBounds: *r,
-            geometricMask: ManuallyDrop::new(geometry),
-            maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-            maskTransform: Matrix3x2::identity(),
-            opacity,
-            opacityBrush: ManuallyDrop::new(None),
-            layerOptions: D2D1_LAYER_OPTIONS1_NONE,
-        };
-        unsafe {
-            ctx.PushLayer(&params, None::<&ID2D1Layer>);
-        }
-        fill(gpu, rgb(0xe9e9ee, 1.0), *r, 0.0);
-        if let Some((bitmap, w, h)) = &card.bitmap {
+        match &card.bitmap {
             // Fill the tile; the preview is already the selected area, so cropping edges is fine.
-            let (tw, th) = (r.right - r.left, r.bottom - r.top);
-            let k = (tw / w).max(th / h);
-            let (dw, dh) = (w * k, h * k);
-            let dest = rect(
-                r.left + (tw - dw) / 2.0,
-                r.top + (th - dh) / 2.0,
-                r.left + (tw + dw) / 2.0,
-                r.top + (th + dh) / 2.0,
-            );
-            unsafe {
-                ctx.DrawBitmap(
-                    bitmap,
-                    Some(&raw const dest),
-                    1.0,
-                    D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
-                    None,
-                    None,
-                );
-            }
-        }
-        unsafe {
-            ctx.PopLayer();
-            ManuallyDrop::drop(&mut params.geometricMask);
-            ManuallyDrop::drop(&mut params.opacityBrush);
+            Some((bitmap, w, h)) => glass::rounded_image(&ui.device, bitmap, (*w, *h), *r, radius, opacity, true),
+            None => fill(gpu, fade(rgb(0xe9e9ee, 1.0), opacity), *r, radius),
         }
         stroke(gpu, fade(rgb(0x000000, 0.10), opacity), inflate(*r, -0.5), radius, 1.0);
         unsafe {
-            ctx.SetTransform(&scaled_about(*r, 1.0, rise));
+            ctx.SetTransform(&scaled_about(*r, 1.0, 0.0, rise));
         }
         let label = rect(r.left + 2.0, r.bottom + 6.0 * s, r.right, r.bottom + 28.0 * s);
         let now_ms = std::time::SystemTime::now()
@@ -1120,7 +921,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 if let Some(st) = d.borrow_mut().as_mut() {
                     st.scale = unsafe { GetDpiForWindow(hwnd) } as f32 / 96.0;
                     if let Some(ui) = st.ui.as_mut()
-                        && let Ok(fonts) = Fonts::new(&ui.shared, st.scale)
+                        && let Ok(fonts) = Fonts::new(&ui.device.shared, st.scale)
                     {
                         ui.fonts = fonts;
                     }
@@ -1154,7 +955,7 @@ pub fn preview(
         .into_iter()
         .map(|e| Card {
             bitmap: e.preview.as_ref().and_then(|p| {
-                kadr_render::annotations::bitmap(&ui.gpu, p).ok().map(|b| (b, p.width() as f32, p.height() as f32))
+                kadr_render::annotations::bitmap(&ui.device.gpu, p).ok().map(|b| (b, p.width() as f32, p.height() as f32))
             }),
             id: e.id,
             created_ms: e.created_ms,
@@ -1167,35 +968,9 @@ pub fn preview(
     }
     let w = (WIDTH * scale).round();
     let h = desired_height(w, scale, st.cards.len().max(if loading { 4 } else { 0 })).round();
-    let (wu, hu) = (w as u32, h as u32);
-    unsafe {
-        let ctx = &ui.gpu.d2d;
-        let target = ctx.CreateBitmap(
-            D2D_SIZE_U { width: wu, height: hu },
-            None,
-            0,
-            &target_props(D2D1_BITMAP_OPTIONS_TARGET),
-        )?;
-        ctx.SetTarget(&target);
-        ctx.BeginDraw();
+    glass::render_offscreen(&ui.device, w as u32, h as u32, || {
         paint(&ui, &st, (w, h), 10.0, true);
-        ctx.EndDraw(None, None)?;
-        let readback = ctx.CreateBitmap(
-            D2D_SIZE_U { width: wu, height: hu },
-            None,
-            0,
-            &target_props(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW),
-        )?;
-        readback.CopyFromBitmap(None, &target, None)?;
-        let mapped = readback.Map(D2D1_MAP_OPTIONS_READ)?;
-        let mut bgra = Vec::with_capacity((wu * hu * 4) as usize);
-        for y in 0..hu {
-            let row = std::slice::from_raw_parts(mapped.bits.add((y * mapped.pitch) as usize), (wu * 4) as usize);
-            bgra.extend_from_slice(row);
-        }
-        readback.Unmap()?;
-        Ok(kadr_doc::Image::new(kadr_doc::Rect::new(0, 0, wu as i32, hu as i32), bgra))
-    }
+    })
 }
 
 #[cfg(test)]
