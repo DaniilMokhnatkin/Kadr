@@ -122,7 +122,7 @@ pub fn take_request() -> Option<Request> {
 
 fn request(value: Request) {
     REQUEST.with(|r| *r.borrow_mut() = Some(value));
-    if let Some((host, msg)) = STATE.with(|s| s.borrow().as_ref().map(|s| (s.host, s.message))) {
+    if let Some((host, msg)) = STATE.with(|s| s.try_borrow().ok().as_deref().and_then(Option::as_ref).map(|s| (s.host, s.message))) {
         unsafe {
             let _ = PostMessageW(Some(host), msg, WPARAM(0), LPARAM(0));
         }
@@ -189,7 +189,7 @@ pub fn show(instance: HINSTANCE, host: HWND, message: u32, shot: Shot) {
         });
     }
     STATE.with(|s| {
-        let mut state = s.borrow_mut();
+        let Ok(mut state) = s.try_borrow_mut() else { return Default::default() };
         let Some(st) = state.as_mut() else { return };
         // Monitor of the capture, its DPI and work area.
         let monitor = unsafe { MonitorFromPoint(POINT { x: shot.anchor.0, y: shot.anchor.1 }, MONITOR_DEFAULTTONEAREST) };
@@ -236,7 +236,7 @@ pub fn show(instance: HINSTANCE, host: HWND, message: u32, shot: Shot) {
 /// Hides at once, without motion; returns whether it was on screen.
 pub fn hide_now() -> bool {
     STATE.with(|s| {
-        let mut state = s.borrow_mut();
+        let Ok(mut state) = s.try_borrow_mut() else { return Default::default() };
         let Some(st) = state.as_mut() else { return false };
         let visible = unsafe { IsWindowVisible(st.hwnd) }.as_bool();
         if visible {
@@ -400,7 +400,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut p);
             }
             let on = STATE.with(|s| {
-                s.borrow().as_ref().is_some_and(|st| {
+                s.try_borrow().ok().as_deref().and_then(Option::as_ref).is_some_and(|st| {
                     !st.leaving
                         && (inside(inflate(st.card_rect(), 2.0), p.x as f32, p.y as f32)
                             || (st.hover.goal() > 0.5 && inside(st.close_rect(), p.x as f32, p.y as f32)))
@@ -410,7 +410,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_TIMER if wp.0 == TIMER_LEAVE => {
             STATE.with(|s| {
-                if let Some(st) = s.borrow_mut().as_mut()
+                if let Ok(mut guard) = s.try_borrow_mut()
+                    && let Some(st) = guard.as_mut()
                     && st.hover.goal() < 0.5
                 {
                     st.leave();
@@ -422,7 +423,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_MOUSEMOVE => {
             let (x, y) = point(lp);
             let drag = STATE.with(|s| {
-                let mut state = s.borrow_mut();
+                let Ok(mut state) = s.try_borrow_mut() else { return Default::default() };
                 let st = state.as_mut()?;
                 let now = st.now();
                 if !st.tracking {
@@ -461,7 +462,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 None
             });
             STATE.with(|s| {
-                if let Some(st) = s.borrow_mut().as_mut()
+                if let Ok(mut guard) = s.try_borrow_mut()
+                    && let Some(st) = guard.as_mut()
                     && let Gesture::Swipe { .. } = st.gesture
                     && let Some(origin) = SWIPE_ORIGIN.with(|o| o.get())
                 {
@@ -474,14 +476,16 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     let _ = ReleaseCapture();
                 }
                 STATE.with(|s| {
-                    if let Some(st) = s.borrow_mut().as_mut() {
+                    if let Ok(mut guard) = s.try_borrow_mut()
+                    && let Some(st) = guard.as_mut() {
                         st.dragging = true;
                     }
                 });
                 redraw();
                 let dropped = drag_out(hwnd, &path);
                 STATE.with(|s| {
-                    if let Some(st) = s.borrow_mut().as_mut() {
+                    if let Ok(mut guard) = s.try_borrow_mut()
+                    && let Some(st) = guard.as_mut() {
                         st.dragging = false;
                         if dropped {
                             st.leave();
@@ -496,7 +500,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let (x, y) = point(lp);
             SWIPE_ORIGIN.with(|o| o.set(Some(x)));
             STATE.with(|s| {
-                if let Some(st) = s.borrow_mut().as_mut() {
+                if let Ok(mut guard) = s.try_borrow_mut()
+                    && let Some(st) = guard.as_mut() {
                     st.gesture = Gesture::Pressed { x, y };
                 }
             });
@@ -511,7 +516,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             }
             let (x, y) = point(lp);
             let action = STATE.with(|s| {
-                let mut state = s.borrow_mut();
+                let Ok(mut state) = s.try_borrow_mut() else { return Default::default() };
                 let st = state.as_mut()?;
                 let gesture = std::mem::replace(&mut st.gesture, Gesture::None);
                 match gesture {
@@ -552,7 +557,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_MOUSELEAVE => {
             STATE.with(|s| {
-                if let Some(st) = s.borrow_mut().as_mut() {
+                if let Ok(mut guard) = s.try_borrow_mut()
+                    && let Some(st) = guard.as_mut() {
                     st.tracking = false;
                     let now = st.now();
                     st.hover.target_with(0.0, Curve::HOVER_OUT, now);

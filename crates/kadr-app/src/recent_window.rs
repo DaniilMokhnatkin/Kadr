@@ -383,7 +383,8 @@ impl Window {
 
     pub fn show(&self, enabled: bool, returning: bool) {
         DATA.with(|d| {
-            if let Some(d) = d.borrow_mut().as_mut() {
+            if let Ok(mut guard) = d.try_borrow_mut()
+                    && let Some(d) = guard.as_mut() {
                 d.loading = true;
                 d.enabled = enabled;
                 d.error = None;
@@ -406,7 +407,7 @@ impl Window {
 
     pub fn set_entries(&self, entries: Vec<Entry>) {
         DATA.with(|d| {
-            let mut state = d.borrow_mut();
+            let Ok(mut state) = d.try_borrow_mut() else { return Default::default() };
             let Some(st) = state.as_mut() else { return };
             st.loading = false;
             st.error = None;
@@ -454,7 +455,7 @@ impl Window {
     /// Height follows the number of rows; the first show also centres the window on its monitor.
     fn fit(&self, center: bool) {
         let Some((scale, count)) =
-            DATA.with(|d| d.borrow_mut().as_mut().map(|d| (d.scale, d.cards.len().max(if d.loading { 4 } else { 0 }))))
+            DATA.with(|d| d.try_borrow_mut().ok().as_deref_mut().and_then(Option::as_mut).map(|d| (d.scale, d.cards.len().max(if d.loading { 4 } else { 0 }))))
         else {
             return;
         };
@@ -485,7 +486,8 @@ impl Window {
 
     pub fn error(&self, message: &str) {
         DATA.with(|d| {
-            if let Some(d) = d.borrow_mut().as_mut() {
+            if let Ok(mut guard) = d.try_borrow_mut()
+                    && let Some(d) = guard.as_mut() {
                 d.loading = false;
                 d.error = Some(message.to_string());
             }
@@ -516,7 +518,7 @@ pub fn dialog_message(_msg: &MSG) -> bool {
 
 fn request(value: Request) {
     REQUEST.with(|r| *r.borrow_mut() = Some(value));
-    let target = DATA.with(|d| d.borrow().as_ref().map(|d| (d.host, d.message)));
+    let target = DATA.with(|d| d.try_borrow().ok().as_deref().and_then(Option::as_ref).map(|d| (d.host, d.message)));
     if let Some((host, msg)) = target {
         unsafe {
             let _ = PostMessageW(Some(host), msg, WPARAM(0), LPARAM(0));
@@ -752,7 +754,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 let _ = ScreenToClient(hwnd, &mut p);
             }
             let caption = DATA.with(|d| {
-                d.borrow().as_ref().is_some_and(|st| {
+                d.try_borrow().ok().as_deref().and_then(Option::as_ref).is_some_and(|st| {
                     let l = st.layout(width());
                     (p.y as f32) < (TOP - 12.0) * st.scale
                         && hit(&l, p.x as f32, p.y as f32, st.cards.len(), !st.cards.is_empty()).is_none()
@@ -779,7 +781,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_MOUSEMOVE => {
             let (x, y) = point(hwnd, lp);
             DATA.with(|d| {
-                if let Some(st) = d.borrow_mut().as_mut() {
+                if let Ok(mut guard) = d.try_borrow_mut()
+                    && let Some(st) = guard.as_mut() {
                     if !st.tracking {
                         let mut t = TRACKMOUSEEVENT {
                             cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
@@ -802,7 +805,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_MOUSELEAVE => {
             DATA.with(|d| {
-                if let Some(st) = d.borrow_mut().as_mut() {
+                if let Ok(mut guard) = d.try_borrow_mut()
+                    && let Some(st) = guard.as_mut() {
                     st.tracking = false;
                     st.set_hover(None);
                     st.press(None);
@@ -812,7 +816,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             return LRESULT(0);
         }
         WM_SETCURSOR if (lp.0 & 0xffff) as u32 == HTCLIENT => {
-            let hand = DATA.with(|d| d.borrow().as_ref().is_some_and(|st| st.hover.is_some()));
+            let hand = DATA.with(|d| d.try_borrow().ok().as_deref().and_then(Option::as_ref).is_some_and(|st| st.hover.is_some()));
             unsafe {
                 SetCursor(LoadCursorW(None, if hand { IDC_HAND } else { IDC_ARROW }).ok());
             }
@@ -821,7 +825,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_LBUTTONDOWN => {
             let (x, y) = point(hwnd, lp);
             DATA.with(|d| {
-                if let Some(st) = d.borrow_mut().as_mut() {
+                if let Ok(mut guard) = d.try_borrow_mut()
+                    && let Some(st) = guard.as_mut() {
                     let l = st.layout(width());
                     let h = hit(&l, x, y, st.cards.len(), !st.cards.is_empty());
                     st.press(h);
@@ -840,7 +845,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             }
             let (x, y) = point(hwnd, lp);
             let action = DATA.with(|d| {
-                let mut state = d.borrow_mut();
+                let Ok(mut state) = d.try_borrow_mut() else { return Default::default() };
                 let st = state.as_mut()?;
                 let l = st.layout(width());
                 let h = hit(&l, x, y, st.cards.len(), !st.cards.is_empty());
@@ -870,7 +875,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_TIMER if wp.0 == TIMER_CONFIRM => {
             DATA.with(|d| {
-                if let Some(st) = d.borrow_mut().as_mut() {
+                if let Ok(mut guard) = d.try_borrow_mut()
+                    && let Some(st) = guard.as_mut() {
                     st.set_confirm(false);
                 }
             });
@@ -884,7 +890,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 return LRESULT(0);
             }
             let load = DATA.with(|d| {
-                let mut state = d.borrow_mut();
+                let Ok(mut state) = d.try_borrow_mut() else { return Default::default() };
                 let st = state.as_mut()?;
                 let n = st.cards.len();
                 if n == 0 {
@@ -919,7 +925,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_DPICHANGED => {
             let r = unsafe { &*(lp.0 as *const RECT) };
             DATA.with(|d| {
-                if let Some(st) = d.borrow_mut().as_mut() {
+                if let Ok(mut guard) = d.try_borrow_mut()
+                    && let Some(st) = guard.as_mut() {
                     st.scale = unsafe { GetDpiForWindow(hwnd) } as f32 / 96.0;
                     if let Some(ui) = st.ui.as_mut()
                         && let Ok(fonts) = Fonts::new(&ui.device.shared, st.scale)
@@ -1015,6 +1022,14 @@ mod tests {
             assert_eq!(GetForegroundWindow(), before);
             let _ = SendMessageW(window.hwnd, WM_KEYDOWN, Some(WPARAM(VK_ESCAPE.0 as usize)), Some(LPARAM(0)));
             assert!(matches!(window.take_request(), Some(Request::Close)));
+            // Windows calls back into the window while its own code holds the state (showing,
+            // hiding, focusing). Such messages must be answered, not panic the process.
+            DATA.with(|d| {
+                let _busy = d.borrow_mut();
+                for (msg, wp) in [(WM_NCHITTEST, 0), (WM_SETCURSOR, 1), (WM_MOUSEMOVE, 0), (WM_ACTIVATE, 0), (WM_KEYDOWN, 0x28)] {
+                    let _ = SendMessageW(window.hwnd, msg, Some(WPARAM(wp)), Some(LPARAM(0)));
+                }
+            });
             drop(window);
         }
     }

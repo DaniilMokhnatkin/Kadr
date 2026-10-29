@@ -290,7 +290,8 @@ pub fn take_requests() -> Vec<Request> {
 /// The applied configuration changed (here or by hand): show what is in effect.
 pub fn refresh(config: &Config) {
     STATE.with(|s| {
-        if let Some(st) = s.borrow_mut().as_mut()
+        if let Ok(mut guard) = s.try_borrow_mut()
+                    && let Some(st) = guard.as_mut()
             && st.capturing.is_none()
         {
             st.config = config.clone();
@@ -364,9 +365,11 @@ pub fn show(instance: HINSTANCE, host: HWND, message: u32, config: &Config) {
             })
         });
     }
-    STATE.with(|s| {
-        let mut state = s.borrow_mut();
-        let Some(st) = state.as_mut() else { return };
+    // Positioning, showing and focusing make Windows call back into `proc`, which takes the state
+    // itself: all of it happens after the state is released.
+    let placed = STATE.with(|s| {
+        let Ok(mut state) = s.try_borrow_mut() else { return None };
+        let st = state.as_mut()?;
         st.config = config.clone();
         st.auto = autostart();
         st.error = None;
@@ -388,22 +391,16 @@ pub fn show(instance: HINSTANCE, host: HWND, message: u32, config: &Config) {
         let w = (WIDTH * st.scale) as i32;
         let h = (layout(w as f32, st.scale).height as i32).min(mi.rcWork.bottom - mi.rcWork.top - 32);
         let work = mi.rcWork;
-        unsafe {
-            let _ = SetWindowPos(
-                st.hwnd,
-                None,
-                work.left + (work.right - work.left - w) / 2,
-                work.top + (work.bottom - work.top - h) / 2,
-                w,
-                h,
-                SWP_NOZORDER,
-            );
-            glass::match_appearance(st.hwnd);
-            let _ = ShowWindow(st.hwnd, SW_SHOW);
-            let _ = SetForegroundWindow(st.hwnd);
-            let _ = InvalidateRect(Some(st.hwnd), None, false);
-        }
+        Some((st.hwnd, work.left + (work.right - work.left - w) / 2, work.top + (work.bottom - work.top - h) / 2, w, h))
     });
+    let Some((hwnd, x, y, w, h)) = placed else { return };
+    unsafe {
+        let _ = SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER);
+        glass::match_appearance(hwnd);
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = SetForegroundWindow(hwnd);
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
 }
 
 fn ensure_fonts(st: &mut State) -> bool {
@@ -633,9 +630,11 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 let _ = ScreenToClient(hwnd, &mut p);
             }
             let caption = STATE.with(|s| {
-                s.borrow().as_ref().is_some_and(|st| {
-                    (p.y as f32) < 72.0 * st.scale
-                        && hit(&layout(width(), st.scale), p.x as f32, p.y as f32, true).is_none()
+                s.try_borrow().is_ok_and(|g| {
+                    g.as_ref().is_some_and(|st| {
+                        (p.y as f32) < 72.0 * st.scale
+                            && hit(&layout(width(), st.scale), p.x as f32, p.y as f32, true).is_none()
+                    })
                 })
             });
             return LRESULT(if caption { HTCAPTION as isize } else { HTCLIENT as isize });
@@ -643,7 +642,9 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_MOUSEMOVE => {
             let (x, y) = point();
             STATE.with(|s| {
-                if let Some(st) = s.borrow_mut().as_mut() {
+                if let Ok(mut guard) = s.try_borrow_mut()
+                    && let Some(st) = guard.as_mut()
+                {
                     if !st.tracking {
                         let mut t = TRACKMOUSEEVENT {
                             cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
@@ -666,7 +667,9 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_MOUSELEAVE => {
             STATE.with(|s| {
-                if let Some(st) = s.borrow_mut().as_mut() {
+                if let Ok(mut guard) = s.try_borrow_mut()
+                    && let Some(st) = guard.as_mut()
+                {
                     st.tracking = false;
                     st.set_hover(None);
                 }
@@ -675,7 +678,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             return LRESULT(0);
         }
         WM_SETCURSOR if (lp.0 & 0xffff) as u32 == HTCLIENT => {
-            let hand = STATE.with(|s| s.borrow().as_ref().is_some_and(|st| st.hover.is_some()));
+            let hand = STATE.with(|s| s.try_borrow().is_ok_and(|g| g.as_ref().is_some_and(|st| st.hover.is_some())));
             unsafe {
                 SetCursor(LoadCursorW(None, if hand { IDC_HAND } else { IDC_ARROW }).ok());
             }
@@ -683,9 +686,9 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_LBUTTONUP => {
             let (x, y) = point();
-            let mut pick = false;
+            let (mut pick, mut hide) = (false, false);
             STATE.with(|s| {
-                let mut state = s.borrow_mut();
+                let Ok(mut state) = s.try_borrow_mut() else { return };
                 let Some(st) = state.as_mut() else { return };
                 let custom = !st.config.save.folder.trim().is_empty();
                 let h = hit(&layout(width(), st.scale), x, y, custom);
@@ -693,9 +696,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     st.stop_capture();
                 }
                 match h {
-                    Some(Hit::Close) => unsafe {
-                        let _ = ShowWindow(hwnd, SW_HIDE);
-                    },
+                    Some(Hit::Close) => hide = true,
                     Some(Hit::Toggle(0)) => {
                         st.auto = !st.auto;
                         set_autostart(st.auto);
@@ -729,10 +730,17 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     None => {}
                 }
             });
-            // The dialog runs its own loop: no borrow may be held across it.
+            // Hiding and the dialog make Windows call back into `proc`: no borrow may be held across them.
+            if hide {
+                unsafe {
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                }
+            }
             if pick && let Some(folder) = pick_folder(hwnd) {
                 STATE.with(|s| {
-                    if let Some(st) = s.borrow_mut().as_mut() {
+                    if let Ok(mut guard) = s.try_borrow_mut()
+                    && let Some(st) = guard.as_mut()
+                {
                         st.config.save.folder = folder;
                         st.commit();
                     }
@@ -745,14 +753,13 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP => {
             let vk = wp.0 as u16;
             let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+            let mut hide = false;
             let handled = STATE.with(|s| {
-                let mut state = s.borrow_mut();
+                let Ok(mut state) = s.try_borrow_mut() else { return false };
                 let Some(st) = state.as_mut() else { return false };
                 let Some(i) = st.capturing else {
                     if down && vk == VK_ESCAPE.0 {
-                        unsafe {
-                            let _ = ShowWindow(hwnd, SW_HIDE);
-                        }
+                        hide = true;
                         return true;
                     }
                     return false;
@@ -786,6 +793,11 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 }
                 true
             });
+            if hide {
+                unsafe {
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                }
+            }
             if handled {
                 redraw();
                 return LRESULT(0);
@@ -793,7 +805,9 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_ACTIVATE if (wp.0 & 0xffff) as u32 == WA_INACTIVE => {
             STATE.with(|s| {
-                if let Some(st) = s.borrow_mut().as_mut() {
+                if let Ok(mut guard) = s.try_borrow_mut()
+                    && let Some(st) = guard.as_mut()
+                {
                     st.stop_capture();
                 }
             });
@@ -801,7 +815,9 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_CLOSE => {
             STATE.with(|s| {
-                if let Some(st) = s.borrow_mut().as_mut() {
+                if let Ok(mut guard) = s.try_borrow_mut()
+                    && let Some(st) = guard.as_mut()
+                {
                     st.stop_capture();
                 }
             });
@@ -813,7 +829,9 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_DPICHANGED => {
             let r = unsafe { &*(lp.0 as *const RECT) };
             STATE.with(|s| {
-                if let Some(st) = s.borrow_mut().as_mut() {
+                if let Ok(mut guard) = s.try_borrow_mut()
+                    && let Some(st) = guard.as_mut()
+                {
                     st.scale = (wp.0 & 0xffff) as f32 / 96.0;
                     st.fonts = None;
                 }

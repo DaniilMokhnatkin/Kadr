@@ -245,7 +245,7 @@ pub fn open(instance: HINSTANCE, anchor: Rect, content: Content) {
         });
     }
     STATE.with(|s| {
-        let mut state = s.borrow_mut();
+        let Ok(mut state) = s.try_borrow_mut() else { return Default::default() };
         let Some(st) = state.as_mut() else { return };
         let monitor = unsafe { MonitorFromPoint(POINT { x: anchor.left, y: anchor.top }, MONITOR_DEFAULTTONEAREST) };
         let (mut dx, mut dy) = (96u32, 96u32);
@@ -275,7 +275,7 @@ pub fn open(instance: HINSTANCE, anchor: Rect, content: Content) {
 /// New content for the open bubble; `anchor` moves it next to the text that was found.
 pub fn update(content: Content, anchor: Option<Rect>) {
     STATE.with(|s| {
-        let mut state = s.borrow_mut();
+        let Ok(mut state) = s.try_borrow_mut() else { return Default::default() };
         let Some(st) = state.as_mut() else { return };
         st.content = content;
         if let Some(a) = anchor {
@@ -291,12 +291,12 @@ pub fn update(content: Content, anchor: Option<Rect>) {
 }
 
 pub fn is_open() -> bool {
-    STATE.with(|s| s.borrow().as_ref().is_some_and(|st| unsafe { IsWindowVisible(st.hwnd) }.as_bool()))
+    STATE.with(|s| s.try_borrow().ok().as_deref().and_then(Option::as_ref).is_some_and(|st| unsafe { IsWindowVisible(st.hwnd) }.as_bool()))
 }
 
 pub fn close() {
     STATE.with(|s| {
-        if let Some(st) = s.borrow().as_ref() {
+        if let Some(st) = s.try_borrow().ok().as_deref().and_then(Option::as_ref) {
             unsafe {
                 let _ = ShowWindow(st.hwnd, SW_HIDE);
             }
@@ -455,7 +455,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_KEYDOWN if wp.0 == 'C' as usize => {
             STATE.with(|s| {
-                if let Some(st) = s.borrow_mut().as_mut() {
+                if let Ok(mut guard) = s.try_borrow_mut()
+                    && let Some(st) = guard.as_mut() {
                     copy_text(st);
                 }
             });
@@ -465,7 +466,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_MOUSEMOVE => {
             let (x, y) = point();
             STATE.with(|s| {
-                if let Some(st) = s.borrow_mut().as_mut() {
+                if let Ok(mut guard) = s.try_borrow_mut()
+                    && let Some(st) = guard.as_mut() {
                     let (w, _) = client_size(hwnd);
                     let (copy, close) = layout(w as f32, st.scale);
                     let now = st.epoch.elapsed().as_secs_f64();
@@ -482,7 +484,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let (x, y) = point();
             let mut hide = false;
             STATE.with(|s| {
-                if let Some(st) = s.borrow_mut().as_mut() {
+                if let Ok(mut guard) = s.try_borrow_mut()
+                    && let Some(st) = guard.as_mut() {
                     let (w, _) = client_size(hwnd);
                     let (copy, close) = layout(w as f32, st.scale);
                     if inside(close, x, y) {
@@ -507,7 +510,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut p);
             }
             let on_button = STATE.with(|s| {
-                s.borrow().as_ref().is_some_and(|st| {
+                s.try_borrow().ok().as_deref().and_then(Option::as_ref).is_some_and(|st| {
                     let (w, _) = client_size(hwnd);
                     let (copy, close) = layout(w as f32, st.scale);
                     inside(copy, p.x as f32, p.y as f32) || inside(close, p.x as f32, p.y as f32)
@@ -517,7 +520,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_TIMER if wp.0 == TIMER_COPIED => {
             STATE.with(|s| {
-                if let Some(st) = s.borrow_mut().as_mut() {
+                if let Ok(mut guard) = s.try_borrow_mut()
+                    && let Some(st) = guard.as_mut() {
                     st.copied = false;
                 }
             });

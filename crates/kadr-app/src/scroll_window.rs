@@ -127,7 +127,7 @@ pub fn open(instance: HINSTANCE, host: HWND, message: u32, area: Rect) {
         });
     }
     STATE.with(|s| {
-        let mut state = s.borrow_mut();
+        let Ok(mut state) = s.try_borrow_mut() else { return Default::default() };
         let Some(st) = state.as_mut() else { return };
         let monitor = unsafe { MonitorFromPoint(POINT { x: area.left, y: area.top }, MONITOR_DEFAULTTONEAREST) };
         let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
@@ -173,7 +173,8 @@ pub fn open(instance: HINSTANCE, host: HWND, message: u32, area: Rect) {
 
 pub fn update(height: usize, status: Status) {
     STATE.with(|s| {
-        if let Some(st) = s.borrow_mut().as_mut()
+        if let Ok(mut guard) = s.try_borrow_mut()
+                    && let Some(st) = guard.as_mut()
             && (st.height != height || st.status != status)
         {
             st.height = height;
@@ -187,7 +188,7 @@ pub fn update(height: usize, status: Status) {
 
 pub fn close() {
     STATE.with(|s| {
-        if let Some(st) = s.borrow().as_ref() {
+        if let Some(st) = s.try_borrow().ok().as_deref().and_then(Option::as_ref) {
             unsafe {
                 let _ = ShowWindow(st.hwnd, SW_HIDE);
             }
@@ -308,7 +309,7 @@ fn group(n: usize) -> String {
 
 fn request(r: Request) {
     REQUEST.with(|q| *q.borrow_mut() = Some(r));
-    if let Some((host, msg)) = STATE.with(|s| s.borrow().as_ref().map(|s| (s.host, s.message))) {
+    if let Some((host, msg)) = STATE.with(|s| s.try_borrow().ok().as_deref().and_then(Option::as_ref).map(|s| (s.host, s.message))) {
         unsafe {
             let _ = PostMessageW(Some(host), msg, WPARAM(0), LPARAM(0));
         }
@@ -338,7 +339,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 let _ = ScreenToClient(hwnd, &mut p);
             }
             let on = STATE.with(|s| {
-                s.borrow().as_ref().is_some_and(|st| {
+                s.try_borrow().ok().as_deref().and_then(Option::as_ref).is_some_and(|st| {
                     let (w, h) = client_size(hwnd);
                     inside(panel(st, w as f32, h as f32), p.x as f32, p.y as f32)
                 })
@@ -348,7 +349,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_MOUSEMOVE => {
             let (x, y) = point();
             STATE.with(|s| {
-                if let Some(st) = s.borrow_mut().as_mut() {
+                if let Ok(mut guard) = s.try_borrow_mut()
+                    && let Some(st) = guard.as_mut() {
                     let (w, h) = client_size(hwnd);
                     let (cancel, done) = buttons(panel(st, w as f32, h as f32), st.scale);
                     let now = st.epoch.elapsed().as_secs_f64();
@@ -366,7 +368,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_LBUTTONUP => {
             let (x, y) = point();
             let r = STATE.with(|s| {
-                let state = s.borrow();
+                let Ok(state) = s.try_borrow() else { return Default::default() };
                 let st = state.as_ref()?;
                 let (w, h) = client_size(hwnd);
                 let (cancel, done) = buttons(panel(st, w as f32, h as f32), st.scale);
