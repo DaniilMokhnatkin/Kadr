@@ -19,6 +19,7 @@ use crate::annotations::{self, Cache, View};
 use crate::gpu::{Gpu, Shared};
 use crate::theme::{Theme, dip};
 use kadr_doc::annotation::{COLORS, Tool};
+mod glyphs;
 
 struct Style {
     format: IDWriteTextFormat,
@@ -98,6 +99,8 @@ pub struct Magnifier {
 /// Кнопки панели у выделения. Основное действие — первое и единственное с заливкой.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolbarButton {
+    /// Padding/disabled controls consume input so the image behind the panel is never edited.
+    Surface,
     Copy,
     Save,
     SaveAs,
@@ -124,6 +127,7 @@ impl ToolbarButton {
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::Surface => "",
             Self::Copy => "Копировать",
             Self::Save => "Сохранить",
             Self::SaveAs => "Сохранить как…",
@@ -134,8 +138,8 @@ impl ToolbarButton {
             Self::Color(_) => "Цвет",
             Self::Width => "Толщина",
             Self::Strength => "Сила",
-            Self::Undo => "Назад Z",
-            Self::Redo => "Повтор Y",
+            Self::Undo => "Отменить · Ctrl+Z",
+            Self::Redo => "Повторить · Ctrl+Y",
         }
     }
 }
@@ -281,6 +285,7 @@ pub fn draw(
 struct ToolbarLayout {
     panel: D2D_RECT_F,
     buttons: Vec<(ToolbarButton, D2D_RECT_F, Text)>,
+    context: Option<Text>,
 }
 #[derive(Clone, PartialEq)]
 struct ToolbarKey {
@@ -329,89 +334,150 @@ fn build_toolbar_layout(
         return Ok(None);
     }
     let s = scale;
-    let (pad, gap) = (dip::SPACE_1 * s, dip::SPACE_1 * s);
-    let (button_x, button_y) = (dip::SPACE_3 * s, dip::SPACE_2 * s);
-    let offset = (dip::SPACE_2 + dip::FRAME + dip::FRAME_OUTLINE) * s;
-
-    let labels = ToolbarButton::ALL
-        .iter()
-        .map(|b| Ok((*b, measure(shared, &text.button, b.label())?)))
-        .collect::<Result<Vec<_>>>()?;
-    let button_h = (labels.iter().map(|(_, t)| t.h).fold(0.0, f32::max) + button_y * 2.0).ceil();
-    let widths: Vec<f32> = labels.iter().map(|(_, t)| (t.w + button_x * 2.0).ceil()).collect();
-    let export_w = pad * 2.0 + widths.iter().copied().fold(0.0, f32::max) * 3.0 + gap * 2.0;
-    let columns = 7usize;
-    let editor_w = if editor.is_some() {
-        (660.0 * s).min(w - 8.0 * s)
-    } else {
-        0.0
+    let pad = 12.0 * s;
+    let gap = 4.0 * s;
+    let side = 40.0 * s;
+    let panel_w = (544.0 * s).min((w - 16.0 * s).max(1.0));
+    let content_w = (panel_w - 2.0 * pad).max(side);
+    let mut buttons = Vec::new();
+    let empty = measure(shared, &text.button, "")?;
+    let mut top = pad;
+    let mut row = |items: Vec<(ToolbarButton, String, f32)>, row_gap: f32| -> Result<()> {
+        let mut left = pad;
+        for (button, value, width) in items {
+            if left + width > panel_w - pad + 0.1 && left > pad {
+                left = pad;
+                top += side + gap;
+            }
+            if button == ToolbarButton::Copy {
+                left = panel_w - pad - width;
+            }
+            buttons.push((
+                button,
+                rect(left, top, left + width, top + side),
+                if value.is_empty() {
+                    empty.clone()
+                } else {
+                    measure(shared, &text.button, &value)?
+                },
+            ));
+            left += width + row_gap;
+        }
+        top += side + 8.0 * s;
+        Ok(())
     };
-    let panel_w = export_w.max(editor_w).min(w);
-    let extra = if editor.is_some() {
-        3.0 * (button_h + gap) + 24.0 * s
+    if let Some(e) = editor {
+        // Four blur variants share one entry until the user selects the blur family.
+        let tools = [
+            Tool::Select,
+            Tool::Arrow,
+            Tool::Line,
+            Tool::Rectangle,
+            Tool::Ellipse,
+            Tool::Pen,
+            Tool::Marker,
+            Tool::Text,
+            Tool::Counter,
+            Tool::Blur,
+            Tool::Redact,
+        ];
+        row(
+            tools
+                .into_iter()
+                .map(|t| (ToolbarButton::Tool(t), String::new(), side))
+                .collect(),
+            8.0 * s,
+        )?;
+        if e.tool != Tool::Select {
+            let mut properties = Vec::new();
+            if e.tool.is_blur() {
+                for tool in [Tool::Blur, Tool::BlurEllipse, Tool::BlurBrush, Tool::Spotlight] {
+                    properties.push((ToolbarButton::Tool(tool), String::new(), side));
+                }
+                properties.push((ToolbarButton::Strength, format!("Сила {}", e.strength + 1), 88.0 * s));
+                if e.tool == Tool::BlurBrush {
+                    properties.push((ToolbarButton::Width, format!("{} px", e.width), 72.0 * s));
+                }
+            } else {
+                for i in 0..COLORS.len() {
+                    properties.push((ToolbarButton::Color(i), String::new(), 32.0 * s));
+                }
+                if e.tool != Tool::Redact {
+                    properties.push((ToolbarButton::Width, format!("{} px", e.width), 76.0 * s));
+                }
+            }
+            row(properties, gap)?;
+        }
+    }
+    let actions = if editor.is_some() {
+        vec![
+            ToolbarButton::Undo,
+            ToolbarButton::Redo,
+            ToolbarButton::Recent,
+            ToolbarButton::Pin,
+            ToolbarButton::SaveAs,
+            ToolbarButton::Save,
+            ToolbarButton::Close,
+            ToolbarButton::Copy,
+        ]
     } else {
-        0.0
+        vec![
+            ToolbarButton::Recent,
+            ToolbarButton::Pin,
+            ToolbarButton::SaveAs,
+            ToolbarButton::Save,
+            ToolbarButton::Close,
+            ToolbarButton::Copy,
+        ]
     };
-    let panel_h = button_h * 2.0 + gap + pad * 2.0 + extra;
-
+    row(
+        actions
+            .into_iter()
+            .map(|b| {
+                (
+                    b,
+                    if b == ToolbarButton::Copy {
+                        "Копировать".into()
+                    } else {
+                        String::new()
+                    },
+                    if b == ToolbarButton::Copy {
+                        (120.0 * s).min(content_w)
+                    } else {
+                        side
+                    },
+                )
+            })
+            .collect(),
+        gap,
+    )?;
+    let panel_h = top - 8.0 * s + pad;
+    let offset = 12.0 * s;
     let mut y = sel.bottom + offset;
     if y + panel_h > h {
         y = sel.top - offset - panel_h;
     }
-    if y < 0.0 {
+    if y < 8.0 * s {
         y = sel.bottom - offset - panel_h;
     }
-    let x = (sel.right - panel_w).clamp(0.0, (w - panel_w).max(0.0)).round();
-    let y = y.clamp(0.0, (h - panel_h).max(0.0)).round();
-
-    let cell = (panel_w - pad * 2.0 - gap * 2.0) / 3.0;
-    let mut buttons: Vec<_> = labels
-        .into_iter()
-        .enumerate()
-        .map(|(i, (button, label))| {
-            let left = x + pad + (i % 3) as f32 * (cell + gap);
-            let top = y + pad + extra + (i / 3) as f32 * (button_h + gap);
-            let r = rect(left, top, left + cell, top + button_h);
-            (button, r, label)
-        })
-        .collect();
-    if let Some(editor) = editor {
-        let cell = (panel_w - 2.0 * pad - gap * (columns - 1) as f32) / columns as f32;
-        for (i, tool) in Tool::ALL.into_iter().enumerate() {
-            let l = x + pad + (i % columns) as f32 * (cell + gap);
-            let t = y + pad + (i / columns) as f32 * (button_h + gap);
-            buttons.push((
-                ToolbarButton::Tool(tool),
-                rect(l, t, l + cell, t + button_h),
-                measure(shared, &text.label, tool.label())?,
-            ));
-        }
-        let t = y + pad + 2.0 * (button_h + gap);
-        let mut l = x + pad;
-        for i in 0..COLORS.len() {
-            let cw = 26.0 * s;
-            buttons.push((
-                ToolbarButton::Color(i),
-                rect(l, t, l + cw, t + button_h),
-                measure(shared, &text.button, "")?,
-            ));
-            l += cw + gap;
-        }
-        for (button, label) in [
-            (ToolbarButton::Width, format!("{} px", editor.width)),
-            (ToolbarButton::Strength, format!("Сила {}", editor.strength + 1)),
-            (ToolbarButton::Undo, "Назад Z".into()),
-            (ToolbarButton::Redo, "Повтор Y".into()),
-        ] {
-            let label = measure(shared, &text.button, &label)?;
-            let bw = label.w + button_x * 2.0;
-            buttons.push((button, rect(l, t, l + bw, t + button_h), label));
-            l += bw + gap;
-        }
+    let x = ((sel.left + sel.right - panel_w) / 2.0)
+        .clamp(8.0 * s, (w - panel_w - 8.0 * s).max(8.0 * s))
+        .round();
+    let y = y.clamp(8.0 * s, (h - panel_h - 8.0 * s).max(8.0 * s)).round();
+    for (_, r, _) in &mut buttons {
+        r.left += x;
+        r.right += x;
+        r.top += y;
+        r.bottom += y;
     }
+    let context = editor
+        .filter(|e| e.tool != Tool::Select)
+        .map(|e| measure(shared, &text.label, e.tool.label()))
+        .transpose()?;
     Ok(Some(ToolbarLayout {
         panel: rect(x, y, x + panel_w, y + panel_h),
         buttons,
+        context,
     }))
 }
 
@@ -438,11 +504,20 @@ pub fn toolbar_hit(
     );
     let layout = toolbar_layout(shared, text, size, scale, sel, editor).ok()??;
     let (x, y) = ((at.0 - ox) as f32, (at.1 - oy) as f32);
-    layout
+    if let Some((button, _, _)) = layout
         .buttons
-        .into_iter()
+        .iter()
         .find(|(_, r, _)| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
-        .map(|(b, _, _)| b)
+    {
+        let disabled = editor.is_some_and(|e| match button {
+            ToolbarButton::Undo => !e.undo,
+            ToolbarButton::Redo => !e.redo,
+            _ => false,
+        });
+        return Some(if disabled { ToolbarButton::Surface } else { *button });
+    }
+    let r = layout.panel;
+    (x >= r.left && x < r.right && y >= r.top && y < r.bottom).then_some(ToolbarButton::Surface)
 }
 
 /// Основное действие — белая заливка (editorial: «filled white on black»), остальные — текстом,
@@ -464,73 +539,142 @@ fn draw_toolbar(
     panel(gpu, theme, layout.panel, dip::RADIUS_MD * s, s);
     for (button, r, label) in &layout.buttons {
         let hovered = toolbar.hovered == Some(*button);
-        if let ToolbarButton::Color(index) = button {
-            let c = COLORS[*index];
+        let enabled = toolbar.editor.is_none_or(|e| match button {
+            ToolbarButton::Undo => e.undo,
+            ToolbarButton::Redo => e.redo,
+            _ => true,
+        });
+        let selected = matches!(button, ToolbarButton::Tool(tool) if toolbar.editor.is_some_and(|e| e.tool==*tool || (*tool==Tool::Blur && e.tool.is_blur() && (r.top-layout.panel.top-12.0*s).abs()<0.1)));
+        if let ToolbarButton::Color(i) = button {
+            let c = COLORS[*i];
             let ink = D2D1_COLOR_F {
                 r: c[0] as f32 / 255.0,
                 g: c[1] as f32 / 255.0,
                 b: c[2] as f32 / 255.0,
                 a: 1.0,
             };
-            let swatch = rect(r.left + 5.0 * s, r.top + 7.0 * s, r.right - 5.0 * s, r.bottom - 7.0 * s);
-            fill(gpu, ink, swatch);
-            ring(gpu, theme.text_muted, swatch, s);
-            if toolbar.editor.is_some_and(|e| e.color == *index) {
-                ring(gpu, theme.text, *r, 2.0 * s);
+            if hovered || toolbar.editor.is_some_and(|e| e.color == *i) {
+                fill_rounded(gpu, theme.control, *r, 8.0 * s);
+            }
+            let cx = (r.left + r.right) / 2.0;
+            let cy = (r.top + r.bottom) / 2.0;
+            unsafe {
+                let e = windows::Win32::Graphics::Direct2D::D2D1_ELLIPSE {
+                    point: Vector2::new(cx, cy),
+                    radiusX: 9.0 * s,
+                    radiusY: 9.0 * s,
+                };
+                gpu.brush.SetColor(&ink);
+                gpu.d2d.FillEllipse(&e, &gpu.brush);
+                gpu.brush.SetColor(&theme.text_muted);
+                gpu.d2d.DrawEllipse(&e, &gpu.brush, 0.7 * s, None::<&ID2D1StrokeStyle>);
+                if toolbar.editor.is_some_and(|e| e.color == *i) {
+                    let e = windows::Win32::Graphics::Direct2D::D2D1_ELLIPSE {
+                        radiusX: 12.0 * s,
+                        radiusY: 12.0 * s,
+                        ..e
+                    };
+                    gpu.brush.SetColor(&theme.text);
+                    gpu.d2d.DrawEllipse(&e, &gpu.brush, 1.5 * s, None::<&ID2D1StrokeStyle>);
+                }
             }
             continue;
         }
-        let selected = matches!(button,ToolbarButton::Tool(tool) if toolbar.editor.is_some_and(|e|e.tool==*tool));
-        if selected {
-            fill_rounded(gpu, theme.border, *r, dip::RADIUS_SM * s);
-            ring(gpu, theme.text, *r, s);
-        }
-        let enabled = toolbar.editor.is_none_or(|e| match button {
-            ToolbarButton::Undo => e.undo,
-            ToolbarButton::Redo => e.redo,
-            _ => true,
-        });
         let ink = if !enabled {
-            theme.text_muted
+            theme.disabled
         } else if *button == ToolbarButton::Copy {
-            fill_rounded(
-                gpu,
-                if hovered { theme.text } else { theme.frame },
-                *r,
-                dip::RADIUS_SM * s,
-            );
-            theme.surface
+            fill_rounded(gpu, theme.accent, *r, 10.0 * s);
+            theme.on_accent
+        } else if selected {
+            fill_rounded(gpu, theme.selected, *r, 8.0 * s);
+            unsafe {
+                gpu.brush.SetColor(&theme.on_selected);
+                gpu.d2d.DrawRoundedRectangle(
+                    &D2D1_ROUNDED_RECT {
+                        rect: inflate(*r, -s),
+                        radiusX: 7.0 * s,
+                        radiusY: 7.0 * s,
+                    },
+                    &gpu.brush,
+                    1.0 * s,
+                    None::<&ID2D1StrokeStyle>,
+                );
+            }
+            theme.on_selected
         } else {
             if hovered {
-                fill_rounded(gpu, theme.border, *r, dip::RADIUS_SM * s);
+                fill_rounded(gpu, theme.control, *r, 8.0 * s);
             }
             theme.text
         };
-        draw_text(
-            gpu,
-            label,
-            r.left + (r.right - r.left - label.w) / 2.0,
-            r.top + (r.bottom - r.top - label.h) / 2.0,
-            ink,
-        );
-    }
-    if let Some(editor) = toolbar.editor {
-        let hint = if editor.tool.is_blur() {
-            "Размытие скрывает детали · Для паролей используйте «Скрыть»"
-        } else if editor.tool == Tool::Text {
-            "Введите текст · Enter — готово · Shift+Enter — строка · Esc — отменить"
+        if label.w > 0.0 {
+            draw_text(
+                gpu,
+                label,
+                r.left + (r.right - r.left - label.w) / 2.0,
+                r.top + (r.bottom - r.top - label.h) / 2.0,
+                ink,
+            );
         } else {
-            "Ctrl+D — закрепить · Ctrl+H — недавние · Tab — инструмент · 1–6 — цвет"
+            glyphs::draw(gpu, *button, *r, ink, s);
+        }
+    }
+    if let Some(context) = &layout.context {
+        let properties: Vec<_> = layout
+            .buttons
+            .iter()
+            .filter(|(b, _, _)| {
+                matches!(
+                    b,
+                    ToolbarButton::Color(_) | ToolbarButton::Width | ToolbarButton::Strength
+                )
+            })
+            .collect();
+        if let Some((_, r, _)) = properties.first() {
+            let end = properties.iter().map(|(_, r, _)| r.right).fold(0.0, f32::max);
+            let x = layout.panel.right - 16.0 * s - context.w;
+            if x > end + 16.0 * s {
+                draw_text(
+                    gpu,
+                    context,
+                    x,
+                    r.top + (r.bottom - r.top - context.h) / 2.0,
+                    theme.text_muted,
+                );
+            }
+        }
+    }
+    // Reveal the control name and shortcut on demand; no permanent wall of instructions.
+    if let Some(hovered) = toolbar.hovered.filter(|b| *b != ToolbarButton::Surface) {
+        let value = match hovered {
+            ToolbarButton::Copy => "Копировать · Enter / Ctrl+C".into(),
+            ToolbarButton::Save => "Сохранить · Ctrl+S".into(),
+            ToolbarButton::SaveAs => "Сохранить как… · Ctrl+Shift+S".into(),
+            ToolbarButton::Pin => "Закрепить · Ctrl+D".into(),
+            ToolbarButton::Recent => "Недавние · Ctrl+H".into(),
+            ToolbarButton::Close => "Закрыть · Esc".into(),
+            ToolbarButton::Width => "Толщина · [ / ] · колесо".into(),
+            ToolbarButton::Strength => "Сила размытия · колесо".into(),
+            ToolbarButton::Color(i) => format!("Цвет · {}", i + 1),
+            _ => hovered.label().into(),
         };
-        let hint = measure(shared, &text.label, hint)?;
-        let export_top = layout.buttons[0].1.top;
-        draw_text(
-            gpu,
-            &hint,
-            layout.panel.left + 8.0 * s,
-            export_top - 22.0 * s,
-            theme.text_muted,
-        );
+        let tip = measure(shared, &text.label, &value)?;
+        let rw = tip.w + 24.0 * s;
+        let rh = tip.h + 16.0 * s;
+        // A keyboard tool change can remove the previously hovered property before the mouse moves.
+        let Some((_, target, _)) = layout.buttons.iter().find(|b| b.0 == hovered) else {
+            return Ok(());
+        };
+        let x = ((target.left + target.right - rw) / 2.0).clamp(8.0 * s, (size.0 - rw - 8.0 * s).max(8.0 * s));
+        let y = if layout.panel.top > rh + 16.0 * s {
+            layout.panel.top - rh - 8.0 * s
+        } else {
+            layout.panel.bottom + 8.0 * s
+        };
+        if y + rh <= size.1 {
+            panel(gpu, theme, rect(x, y, x + rw, y + rh), 8.0 * s, s);
+            draw_text(gpu, &tip, x + 12.0 * s, y + 8.0 * s, theme.text);
+        }
     }
     Ok(())
 }
@@ -1030,6 +1174,215 @@ fn intersect(a: D2D_RECT_F, b: D2D_RECT_F) -> Option<D2D_RECT_F> {
 #[cfg(test)]
 mod toolbar_tests {
     use super::*;
+    #[test]
+    fn changing_tool_while_a_property_is_hovered_does_not_crash_the_next_frame() {
+        use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+        let shared = Shared::new().unwrap();
+        let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1().unwrap() };
+        let gpu = Gpu::new(
+            &shared,
+            &unsafe { factory.EnumAdapters1(0).unwrap() },
+            "stale hover".into(),
+        )
+        .unwrap();
+        let text = TextStyles::new(&shared, 1.0).unwrap();
+        let scene = Scene {
+            frame: None,
+            origin: (0, 0),
+            size: (1280, 720),
+            scale: 1.0,
+            marks: Marks::default(),
+        };
+        let bar = Toolbar {
+            hovered: Some(ToolbarButton::Width),
+            editor: Some(EditorBar {
+                tool: Tool::Select,
+                color: 0,
+                width: 3,
+                strength: 1,
+                undo: false,
+                redo: false,
+            }),
+        };
+        unsafe {
+            let target = gpu
+                .d2d
+                .CreateBitmap(
+                    windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_U {
+                        width: 1280,
+                        height: 720,
+                    },
+                    None,
+                    0,
+                    &crate::gpu::bitmap_props(windows::Win32::Graphics::Direct2D::D2D1_BITMAP_OPTIONS_TARGET),
+                )
+                .unwrap();
+            gpu.d2d.SetTarget(&target);
+            gpu.d2d.BeginDraw();
+            draw_toolbar(
+                &gpu,
+                &shared,
+                &text,
+                &Theme::current(),
+                &scene,
+                rect(100.0, 100.0, 900.0, 500.0),
+                bar,
+            )
+            .unwrap();
+            gpu.d2d.EndDraw(None, None).unwrap();
+        }
+    }
+    #[test]
+    fn background_and_disabled_controls_consume_pointer_input() {
+        let shared = Shared::new().unwrap();
+        let text = TextStyles::new(&shared, 1.0).unwrap();
+        let e = Some(EditorBar {
+            tool: Tool::Select,
+            color: 0,
+            width: 3,
+            strength: 1,
+            undo: false,
+            redo: false,
+        });
+        let r = RECT {
+            left: 0,
+            top: 0,
+            right: 1280,
+            bottom: 720,
+        };
+        let sel = RECT {
+            left: 100,
+            top: 100,
+            right: 900,
+            bottom: 500,
+        };
+        let l = toolbar_layout(
+            &shared,
+            &text,
+            (1280.0, 720.0),
+            1.0,
+            rect(100.0, 100.0, 900.0, 500.0),
+            e,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            toolbar_hit(
+                &shared,
+                &text,
+                r,
+                1.0,
+                sel,
+                (l.panel.left as i32 + 5, l.panel.top as i32 + 5),
+                e
+            ),
+            Some(ToolbarButton::Surface)
+        );
+        let undo = l.buttons.iter().find(|b| b.0 == ToolbarButton::Undo).unwrap().1;
+        assert_eq!(
+            toolbar_hit(
+                &shared,
+                &text,
+                r,
+                1.0,
+                sel,
+                ((undo.left + undo.right) as i32 / 2, (undo.top + undo.bottom) as i32 / 2),
+                e
+            ),
+            Some(ToolbarButton::Surface)
+        );
+    }
+    #[test]
+    fn properties_are_contextual_and_selection_toolbar_is_compact() {
+        let shared = Shared::new().unwrap();
+        let text = TextStyles::new(&shared, 1.0).unwrap();
+        let editor = EditorBar {
+            tool: Tool::Select,
+            color: 0,
+            width: 3,
+            strength: 1,
+            undo: false,
+            redo: false,
+        };
+        let layout = toolbar_layout(
+            &shared,
+            &text,
+            (1280.0, 720.0),
+            1.0,
+            rect(100.0, 100.0, 900.0, 500.0),
+            Some(editor),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            layout.panel.bottom - layout.panel.top <= 116.0,
+            "selection UI must leave the image room"
+        );
+        assert!(!layout.buttons.iter().any(|b| matches!(
+            b.0,
+            ToolbarButton::Color(_) | ToolbarButton::Width | ToolbarButton::Strength
+        )));
+        let blur = toolbar_layout(
+            &shared,
+            &text,
+            (1280.0, 720.0),
+            1.0,
+            rect(100.0, 100.0, 900.0, 500.0),
+            Some(EditorBar {
+                tool: Tool::Blur,
+                ..editor
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(blur.buttons.iter().any(|b| b.0 == ToolbarButton::Strength));
+        assert!(
+            !blur
+                .buttons
+                .iter()
+                .any(|b| matches!(b.0, ToolbarButton::Color(_) | ToolbarButton::Width))
+        );
+    }
+
+    #[test]
+    fn toolbar_targets_stay_inside_the_panel_on_small_surfaces_and_at_two_hundred_percent() {
+        let shared = Shared::new().unwrap();
+        for s in [1.0, 1.5, 2.0] {
+            let text = TextStyles::new(&shared, s).unwrap();
+            for width in [360.0, 640.0, 1280.0] {
+                for tool in Tool::ALL {
+                    let editor = EditorBar {
+                        tool,
+                        color: 0,
+                        width: 3,
+                        strength: 1,
+                        undo: true,
+                        redo: false,
+                    };
+                    let layout = toolbar_layout(
+                        &shared,
+                        &text,
+                        (width * s, 720.0 * s),
+                        s,
+                        rect(20.0 * s, 20.0 * s, 320.0 * s, 680.0 * s),
+                        Some(editor),
+                    )
+                    .unwrap()
+                    .unwrap();
+                    for (_, r, _) in &layout.buttons {
+                        assert!(
+                            r.left >= layout.panel.left
+                                && r.right <= layout.panel.right + 0.1
+                                && r.top >= layout.panel.top
+                                && r.bottom <= layout.panel.bottom,
+                            "{tool:?} control escaped its panel at {width} DIP"
+                        );
+                        assert!(r.right - r.left >= 28.0 * s && r.bottom - r.top >= 28.0 * s);
+                    }
+                }
+            }
+        }
+    }
     #[test]
     fn all_actions_have_a_visible_non_overlapping_hit_target_at_each_dpi() {
         let shared = Shared::new().unwrap();

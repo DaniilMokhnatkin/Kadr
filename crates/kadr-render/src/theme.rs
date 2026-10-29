@@ -1,6 +1,5 @@
-//! Токены дизайна. Направление — editorial / Vercel (awesome-claude-design): чистый грейскейл,
-//! рамки в 1 px, радиусы ≤ 8, без теней и градиентов. Цвет на экране только у самого скрина —
-//! это данные (taste-skill: «colour goes on data, not chrome»), хром его не повторяет и с ним не спорит.
+//! Kadr / Porcelain. Apple reference: quiet light surfaces, optical spacing, one action tint.
+//! Opaque materials keep contrast independent of the screenshot and preserve the input budget.
 //! Контраст проверен по правилам ui-ux-pro-max (текст ≥ 4.5:1, не-текстовые элементы ≥ 3:1).
 //! В коде отрисовки — только роли отсюда, никаких «сырых» цветов.
 
@@ -20,12 +19,18 @@ pub struct Theme {
     /// Непрозрачные панели (HUD, подпись размера): контраст текста не зависит от скрина под ними.
     pub surface: D2D1_COLOR_F,
     pub border: D2D1_COLOR_F,
-    /// Основной текст и цифры: 16:1 на `surface`.
+    pub control: D2D1_COLOR_F,
+    pub selected: D2D1_COLOR_F,
+    pub on_selected: D2D1_COLOR_F,
+    pub accent: D2D1_COLOR_F,
+    pub on_accent: D2D1_COLOR_F,
+    pub disabled: D2D1_COLOR_F,
+    /// Основной текст и цифры.
     pub text: D2D1_COLOR_F,
-    /// Подписи и единицы: 7.3:1 на `surface`.
+    /// Вторичный текст с контрастом не менее 4.5:1 на surface и control.
     pub text_muted: D2D1_COLOR_F,
     /// Рамка выделения. Снаружи неё всегда затемнение, поэтому белая линия контрастна
-    /// на любом скрине (от 3.6:1 на белом до 21:1 на чёрном).
+    /// на любом скрине (от 3:1 на белом до 21:1 на чёрном).
     pub frame: D2D1_COLOR_F,
     /// Тёмная волосяная линия снаружи рамки: отделяет её от светлого содержимого.
     pub frame_outline: D2D1_COLOR_F,
@@ -33,16 +38,26 @@ pub struct Theme {
 
 impl Theme {
     pub fn current() -> Self {
-        if high_contrast_on() { Self::high_contrast() } else { Self::editorial() }
+        if high_contrast_on() {
+            Self::high_contrast()
+        } else {
+            Self::porcelain()
+        }
     }
 
-    fn editorial() -> Self {
+    fn porcelain() -> Self {
         Self {
-            scrim: rgb(0x000000, 0.5),
-            surface: rgb(0x111111, 1.0),
-            border: rgb(0x2e2e2e, 1.0),
-            text: rgb(0xededed, 1.0),
-            text_muted: rgb(0xa1a1a1, 1.0),
+            scrim: rgb(0x000000, 0.42),
+            surface: rgb(0xfafafc, 1.0),
+            border: rgb(0xd6d6dc, 1.0),
+            control: rgb(0xeeeef2, 1.0),
+            selected: rgb(0xe0edff, 1.0),
+            on_selected: rgb(0x005fcc, 1.0),
+            accent: rgb(0x005fcc, 1.0),
+            on_accent: rgb(0xffffff, 1.0),
+            disabled: rgb(0x929298, 1.0),
+            text: rgb(0x1d1d1f, 1.0),
+            text_muted: rgb(0x636369, 1.0),
             frame: rgb(0xffffff, 1.0),
             frame_outline: rgb(0x000000, 0.6),
         }
@@ -56,6 +71,12 @@ impl Theme {
             scrim: rgb(0x000000, 0.5),
             surface: window,
             border: text,
+            control: window,
+            selected: sys(COLOR_HIGHLIGHT),
+            on_selected: sys(windows::Win32::Graphics::Gdi::COLOR_HIGHLIGHTTEXT),
+            accent: sys(COLOR_HIGHLIGHT),
+            on_accent: sys(windows::Win32::Graphics::Gdi::COLOR_HIGHLIGHTTEXT),
+            disabled: text,
             text,
             text_muted: text,
             frame: sys(COLOR_HIGHLIGHT),
@@ -64,7 +85,7 @@ impl Theme {
     }
 }
 
-/// Размеры в DIP: при отрисовке умножаются на масштаб монитора. Сетка 4 px, радиусы ≤ 8.
+/// Размеры в DIP: при отрисовке умножаются на масштаб монитора. Сетка 4/8 px.
 pub mod dip {
     /// Роль focus ring: 2–4 px (ui-ux-pro-max). 1.5 DIP = 2 px при 100–150 %, 3 px при 200 %.
     pub const FRAME: f32 = 1.5;
@@ -74,15 +95,15 @@ pub mod dip {
     /// Насколько далеко от границы выделения курсор ещё «берёт» сторону или угол.
     pub const GRAB: f32 = 8.0;
     pub const BORDER: f32 = 1.0;
-    pub const RADIUS_SM: f32 = 4.0;
-    pub const RADIUS_MD: f32 = 8.0;
+    pub const RADIUS_SM: f32 = 8.0;
+    pub const RADIUS_MD: f32 = 14.0;
     pub const SPACE_1: f32 = 4.0;
     pub const SPACE_2: f32 = 8.0;
     pub const SPACE_3: f32 = 12.0;
     pub const SPACE_4: f32 = 16.0;
     /// Подписи и цифры. Не мельче 12: текст меньше 12 px ui-ux-pro-max считает антипаттерном.
-    pub const TEXT: f32 = 12.0;
-    pub const TITLE: f32 = 13.0;
+    pub const TEXT: f32 = 13.0;
+    pub const TITLE: f32 = 14.0;
     /// Главная цифра панели — ответ на её вопрос, вдвое крупнее остальных.
     pub const LEAD: f32 = 24.0;
 }
@@ -111,7 +132,10 @@ fn sys(index: SYS_COLOR_INDEX) -> D2D1_COLOR_F {
 }
 
 fn high_contrast_on() -> bool {
-    let mut hc = HIGHCONTRASTW { cbSize: size_of::<HIGHCONTRASTW>() as u32, ..Default::default() };
+    let mut hc = HIGHCONTRASTW {
+        cbSize: size_of::<HIGHCONTRASTW>() as u32,
+        ..Default::default()
+    };
     let ok = unsafe {
         SystemParametersInfoW(
             SPI_GETHIGHCONTRAST,
@@ -122,4 +146,39 @@ fn high_contrast_on() -> bool {
     }
     .is_ok();
     ok && hc.dwFlags.contains(HCF_HIGHCONTRASTON)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn contrast(a: D2D1_COLOR_F, b: D2D1_COLOR_F) -> f32 {
+        let luminance = |c: D2D1_COLOR_F| {
+            let f = |v: f32| {
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b)
+        };
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+    #[test]
+    fn porcelain_text_and_selected_and_primary_controls_keep_their_contrast() {
+        let t = Theme::porcelain();
+        for (ink, paper) in [
+            (t.text, t.surface),
+            (t.text_muted, t.surface),
+            (t.text, t.control),
+            (t.text_muted, t.control),
+            (t.on_accent, t.accent),
+            (t.on_selected, t.selected),
+        ] {
+            assert!(contrast(ink, paper) >= 4.5);
+        }
+        let hc = Theme::high_contrast();
+        assert_eq!(hc.on_selected, sys(windows::Win32::Graphics::Gdi::COLOR_HIGHLIGHTTEXT));
+    }
 }

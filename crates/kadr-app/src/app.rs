@@ -1191,6 +1191,7 @@ impl App {
 
     fn press(&mut self, button: ToolbarButton) {
         match button {
+            ToolbarButton::Surface => {}
             ToolbarButton::Copy => self.export(Export::Copy),
             ToolbarButton::Save => self.export(Export::Save),
             ToolbarButton::SaveAs => self.export(Export::SaveAs),
@@ -1203,8 +1204,18 @@ impl App {
 
     /// Курсор над оверлеем: рука над кнопками, крестик, перенос или стрелки размера над маркерами.
     fn cursor_for(&self) -> Option<HCURSOR> {
-        if self.toolbar_at(cursor_pos()).is_some() {
-            return unsafe { LoadCursorW(None, IDC_HAND) }.ok();
+        if let Some(button) = self.toolbar_at(cursor_pos()) {
+            return unsafe {
+                LoadCursorW(
+                    None,
+                    if button == ToolbarButton::Surface {
+                        IDC_ARROW
+                    } else {
+                        IDC_HAND
+                    },
+                )
+            }
+            .ok();
         }
         let active = self.active.as_ref()?;
         if active.drawing.tool != kadr_doc::annotation::Tool::Select {

@@ -28,20 +28,20 @@ impl Tool {
     }
     pub fn label(self) -> &'static str {
         match self {
-            Self::Select => "Выбор V",
-            Self::Arrow => "Стрелка A",
-            Self::Line => "Линия L",
-            Self::Rectangle => "Рамка R",
-            Self::Ellipse => "Овал O",
-            Self::Pen => "Перо P",
-            Self::Marker => "Маркер M",
-            Self::Text => "Текст T",
-            Self::Counter => "Шаг N",
-            Self::Blur => "Размыть B",
-            Self::BlurEllipse => "Блюр-овал E",
-            Self::BlurBrush => "Кисть U",
-            Self::Spotlight => "Всё кроме I",
-            Self::Redact => "Скрыть X",
+            Self::Select => "Выбор · V",
+            Self::Arrow => "Стрелка · A",
+            Self::Line => "Линия · L",
+            Self::Rectangle => "Рамка · R",
+            Self::Ellipse => "Овал · O",
+            Self::Pen => "Перо · P",
+            Self::Marker => "Маркер · M",
+            Self::Text => "Текст · T",
+            Self::Counter => "Нумерация · N",
+            Self::Blur => "Размытие · B",
+            Self::BlurEllipse => "Размытие овалом · E",
+            Self::BlurBrush => "Кисть размытия · U",
+            Self::Spotlight => "Размытие вокруг · I",
+            Self::Redact => "Скрыть · X",
         }
     }
     pub const ALL: [Tool; 14] = [
