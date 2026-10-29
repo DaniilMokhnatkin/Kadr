@@ -11,6 +11,7 @@
 
 mod app;
 mod capture_mode;
+mod chrome;
 mod config_watch;
 mod icons;
 mod interaction_bench;
@@ -34,6 +35,13 @@ fn main() {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let flag = |name: &str| args.iter().position(|a| a == name);
+    if let Some(i) = flag("--design-snapshots") {
+        if let Err(e) = snapshot::design_set(args.get(i + 1).map_or("design-snapshots", String::as_str)) {
+            kadr_win::log_warn!("design snapshots: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Some(i) = flag("--interaction-bench") {
         let path = args.get(i + 1).map_or("interaction-bench.txt", String::as_str);
         if let Err(e) = interaction_bench::run(path) {

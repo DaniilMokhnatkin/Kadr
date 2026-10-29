@@ -23,6 +23,9 @@ use kadr_render::theme::Theme;
 const BANDS: [u32; 5] = [0xffffff, 0xd4d4d8, 0x777777, 0x5e6ad2, 0x000000];
 
 pub fn run(path: &str, scale: f32, editor: bool) -> Result<(), Box<dyn Error>> {
+    run_tool(path, scale, editor, kadr_doc::annotation::Tool::Arrow)
+}
+fn run_tool(path: &str, scale: f32, editor: bool, tool: kadr_doc::annotation::Tool) -> Result<(), Box<dyn Error>> {
     if !(0.5..=3.0).contains(&scale) {
         return Err("масштаб должен быть от 0.5 до 3".into());
     }
@@ -78,7 +81,7 @@ pub fn run(path: &str, scale: f32, editor: bool) -> Result<(), Box<dyn Error>> {
                 toolbar: Some(Toolbar {
                     hovered: Some(ToolbarButton::Save),
                     editor: editor.then_some(scene::EditorBar {
-                        tool: kadr_doc::annotation::Tool::Arrow,
+                        tool,
                         color: 0,
                         width: 3,
                         strength: 1,
@@ -148,6 +151,60 @@ pub fn run(path: &str, scale: f32, editor: bool) -> Result<(), Box<dyn Error>> {
         std::fs::write(pin_path, kadr_doc::pixels::encode_png(&pin)?)?;
     }
     kadr_win::log_info!("снимок сцены сохранён: {path} ({w}×{h}, масштаб {scale})");
+    Ok(())
+}
+/// Same production painters, synthetic pixels only: no desktop, focus or input.
+pub fn design_set(dir: &str) -> Result<(), Box<dyn Error>> {
+    use kadr_doc::annotation::Tool;
+    let dir = std::path::Path::new(dir);
+    std::fs::create_dir_all(dir)?;
+    for scale in [1.0, 1.5, 2.0] {
+        for (name, tool) in [
+            ("select", Tool::Select),
+            ("arrow", Tool::Arrow),
+            ("blur", Tool::BlurBrush),
+            ("text", Tool::Text),
+            ("redact", Tool::Redact),
+        ] {
+            run_tool(
+                dir.join(format!("{name}-{}.png", (scale * 100.0) as i32))
+                    .to_str()
+                    .unwrap(),
+                scale,
+                true,
+                tool,
+            )?;
+        }
+        for (name, n, loading, error) in [
+            ("recent", 6, false, None),
+            ("recent-full", 10, false, None),
+            ("recent-empty", 0, false, None),
+            ("recent-loading", 0, true, None),
+            (
+                "recent-error",
+                0,
+                false,
+                Some("Не удалось прочитать снимки. Откройте «Недавние» ещё раз.".into()),
+            ),
+        ] {
+            let entries = (0..n)
+                .map(|i| kadr_store::recent::Entry {
+                    id: format!("fixture-{i}"),
+                    created_ms: 1793300000000 - i as u64 * 300000,
+                    open: true,
+                    preview: Some(kadr_doc::Image::new(
+                        kadr_doc::Rect::new(0, 0, 320, 180),
+                        background(320, 180),
+                    )),
+                })
+                .collect();
+            let image = crate::recent_window::preview(entries, scale, true, loading, error)?;
+            std::fs::write(
+                dir.join(format!("{name}-{}.png", (scale * 100.0) as i32)),
+                kadr_doc::pixels::encode_png(&image)?,
+            )?;
+        }
+    }
     Ok(())
 }
 fn sample_shapes(scale: f32) -> Vec<kadr_doc::annotation::Annotation> {

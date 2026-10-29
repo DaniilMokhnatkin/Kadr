@@ -1,6 +1,6 @@
 use super::*;
 pub(super) fn footer(scale: f32) -> i32 {
-    (80.0 * scale).round() as i32
+    (64.0 * scale).round() as i32
 }
 fn color(c: windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F) -> COLORREF {
     COLORREF((c.r * 255.0) as u32 | ((c.g * 255.0) as u32) << 8 | ((c.b * 255.0) as u32) << 16)
@@ -50,8 +50,8 @@ pub(super) fn accessible_label(id: usize, pin: &Pin) -> String {
     }
 }
 pub(super) fn buttons(r: RECT, scale: f32) -> Vec<RECT> {
-    let gap = (4.0 * scale).round() as i32;
-    let pad = (12.0 * scale).round() as i32;
+    let gap = (8.0 * scale).round() as i32;
+    let pad = (14.0 * scale).round() as i32;
     let top = r.bottom - footer(scale) + pad;
     let width = (r.right - 2 * pad - 5 * gap).max(6);
     let weights = [104, 36, 74, 36, 140, 80];
@@ -78,39 +78,27 @@ pub(super) fn buttons(r: RECT, scale: f32) -> Vec<RECT> {
         .collect()
 }
 #[allow(clippy::too_many_arguments)]
-pub(super) fn button(dc: HDC, r: RECT, id: usize, pin: &Pin, font: HFONT, focused: bool, pressed: bool) {
+pub(super) fn button(dc: HDC, r: RECT, id: usize, pin: &Pin, font: HFONT, focused: bool, pressed: bool, hovered: bool) {
     let t = Theme::current();
-    let (bg, fg) = if id == COPY {
-        (t.text, t.surface)
-    } else {
-        (if pressed { t.border } else { t.surface }, t.text)
-    };
-    fill(dc, r, color(bg));
-    unsafe {
-        let brush = CreateSolidBrush(color(if focused { t.text } else { t.text_muted }));
-        FrameRect(dc, &r, brush);
-        let _ = DeleteObject(brush.into());
-    }
+    fill(dc, r, color(t.surface));
+    let fg = crate::chrome::button(
+        dc,
+        r,
+        id == COPY,
+        focused,
+        pressed,
+        hovered,
+        (r.bottom - r.top) as f32 / 36.0,
+    );
     let inset = RECT {
         left: r.left + 4,
         top: r.top + 1,
         right: r.right - 4,
         bottom: r.bottom - 1,
     };
-    text(dc, inset, &label(id, pin), font, color(fg));
-    if focused {
-        let focus = RECT {
-            left: r.left + 3,
-            top: r.top + 3,
-            right: r.right - 3,
-            bottom: r.bottom - 3,
-        };
-        unsafe {
-            let _ = DrawFocusRect(dc, &focus);
-        }
-    }
+    text(dc, inset, &label(id, pin), font, fg);
 }
-pub(super) fn draw(dc: HDC, r: RECT, image: &Image, pin: &Pin, scale: f32, font: HFONT) {
+pub(super) fn draw(dc: HDC, r: RECT, image: &Image, pin: &Pin, scale: f32) {
     let t = Theme::current();
     fill(dc, r, color(t.surface));
     let canvas_h = (r.bottom - footer(scale)).max(1);
@@ -152,28 +140,6 @@ pub(super) fn draw(dc: HDC, r: RECT, image: &Image, pin: &Pin, scale: f32, font:
         );
         SetStretchBltMode(dc, STRETCH_BLT_MODE(old));
     }
-    fill(
-        dc,
-        RECT {
-            left: 0,
-            top: canvas_h,
-            right: r.right,
-            bottom: canvas_h + 1,
-        },
-        color(t.border),
-    );
-    text(
-        dc,
-        RECT {
-            left: (12.0 * scale) as i32,
-            top: r.bottom - (27.0 * scale) as i32,
-            right: r.right - (12.0 * scale) as i32,
-            bottom: r.bottom - (4.0 * scale) as i32,
-        },
-        "Колесо — масштаб · Ctrl+колесо — прозрачность · Стрелки — перенос",
-        font,
-        color(t.text_muted),
-    );
 }
 pub(super) fn preview(image: &Image, scale: f32) -> Result<Image> {
     unsafe {
@@ -212,9 +178,9 @@ pub(super) fn preview(image: &Image, scale: f32) -> Result<Image> {
             bottom: h,
         };
         let pin = Pin::new(image.width(), image.height(), (w, h - footer(scale)));
-        draw(dc, r, image, &pin, scale, font);
+        draw(dc, r, image, &pin, scale);
         for (id, r) in ACTIONS.into_iter().zip(buttons(r, scale)) {
-            button(dc, r, id, &pin, font, id == COPY, false);
+            button(dc, r, id, &pin, font, id == COPY, false, false);
         }
         let _ = GdiFlush();
         let mut pixels = std::slice::from_raw_parts(bits as *const u8, (w * h * 4) as usize).to_vec();

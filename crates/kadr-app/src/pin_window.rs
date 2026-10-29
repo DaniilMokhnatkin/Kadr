@@ -162,6 +162,7 @@ impl Window {
                     Some(instance),
                     None,
                 )?;
+                crate::chrome::track(button);
                 state.borrow_mut().buttons.push(button);
             }
             let dark = BOOL::from(Theme::current().surface.r < 0.5);
@@ -365,7 +366,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 unsafe {
                     let _ = GetClientRect(hwnd, &mut r);
                 }
-                paint::draw(dc, r, &d.image, &d.pin, d.scale, d.font);
+                paint::draw(dc, r, &d.image, &d.pin, d.scale);
             }
             unsafe {
                 let _ = EndPaint(hwnd, &ps);
@@ -384,6 +385,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     d.font,
                     item.itemState.0 & ODS_FOCUS.0 != 0,
                     item.itemState.0 & ODS_SELECTED.0 != 0,
+                    crate::chrome::hovered(item.hwndItem),
                 );
             }
             return LRESULT(1);

@@ -42,6 +42,44 @@ pub struct Window {
 const CLEAR: usize = 200;
 const BACK: usize = 201;
 const FIRST: usize = 100;
+fn columns(r: RECT, scale: f32) -> usize {
+    (((r.right - r.left) as f32 / scale - 32.0) / 224.0)
+        .floor()
+        .clamp(2.0, 4.0) as usize
+}
+fn card_rects(r: RECT, scale: f32, count: usize) -> Vec<RECT> {
+    let at = |v: f32| (v * scale).round() as i32;
+    let cols = columns(r, scale);
+    let rows = count.div_ceil(cols).max(1) as i32;
+    let margin = at(24.0);
+    let gap = at(16.0);
+    let width = (r.right - r.left - 2 * margin - (cols as i32 - 1) * gap) / cols as i32;
+    let height = ((r.bottom - at(96.0) - at(56.0) - (rows - 1) * gap) / rows).min(at(180.0));
+    (0..count)
+        .map(|i| {
+            let left = margin + (i % cols) as i32 * (width + gap);
+            let top = at(96.0) + (i / cols) as i32 * (height + gap);
+            RECT {
+                left,
+                top,
+                right: left + width,
+                bottom: top + height,
+            }
+        })
+        .collect()
+}
+fn count_label(n: usize) -> String {
+    let word = if (11..=14).contains(&(n % 100)) {
+        "снимков"
+    } else {
+        match n % 10 {
+            1 => "снимок",
+            2..=4 => "снимка",
+            _ => "снимков",
+        }
+    };
+    format!("{n} {word}")
+}
 impl Window {
     pub fn new(instance: HINSTANCE, host: HWND, message: u32, app_icon: HICON, small_icon: HICON) -> Result<Self> {
         unsafe {
@@ -57,15 +95,27 @@ impl Window {
             };
             RegisterClassExW(&class);
             let scale = GetDpiForSystem() as f32 / 96.0;
-            let width = (1000.0 * scale) as i32;
-            let height = (520.0 * scale) as i32;
+            let mut work = RECT {
+                left: 0,
+                top: 0,
+                right: GetSystemMetrics(SM_CXSCREEN),
+                bottom: GetSystemMetrics(SM_CYSCREEN),
+            };
+            let _ = SystemParametersInfoW(
+                SPI_GETWORKAREA,
+                0,
+                Some(&mut work as *mut _ as *mut _),
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+            );
+            let width = ((1000.0 * scale) as i32).min(work.right - work.left - 32);
+            let height = ((520.0 * scale) as i32).min(work.bottom - work.top - 32);
             let hwnd = CreateWindowExW(
                 WS_EX_TOPMOST | WS_EX_CONTROLPARENT,
                 w!("KadrRecent"),
                 w!("Недавние — Kadr"),
                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-                (GetSystemMetrics(SM_CXSCREEN) - width) / 2,
-                (GetSystemMetrics(SM_CYSCREEN) - height) / 2,
+                work.left + (work.right - work.left - width) / 2,
+                work.top + (work.bottom - work.top - height) / 2,
                 width,
                 height,
                 None,
@@ -80,8 +130,8 @@ impl Window {
                 &dark as *const _ as *const _,
                 size_of_val(&dark) as u32,
             );
-            let font = make_font(13.0, scale, 400);
-            let title = make_font(24.0, scale, 600);
+            let font = make_font(14.0, scale, 400);
+            let title = make_font(26.0, scale, 600);
             DATA.with(|d| {
                 *d.borrow_mut() = Some(Data {
                     hwnd,
@@ -138,8 +188,8 @@ impl Window {
                 unsafe {
                     let _ = DeleteObject(d.font.into());
                     let _ = DeleteObject(d.title.into());
-                    d.font = make_font(13.0, scale, 400);
-                    d.title = make_font(24.0, scale, 600);
+                    d.font = make_font(14.0, scale, 400);
+                    d.title = make_font(26.0, scale, 600);
                 }
                 d.scale = scale;
             }
@@ -157,30 +207,41 @@ impl Window {
             let _ = GetClientRect(self.hwnd, &mut client);
         }
         let at = |n: f32| (n * scale).round() as i32;
-        let rows = labels.len().div_ceil(5).max(1) as f32;
-        let desired = at(96.0 + rows * 156.0 + 56.0);
+        let rows = labels.len().div_ceil(columns(client, scale)).max(1) as f32;
+        let desired = at(96.0 + rows * 196.0 + 56.0);
+        let monitor = unsafe { MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST) };
+        let mut mi = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        unsafe {
+            let _ = GetMonitorInfoW(monitor, &mut mi);
+        }
+        let desired = desired.min((mi.rcWork.bottom - mi.rcWork.top - at(64.0)).max(at(300.0)));
         let mut outer = RECT::default();
         unsafe {
             let _ = GetWindowRect(self.hwnd, &mut outer);
         }
         unsafe {
+            let width = outer.right - outer.left;
+            let height = desired + (outer.bottom - outer.top - client.bottom);
             let _ = SetWindowPos(
                 self.hwnd,
                 None,
-                0,
-                0,
-                outer.right - outer.left,
-                desired + (outer.bottom - outer.top - client.bottom),
-                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                outer
+                    .left
+                    .clamp(mi.rcWork.left, (mi.rcWork.right - width).max(mi.rcWork.left)),
+                outer
+                    .top
+                    .clamp(mi.rcWork.top, (mi.rcWork.bottom - height).max(mi.rcWork.top)),
+                width,
+                height,
+                SWP_NOZORDER | SWP_NOACTIVATE,
             );
             let _ = GetClientRect(self.hwnd, &mut client);
         }
-        let margin = at(24.0);
-        let gap = at(16.0);
-        let cell = (client.right - 2 * margin - 4 * gap) / 5;
-        let h = at(140.0);
         let mut buttons = Vec::new();
-        for (i, label) in labels.iter().enumerate() {
+        for (i, (label, r)) in labels.iter().zip(card_rects(client, scale, labels.len())).enumerate() {
             let text = wide(label);
             let result = unsafe {
                 CreateWindowExW(
@@ -188,10 +249,10 @@ impl Window {
                     w!("BUTTON"),
                     PCWSTR(text.as_ptr()),
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_OWNERDRAW as u32),
-                    margin + (i as i32 % 5) * (cell + gap),
-                    at(96.0) + (i as i32 / 5) * (h + gap),
-                    cell,
-                    h,
+                    r.left,
+                    r.top,
+                    r.right - r.left,
+                    r.bottom - r.top,
                     Some(self.hwnd),
                     Some(HMENU((FIRST + i) as *mut _)),
                     None,
@@ -199,6 +260,7 @@ impl Window {
                 )
             };
             if let Ok(button) = result {
+                crate::chrome::track(button);
                 buttons.push(button);
             }
         }
@@ -223,6 +285,7 @@ impl Window {
                 let _ = SendMessageW(button, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(0)));
                 let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(button, !labels.is_empty());
             }
+            crate::chrome::track(button);
             buttons.push(button);
         }
         let returning = DATA.with(|d| d.borrow().as_ref().is_some_and(|d| d.returning));
@@ -248,6 +311,7 @@ impl Window {
         };
         let first = buttons.first().copied().filter(|_| !labels.is_empty());
         if let Ok(back) = back {
+            crate::chrome::track(back);
             buttons.push(back);
         }
         let focus = first.or_else(|| buttons.last().copied());
@@ -448,12 +512,15 @@ fn text(dc: HDC, r: RECT, value: &str, font: HFONT, c: COLORREF) {
     }
 }
 fn draw(dc: HDC, d: &Data) {
-    let theme = Theme::current();
-    let at = |n: f32| (n * d.scale).round() as i32;
     let mut r = RECT::default();
     unsafe {
         let _ = GetClientRect(d.hwnd, &mut r);
     }
+    draw_at(dc, r, d);
+}
+fn draw_at(dc: HDC, r: RECT, d: &Data) {
+    let theme = Theme::current();
+    let at = |n: f32| (n * d.scale).round() as i32;
     fill(dc, r, color(theme.surface));
     text(
         dc,
@@ -463,14 +530,18 @@ fn draw(dc: HDC, d: &Data) {
             right: r.right - at(150.0),
             bottom: at(54.0),
         },
-        "Недавние",
+        "Ваши снимки",
         d.title,
         color(theme.text),
     );
     let subtitle = if d.loading {
         "Загружаем снимки…".into()
+    } else if d.error.is_some() {
+        "Хранилище снимков недоступно".into()
+    } else if d.entries.is_empty() {
+        "Несохранённые снимки".into()
     } else {
-        format!("Kadr · Несохранённых снимков: {}", d.entries.len())
+        format!("{} · можно продолжить редактирование", count_label(d.entries.len()))
     };
     text(
         dc,
@@ -493,7 +564,11 @@ fn draw(dc: HDC, d: &Data) {
                 right: r.right - at(24.0),
                 bottom: at(185.0),
             },
-            "Несохранённых снимков пока нет",
+            if d.error.is_some() {
+                "Не удалось открыть снимки"
+            } else {
+                "Здесь будут ваши снимки"
+            },
             d.title,
             color(theme.text),
         );
@@ -505,18 +580,20 @@ fn draw(dc: HDC, d: &Data) {
                 right: r.right - at(24.0),
                 bottom: at(230.0),
             },
-            "После захвата снимок останется здесь, пока вы не сохраните его в файл.",
+            d.error
+                .as_deref()
+                .unwrap_or("Сделайте скриншот — к нему можно будет вернуться здесь."),
             d.font,
             color(theme.text_muted),
         );
     }
-    let hint = if let Some(error) = &d.error {
-        error.as_str()
+    let hint = if d.error.is_some() {
+        "Закройте это окно и откройте «Недавние» ещё раз"
     } else if d.enabled {
         if d.returning {
-            "Выберите другой снимок · Esc — вернуться к текущему"
+            "Esc — вернуться к текущему снимку"
         } else {
-            "Выберите снимок, чтобы продолжить · Tab — выбор · Esc — закрыть"
+            "Нажмите на снимок, чтобы продолжить редактирование"
         }
     } else {
         "Автосохранение выключено в настройках · прежние снимки доступны"
@@ -534,20 +611,105 @@ fn draw(dc: HDC, d: &Data) {
         color(theme.text_muted),
     );
 }
+
+pub fn preview(
+    entries: Vec<Entry>,
+    scale: f32,
+    returning: bool,
+    loading: bool,
+    error: Option<String>,
+) -> Result<kadr_doc::Image> {
+    let at = |v: f32| (v * scale).round() as i32;
+    let rows = entries.len().div_ceil(4).max(1);
+    let h = at((96.0 + rows as f32 * 196.0 + 56.0).min(680.0));
+    let font = unsafe { make_font(14.0, scale, 400) };
+    let title = unsafe { make_font(26.0, scale, 600) };
+    let d = Data {
+        hwnd: HWND::default(),
+        host: HWND::default(),
+        message: 0,
+        entries,
+        buttons: Vec::new(),
+        loading,
+        enabled: true,
+        scale,
+        font,
+        title,
+        error,
+        returning,
+    };
+    let result = crate::chrome::snapshot(at(1000.0), h, |dc, r| {
+        draw_at(dc, r, &d);
+        for (i, card) in card_rects(r, scale, d.entries.len()).into_iter().enumerate() {
+            let item = DRAWITEMSTRUCT {
+                CtlID: (FIRST + i) as u32,
+                hDC: dc,
+                rcItem: card,
+                itemState: if i == 0 { ODS_FOCUS } else { Default::default() },
+                ..Default::default()
+            };
+            draw_button(&item, &d);
+        }
+        for (id, left, width) in [
+            (BACK, r.right - at(264.0), at(120.0)),
+            (CLEAR, r.right - at(132.0), at(108.0)),
+        ] {
+            let item = DRAWITEMSTRUCT {
+                CtlID: id as u32,
+                hDC: dc,
+                itemState: if id == CLEAR && d.entries.is_empty() {
+                    windows::Win32::UI::Controls::ODS_DISABLED
+                } else {
+                    Default::default()
+                },
+                rcItem: RECT {
+                    left,
+                    top: at(25.0),
+                    right: left + width,
+                    bottom: at(61.0),
+                },
+                ..Default::default()
+            };
+            draw_button(&item, &d);
+        }
+    });
+    unsafe {
+        let _ = DeleteObject(font.into());
+        let _ = DeleteObject(title.into());
+    }
+    result
+}
 fn draw_button(item: &DRAWITEMSTRUCT, d: &Data) {
     let t = Theme::current();
     let r = item.rcItem;
     let at = |n: f32| (n * d.scale).round() as i32;
-    let focused = item.itemState.0 & (ODS_FOCUS.0 | ODS_SELECTED.0) != 0;
-    fill(item.hDC, r, color(if focused { t.text } else { t.border }));
-    let inset = if focused { at(2.0) } else { at(1.0) };
-    let inner = RECT {
-        left: r.left + inset,
-        top: r.top + inset,
-        right: r.right - inset,
-        bottom: r.bottom - inset,
+    let focused = item.itemState.0 & ODS_FOCUS.0 != 0;
+    fill(item.hDC, r, color(t.surface));
+    let is_action = item.CtlID as usize == CLEAR || item.CtlID as usize == BACK;
+    let hover = crate::chrome::hovered(item.hwndItem);
+    let bg = if item.itemState.0 & ODS_SELECTED.0 != 0 {
+        t.selected
+    } else if focused || hover {
+        t.control
+    } else {
+        t.surface
     };
-    fill(item.hDC, inner, color(t.surface));
+    if !is_action {
+        crate::chrome::round(
+            item.hDC,
+            r,
+            color(bg),
+            color(if focused { t.accent } else { bg }),
+            at(12.0),
+            if focused { at(2.0) } else { 1 },
+        );
+    }
+    let inner = RECT {
+        left: r.left + at(3.0),
+        top: r.top + at(3.0),
+        right: r.right - at(3.0),
+        bottom: r.bottom - at(3.0),
+    };
     if item.CtlID as usize == CLEAR || item.CtlID as usize == BACK {
         let label = if item.CtlID as usize == CLEAR {
             "Очистить"
@@ -556,6 +718,15 @@ fn draw_button(item: &DRAWITEMSTRUCT, d: &Data) {
         } else {
             "Закрыть"
         };
+        let fg = crate::chrome::button(
+            item.hDC,
+            inner,
+            item.CtlID as usize == BACK,
+            focused,
+            item.itemState.0 & ODS_SELECTED.0 != 0,
+            hover,
+            d.scale,
+        );
         text(
             item.hDC,
             RECT {
@@ -564,7 +735,11 @@ fn draw_button(item: &DRAWITEMSTRUCT, d: &Data) {
             },
             label,
             d.font,
-            color(t.text),
+            if item.itemState.0 & windows::Win32::UI::Controls::ODS_DISABLED.0 != 0 {
+                color(t.disabled)
+            } else {
+                fg
+            },
         );
         return;
     }
@@ -575,8 +750,9 @@ fn draw_button(item: &DRAWITEMSTRUCT, d: &Data) {
         left: inner.left + at(8.0),
         top: inner.top + at(8.0),
         right: inner.right - at(8.0),
-        bottom: inner.bottom - at(36.0),
+        bottom: inner.bottom - at(42.0),
     };
+    crate::chrome::round(item.hDC, pic, color(t.control), color(t.control), at(8.0), 1);
     if let Some(image) = &entry.preview {
         let scale = ((pic.right - pic.left) as f64 / image.width() as f64)
             .min((pic.bottom - pic.top) as f64 / image.height() as f64);
@@ -672,6 +848,26 @@ unsafe fn make_font(size: f32, scale: f32, weight: i32) -> HFONT {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recent_grid_fits_all_ten_previews_at_large_dpi() {
+        for s in [1.0, 1.5, 2.0] {
+            let r = RECT {
+                left: 0,
+                top: 0,
+                right: (960.0 * s) as i32,
+                bottom: (640.0 * s) as i32,
+            };
+            let cards = card_rects(r, s, 10);
+            assert_eq!(cards.len(), 10);
+            for c in &cards {
+                assert!(c.left >= 0 && c.right <= r.right && c.top >= 96 && c.bottom <= r.bottom - (56.0 * s) as i32);
+                assert!(c.bottom - c.top > 100);
+            }
+        }
+        assert_eq!(count_label(1), "1 снимок");
+        assert_eq!(count_label(3), "3 снимка");
+        assert_eq!(count_label(10), "10 снимков");
+    }
     #[test]
     fn recent_has_an_accessible_return_button_without_showing_the_window() {
         unsafe {
