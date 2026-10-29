@@ -17,6 +17,7 @@ mod icons;
 mod interaction_bench;
 #[cfg(test)]
 mod m2;
+mod motion_bench;
 mod pin_window;
 mod recent_window;
 mod recent_worker;
@@ -35,6 +36,13 @@ fn main() {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let flag = |name: &str| args.iter().position(|a| a == name);
+    if let Some(i) = flag("--motion-bench") {
+        if let Err(e) = motion_bench::run(args.get(i + 1).map_or("motion-bench.txt", String::as_str)) {
+            kadr_win::log_warn!("motion benchmark: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Some(i) = flag("--design-snapshots") {
         if let Err(e) = snapshot::design_set(args.get(i + 1).map_or("design-snapshots", String::as_str)) {
             kadr_win::log_warn!("design snapshots: {e}");
