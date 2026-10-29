@@ -50,8 +50,16 @@ const DRAG_THRESHOLD: i32 = 3;
 
 enum Drag {
     /// Новое выделение от `anchor`. `space` — где был курсор, пока зажат пробел: рамка едет целиком.
-    Create { anchor: Point, moved: bool, space: Option<Point> },
-    Handle { handle: Handle, from: Point, start: Rect },
+    Create {
+        anchor: Point,
+        moved: bool,
+        space: Option<Point>,
+    },
+    Handle {
+        handle: Handle,
+        from: Point,
+        start: Rect,
+    },
 }
 
 pub struct Session {
@@ -73,7 +81,9 @@ pub struct Session {
 impl Session {
     /// `hud` — показывать ли панель замеров (флаг `--perf-hud`; по умолчанию её нет).
     pub fn new(monitors: Vec<Rect>, cursor: Point, grab: i32, hud: bool) -> Self {
-        let bounds = monitors.iter().fold(monitors.first().copied().unwrap_or_default(), |a, m| a.union(m));
+        let bounds = monitors
+            .iter()
+            .fold(monitors.first().copied().unwrap_or_default(), |a, m| a.union(m));
         let mut session = Self {
             bounds,
             monitors,
@@ -102,7 +112,9 @@ impl Session {
         self.selection
     }
 
-    pub fn is_auto_selected(&self) -> bool { self.auto_selected }
+    pub fn is_auto_selected(&self) -> bool {
+        self.auto_selected
+    }
 
     pub fn restore_selection(&mut self, selection: Option<Rect>, automatic: bool) {
         self.selection = selection.and_then(|r| r.intersect(&self.bounds));
@@ -133,6 +145,9 @@ impl Session {
     pub fn cursor(&self) -> Point {
         self.cursor
     }
+    pub fn observe_cursor(&mut self, p: Point) {
+        self.cursor = p;
+    }
 
     pub fn hud_visible(&self) -> bool {
         self.hud_visible
@@ -142,13 +157,20 @@ impl Session {
         self.cursor = p;
         self.drag = Some(match self.selection.and_then(|s| self.handle_at(p).map(|h| (s, h))) {
             Some((start, handle)) => Drag::Handle { handle, from: p, start },
-            None => Drag::Create { anchor: p, moved: false, space: None },
+            None => Drag::Create {
+                anchor: p,
+                moved: false,
+                space: None,
+            },
         });
         Action::Redraw
     }
 
     pub fn pointer_move(&mut self, p: Point) -> Action {
         self.cursor = p;
+        if self.selection.is_some() && self.drag.is_none() {
+            return Action::None;
+        }
         match &mut self.drag {
             Some(Drag::Create { anchor, moved, space }) => {
                 if let Some(last) = space {
@@ -238,7 +260,8 @@ impl Session {
     }
 
     fn handle_at(&self, p: Point) -> Option<Handle> {
-        self.selection.and_then(|s| hit_handle(&s, p, self.grab))
+        self.selection
+            .and_then(|s| hit_handle(&s, p, self.grab))
             .filter(|handle| !self.auto_selected || *handle != Handle::Move)
     }
 
@@ -260,7 +283,12 @@ impl Session {
             _ => (0, step),
         };
         self.selection = Some(if mods.ctrl {
-            let resized = Rect::new(sel.left, sel.top, (sel.right + dx).max(sel.left + 1), (sel.bottom + dy).max(sel.top + 1));
+            let resized = Rect::new(
+                sel.left,
+                sel.top,
+                (sel.right + dx).max(sel.left + 1),
+                (sel.bottom + dy).max(sel.top + 1),
+            );
             resized.intersect(&self.bounds).unwrap_or(sel)
         } else {
             sel.offset(dx, dy).moved_inside(&self.bounds)
@@ -269,7 +297,9 @@ impl Session {
     }
 
     fn pick(&self, p: Point) -> Option<Rect> {
-        window_at(&self.windows, p).and_then(|w| w.intersect(&self.bounds)).or_else(|| self.monitor_at(p))
+        window_at(&self.windows, p)
+            .and_then(|w| w.intersect(&self.bounds))
+            .or_else(|| self.monitor_at(p))
     }
 
     fn monitor_at(&self, p: Point) -> Option<Rect> {
@@ -289,6 +319,14 @@ mod tests {
         let mut s = Session::new(vec![MAIN, LEFT], Point::new(500, 500), 6, false);
         s.set_windows(vec![WINDOW]);
         s
+    }
+    #[test]
+    fn moving_over_a_finished_selection_updates_cursor_without_repainting() {
+        let mut s = session();
+        s.restore_selection(Some(WINDOW), false);
+        assert_eq!(s.pointer_move(Point::new(200, 200)), Action::None);
+        assert_eq!(s.cursor(), Point::new(200, 200));
+        assert_eq!(s.selection(), Some(WINDOW));
     }
 
     fn drag(s: &mut Session, from: (i32, i32), to: (i32, i32)) {
@@ -331,7 +369,13 @@ mod tests {
         assert_eq!(s.selection(), Some(MAIN));
         drag(&mut s, (300, 300), (420, 360));
         assert_eq!(s.selection(), Some(Rect::new(300, 300, 421, 361)));
-        s.key_down(Key::Char('a'), Mods { ctrl: true, shift: false });
+        s.key_down(
+            Key::Char('a'),
+            Mods {
+                ctrl: true,
+                shift: false,
+            },
+        );
         drag(&mut s, (300, 300), (400, 400));
         assert_eq!(s.selection(), Some(Rect::new(300, 300, 401, 401)));
     }
@@ -386,9 +430,21 @@ mod tests {
     fn keyboard_moves_and_resizes() {
         let mut s = session();
         drag(&mut s, (1000, 1000), (1099, 1099));
-        s.key_down(Key::Right, Mods { ctrl: false, shift: true });
+        s.key_down(
+            Key::Right,
+            Mods {
+                ctrl: false,
+                shift: true,
+            },
+        );
         assert_eq!(s.selection(), Some(Rect::new(1010, 1000, 1110, 1100)));
-        s.key_down(Key::Down, Mods { ctrl: true, shift: false });
+        s.key_down(
+            Key::Down,
+            Mods {
+                ctrl: true,
+                shift: false,
+            },
+        );
         assert_eq!(s.selection(), Some(Rect::new(1010, 1000, 1110, 1101)));
     }
 
@@ -402,10 +458,22 @@ mod tests {
     #[test]
     fn shortcuts() {
         let mut s = session();
-        let ctrl = Mods { ctrl: true, shift: false };
+        let ctrl = Mods {
+            ctrl: true,
+            shift: false,
+        };
         assert_eq!(s.key_down(Key::Escape, Mods::default()), Action::Close);
         assert_eq!(s.key_down(Key::Char('s'), ctrl), Action::Save);
-        assert_eq!(s.key_down(Key::Char('s'), Mods { ctrl: true, shift: true }), Action::SaveAs);
+        assert_eq!(
+            s.key_down(
+                Key::Char('s'),
+                Mods {
+                    ctrl: true,
+                    shift: true
+                }
+            ),
+            Action::SaveAs
+        );
         assert_eq!(s.key_down(Key::Char('c'), Mods::default()), Action::CopyColor);
         assert_eq!(s.cursor_kind(Point::new(100, 100)), CursorKind::SizeNWSE);
     }
