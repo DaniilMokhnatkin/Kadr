@@ -2,5 +2,6 @@
 
 pub mod annotations;
 pub mod gpu;
+pub mod motion;
 pub mod scene;
 pub mod theme;
