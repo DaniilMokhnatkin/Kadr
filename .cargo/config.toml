@@ -1,0 +1,4 @@
+# The C runtime goes into kadr.exe itself: it starts on a clean Windows without the
+# Visual C++ Redistributable.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

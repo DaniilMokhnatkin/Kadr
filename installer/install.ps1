@@ -33,7 +33,11 @@ param(
 $ErrorActionPreference = 'Stop'
 # В Windows PowerShell 5.1 $PSScriptRoot пуст в значениях по умолчанию param() при запуске через -File,
 # поэтому путь по умолчанию считаем здесь.
-if (-not $Exe) { $Exe = Join-Path $PSScriptRoot '..\target\release\kadr.exe' }
+if (-not $Exe) {
+    # In the ready package kadr.exe lies next to this script; in the project it is the release build.
+    $Exe = Join-Path $PSScriptRoot 'kadr.exe'
+    if (-not (Test-Path $Exe)) { $Exe = Join-Path $PSScriptRoot '..\target\release\kadr.exe' }
+}
 Write-Verbose "exe: $Exe"
 $Subject = 'CN=Kadr Local Code Signing'
 $InstallDir = Join-Path $env:ProgramFiles 'Kadr'
@@ -116,6 +120,9 @@ $cert = Get-SigningCertificate
 
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 Copy-Item $Exe $Target -Force
+# A package carried over by a messenger or the cloud is marked «from the internet»; the mark would
+# make SmartScreen stop Kadr at every start.
+Unblock-File -Path $Target
 $signature = Set-AuthenticodeSignature -FilePath $Target -Certificate $cert -HashAlgorithm SHA256
 if ($signature.Status -ne 'Valid') {
     throw "Подпись не удалась: $($signature.StatusMessage)"
