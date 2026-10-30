@@ -14,6 +14,8 @@ mod bubble;
 mod capture_audit;
 mod capture_mode;
 mod chrome;
+mod clip_history;
+mod clip_window;
 mod config_watch;
 mod gif_writer;
 mod glass;

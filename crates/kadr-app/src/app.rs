@@ -48,6 +48,7 @@ use kadr_win::perf::{self, Stats, Timing};
 use kadr_win::privileges::{self, ProcessInfo};
 use kadr_win::{log, log_info, log_warn, wide};
 
+mod clips;
 mod drafts;
 mod editor_input;
 mod exit;
@@ -85,6 +86,12 @@ const WM_APP_RECORD: u32 = WM_APP + 12;
 const WM_APP_VIEWER: u32 = WM_APP + 13;
 /// The update check found something (or, asked from the tray, nothing).
 const WM_APP_UPDATE: u32 = WM_APP + 14;
+/// The clipboard history changed on its worker.
+const WM_APP_CLIPS: u32 = WM_APP + 15;
+/// The history window asked for something.
+const WM_APP_CLIPWIN: u32 = WM_APP + 16;
+/// The keyboard hook caught Win+V.
+const WM_APP_WINV: u32 = WM_APP + 17;
 /// The long-screenshot panel was pressed.
 const TIMER_HOOK_CHECK: usize = 1;
 const TIMER_DRAFT: usize = 2;
@@ -99,6 +106,7 @@ const CMD_LAST_REGION: usize = 16;
 const CMD_CONFIG: usize = 17;
 const CMD_RECENT: usize = 18;
 const CMD_UPDATE: usize = 19;
+const CMD_CLIPBOARD: usize = 20;
 
 const HOST_CLASS: PCWSTR = w!("KadrHost");
 
@@ -136,6 +144,10 @@ pub struct App {
     /// Панель замеров на оверлее (флаг `--perf-hud`).
     perf_hud: bool,
     hook: Option<HHOOK>,
+    /// Win+V: the history, its keyboard hook, and the window to paste into.
+    clips: Option<crate::clip_history::History>,
+    clip_hook: Option<HHOOK>,
+    clip_target: Option<HWND>,
     /// LL-хук увидел PrtSc, ждём WM_HOTKEY: передний план в момент нажатия.
     hook_press: Option<String>,
     active: Option<Active>,
@@ -249,6 +261,9 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
             warm,
             perf_hud,
             hook: None,
+            clips: None,
+            clip_hook: None,
+            clip_target: None,
             hook_press: None,
             active: None,
             source: "—",
@@ -288,6 +303,7 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
         let conflicts = app.register_hotkeys();
         app.set_hook(true);
         app.add_tray_icon();
+        app.sync_clipboard();
         if let Some(error) = config_error {
             log_warn!("конфиг: {error}");
             app.notify("Не удалось загрузить настройки", &error);
@@ -577,6 +593,9 @@ impl App {
             let label = wide(&format!("Повторить область\t{}", self.config.hotkeys.last_region));
             let enabled = if self.last_region.is_some() { MF_ENABLED } else { MF_GRAYED };
             let _ = AppendMenuW(menu, MF_STRING | enabled, CMD_LAST_REGION, PCWSTR(label.as_ptr()));
+            if self.clips.is_some() {
+                let _ = AppendMenuW(menu, MF_STRING, CMD_CLIPBOARD, w!("Буфер обмена	Win+V"));
+            }
             let _ = AppendMenuW(menu, MF_STRING, CMD_CONFIG, w!("Настройки…"));
             let label = wide(&format!("Недавние…\t{}", self.config.hotkeys.recent));
             let _ = AppendMenuW(menu, MF_STRING, CMD_RECENT, PCWSTR(label.as_ptr()));
@@ -602,6 +621,7 @@ impl App {
             CMD_LAST_REGION => self.capture_mode(Mode::LastRegion, 0, "трей"),
             CMD_CONFIG => crate::settings_window::show(self.instance, self.hwnd, WM_APP_SETTINGS, &self.config),
             CMD_UPDATE => crate::update::check_now(),
+            CMD_CLIPBOARD => self.show_clipboard(),
             CMD_WARM => {
                 self.set_warm(!self.warm);
                 log_info!("дубликатор: {}", self.mode());
@@ -1221,6 +1241,7 @@ impl App {
         match clipboard::put_image(self.hwnd, &image) {
             Ok(()) => {
                 log_info!("в буфере обмена: {}×{}", image.width(), image.height());
+                self.remember_copy(crate::clip_history::Raw::Image(image.clone()));
                 self.clipboard = Some(image);
             }
             Err(e) => {
@@ -1496,6 +1517,10 @@ unsafe extern "system" fn host_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         WM_APP_SETTINGS => with_app(App::on_settings_window),
         WM_APP_RECORD => with_app(App::on_record),
         WM_APP_UPDATE => with_app(App::on_update),
+        WM_APP_CLIPS => with_app(App::on_clips_changed),
+        WM_APP_CLIPWIN => with_app(App::on_clip_window),
+        WM_APP_WINV => with_app(App::show_clipboard),
+        WM_CLIPBOARDUPDATE => with_app(App::on_clipboard_update),
         WM_APP_VIEWER => with_app(App::on_viewer),
         WM_APP_PIN => with_app(App::on_pin),
         WM_RENDERFORMAT => with_app(|app| {

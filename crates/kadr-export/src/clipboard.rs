@@ -42,6 +42,11 @@ pub fn put_image(owner: HWND, image: &Image) -> Result<()> {
 
 /// A file, as Explorer copies one (CF_HDROP): pasting into a chat or a folder hands over the file.
 pub fn put_file(owner: HWND, path: &std::path::Path) -> Result<()> {
+    put_files(owner, &[path.as_os_str().to_string_lossy().into_owned()])
+}
+
+/// Several files at once, as Explorer copies a selection.
+pub fn put_files(owner: HWND, paths: &[String]) -> Result<()> {
     const CF_HDROP: u32 = 15;
     // DROPFILES: offset to the list, drop point, non-client flag, wide names; then the name list,
     // each name zero-terminated and the list ended by one more zero.
@@ -49,8 +54,10 @@ pub fn put_file(owner: HWND, path: &std::path::Path) -> Result<()> {
     bytes.extend_from_slice(&20u32.to_le_bytes());
     bytes.extend_from_slice(&[0; 12]);
     bytes.extend_from_slice(&1u32.to_le_bytes());
-    let name = path.as_os_str().to_string_lossy();
-    bytes.extend(name.encode_utf16().chain([0, 0]).flat_map(u16::to_le_bytes));
+    for name in paths {
+        bytes.extend(name.encode_utf16().chain([0]).flat_map(u16::to_le_bytes));
+    }
+    bytes.extend([0, 0]);
     with_clipboard(owner, || unsafe { set(CF_HDROP, global(&bytes)?) })
 }
 

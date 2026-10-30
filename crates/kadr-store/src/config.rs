@@ -15,6 +15,7 @@ pub struct Config {
     pub appearance: Appearance,
     pub recognition: Recognition,
     pub translation: Translation,
+    pub clipboard: Clipboard,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -141,6 +142,20 @@ pub struct Save {
     pub thumbnail_on_copy: bool,
 }
 
+/// Kadr's clipboard history behind Win+V.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Clipboard {
+    pub enabled: bool,
+    /// Unpinned entries kept; pinned ones stay on top of that.
+    pub max: usize,
+}
+impl Default for Clipboard {
+    fn default() -> Self {
+        Self { enabled: true, max: 50 }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Recent {
@@ -159,6 +174,9 @@ impl Config {
         let config: Self = toml::from_str(text).map_err(|e| e.to_string())?;
         if !(1..=25).contains(&config.recent.max) {
             return Err("recent.max должен быть от 1 до 25".into());
+        }
+        if !(1..=200).contains(&config.clipboard.max) {
+            return Err("clipboard.max должен быть от 1 до 200".into());
         }
         // Относительный путь считался бы от текущей папки процесса, а при автозапуске она случайна.
         let folder = config.save.folder.trim();
@@ -250,6 +268,10 @@ engine = "auto"  # auto — как выбрано при установке, win
 
 [translation]
 engine = "auto"  # auto — офлайн при наличии моделей, offline — только локально, google — онлайн
+
+[clipboard]
+enabled = true  # своя история буфера по Win+V: закрепление, поиск, после перезагрузки
+max = 50        # от 1 до 200 записей; закреплённые не считаются
 "#;
 
 /// The file as the settings window writes it: the template's layout and comments with these values.
@@ -302,6 +324,14 @@ pub fn render(c: &Config) -> String {
         basic(c.recognition.engine.name())
     ));
     out.push_str(&format!("\n[translation]\nengine = {:<8}# auto — офлайн при наличии моделей, offline — только локально, google — онлайн\n",basic(c.translation.engine.name())));
+    out.push_str(&format!(
+        "
+[clipboard]
+enabled = {:<6}# своя история буфера по Win+V: закрепление, поиск, после перезагрузки
+max = {:<10}# от 1 до 200 записей; закреплённые не считаются
+",
+        c.clipboard.enabled, c.clipboard.max
+    ));
     out
 }
 

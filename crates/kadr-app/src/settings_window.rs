@@ -45,7 +45,7 @@ const ROW: f32 = 46.0;
 const SECTION: f32 = 34.0;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
-const TOGGLES: [&str; 8] = [
+const TOGGLES: [&str; 9] = [
     "Запускать вместе с Windows",
     "Миниатюра после снимка",
     "Миниатюра и после копирования",
@@ -53,9 +53,10 @@ const TOGGLES: [&str; 8] = [
     "Скрывать данные при копировании",
     "Бегущий пунктир",
     "Помнить несохранённые снимки",
+    "История буфера по Win+V",
     "Мгновенный захват",
 ];
-const TOGGLE_HINTS: [&str; 8] = [
+const TOGGLE_HINTS: [&str; 9] = [
     "",
     "Перетащите её в чат или нажмите, чтобы открыть",
     "Выключите — появится только после «Сохранить»",
@@ -63,6 +64,7 @@ const TOGGLE_HINTS: [&str; 8] = [
     "Почты, телефоны и карты размываются сами",
     "Рамка выделения и выбранные объекты",
     "До 25 снимков, зашифрованно",
+    "Закрепление и поиск, остаётся после перезагрузки",
     "≈8 мс вместо ≈23 мс, чуть больше памяти",
 ];
 const KEYS: [&str; 5] = ["Выделить область", "Монитор под курсором", "Активное окно", "Последняя область", "Недавние"];
@@ -92,7 +94,7 @@ enum Hit {
 
 struct Layout {
     close: D2D_RECT_F,
-    toggles: [D2D_RECT_F; 8],
+    toggles: [D2D_RECT_F; 9],
     choices: [D2D_RECT_F; 4],
     folder: D2D_RECT_F,
     folder_button: D2D_RECT_F,
@@ -139,7 +141,7 @@ fn layout(width: f32, s: f32) -> Layout {
         *y += 18.0 * s;
         out
     };
-    let toggles: [D2D_RECT_F; 8] = rows(8, 0, &mut y).try_into().unwrap();
+    let toggles: [D2D_RECT_F; 9] = rows(9, 0, &mut y).try_into().unwrap();
     let choices: [D2D_RECT_F; 4] = rows(4, 1, &mut y).try_into().unwrap();
     let folder = rows(1, 2, &mut y)[0];
     let keys: [D2D_RECT_F; 5] = rows(5, 3, &mut y).try_into().unwrap();
@@ -251,6 +253,7 @@ fn toggle_value(c: &Config, i: usize, auto: bool) -> bool {
         4 => c.capture.auto_censor,
         5 => c.appearance.marching_ants,
         6 => c.recent.enabled,
+        7 => c.clipboard.enabled,
         _ => c.capture.warm,
     }
 }
@@ -339,7 +342,7 @@ struct State {
     auto: bool,
     scale: f32,
     epoch: Instant,
-    knobs: [Spring; 8],
+    knobs: [Spring; 9],
     /// Where each segmented control's highlight sits (choice index, gliding).
     slides: [Spring; 4],
     hover: Option<Hit>,
@@ -556,7 +559,7 @@ pub fn show(instance: HINSTANCE, host: HWND, message: u32, config: &Config) {
                 auto: false,
                 scale: 1.0,
                 epoch: Instant::now(),
-                knobs: [knob(), knob(), knob(), knob(), knob(), knob(), knob(), knob()],
+                knobs: [knob(), knob(), knob(), knob(), knob(), knob(), knob(), knob(), knob()],
                 slides: [knob(), knob(), knob(), knob()],
                 hover: None,
                 glow: Vec::new(),
@@ -1031,6 +1034,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                             4 => st.config.capture.auto_censor ^= true,
                             5 => st.config.appearance.marching_ants ^= true,
                             6 => st.config.recent.enabled ^= true,
+                            7 => st.config.clipboard.enabled ^= true,
                             _ => st.config.capture.warm ^= true,
                         }
                         st.sync_knobs(false);
@@ -1217,7 +1221,17 @@ pub fn preview(scale: f32) -> windows::core::Result<kadr_doc::Image> {
         device: Device::new("settings-preview").ok(),
         surface: None,
         fonts: None,
-        knobs: [knob(true), knob(true), knob(true), knob(true), knob(false), knob(false), knob(true), knob(false)],
+        knobs: [
+            knob(true),
+            knob(true),
+            knob(true),
+            knob(true),
+            knob(false),
+            knob(false),
+            knob(true),
+            knob(true),
+            knob(false),
+        ],
         slides: [
             Spring::with(0.0, Curve::GLIDE),
             Spring::with(2.0, Curve::GLIDE),

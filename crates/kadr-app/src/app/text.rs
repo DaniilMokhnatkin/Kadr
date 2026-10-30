@@ -137,6 +137,7 @@ impl App {
             };
             let (content, anchor) = match result {
                 TextResult::Copied(text) => {
+                    self.remember_copy(crate::clip_history::Raw::Text(text.clone()));
                     match clipboard::put_text(self.hwnd, &text) {
                         Ok(()) => self.clipboard = None,
                         Err(e) => log_warn!("текст в буфер: {e}"),
@@ -145,6 +146,7 @@ impl App {
                     (Content::Copied(text), None)
                 }
                 TextResult::Qr(code) => {
+                    self.remember_copy(crate::clip_history::Raw::Text(code.clone()));
                     match clipboard::put_text(self.hwnd, &code) {
                         Ok(()) => self.clipboard = None,
                         Err(e) => log_warn!("QR-код в буфер: {e}"),

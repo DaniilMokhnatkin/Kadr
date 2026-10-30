@@ -144,7 +144,7 @@ fn local(ms: u64) -> Option<SYSTEMTIME> {
 }
 
 /// «Сегодня, 02:41», «Вчера, 23:10» or «28.10, 14:02».
-fn stamp(ms: u64, now_ms: u64) -> String {
+pub(crate) fn stamp(ms: u64, now_ms: u64) -> String {
     let (Some(t), Some(today)) = (local(ms), local(now_ms)) else {
         return "Время неизвестно".into();
     };
