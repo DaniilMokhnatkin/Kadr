@@ -53,7 +53,8 @@ pub fn recognize(image: &Image) -> Result<Vec<Line>> {
     // The wanted engine if it is there, else whichever is.
     let use_paddle = paddle && (wants_paddle() || !windows);
     if use_paddle {
-        return crate::ocr_paddle::recognize(image).map_err(|e| windows::core::Error::new(windows::Win32::Foundation::E_FAIL, e));
+        return crate::ocr_paddle::recognize(image)
+            .map_err(|e| windows::core::Error::new(windows::Win32::Foundation::E_FAIL, e));
     }
     recognize_windows(image)
 }
@@ -62,12 +63,12 @@ pub fn recognize(image: &Image) -> Result<Vec<Line>> {
 pub fn text_regions(image: &Image) -> Result<Vec<Rect>> {
     if crate::ocr_paddle::available() {
         match crate::ocr_paddle::regions(image) {
-            Ok(regions) if !regions.is_empty()=>return Ok(regions),
-            Ok(_)=>{},
-            Err(e)=>kadr_win::log_warn!("поиск текстовых областей: {e}"),
+            Ok(regions) if !regions.is_empty() => return Ok(regions),
+            Ok(_) => {}
+            Err(e) => kadr_win::log_warn!("поиск текстовых областей: {e}"),
         }
     }
-    Ok(crate::sensitive::find_all(&recognize_windows(image)?).into_iter().map(|(_,rect)|rect).collect())
+    Ok(crate::sensitive::find_all(&recognize_windows(image)?).into_iter().map(|(_, rect)| rect).collect())
 }
 
 /// Windows' OCR alone.
@@ -144,7 +145,8 @@ fn clean_words(text: &str, cyrillic_script: bool) -> usize {
         .filter(|w| w.chars().any(char::is_alphabetic))
         .filter(|w| {
             w.chars().all(|c| {
-                let cyr = ('а'..='я').contains(&c.to_lowercase().next().unwrap_or(c)) || "ёєіїўђћјљњџ".contains(c.to_lowercase().next().unwrap_or(c));
+                let cyr = ('а'..='я').contains(&c.to_lowercase().next().unwrap_or(c))
+                    || "ёєіїўђћјљњџ".contains(c.to_lowercase().next().unwrap_or(c));
                 c.is_alphabetic() && cyr == cyrillic_script
             })
         })
@@ -242,7 +244,9 @@ fn merge(readings: Vec<(bool, Vec<Line>)>) -> Vec<Line> {
                     let parts: Vec<&(String, Rect)> = other
                         .words
                         .iter()
-                        .filter(|(_, b)| (r.left..=r.right).contains(&((b.left + b.right) / 2)) && r.intersect(b).is_some())
+                        .filter(|(_, b)| {
+                            (r.left..=r.right).contains(&((b.left + b.right) / 2)) && r.intersect(b).is_some()
+                        })
                         .collect();
                     let mut text = String::new();
                     for (n, (w, b)) in parts.iter().enumerate() {
@@ -313,7 +317,8 @@ pub fn text(lines: &[Line]) -> String {
 fn same_block(a: &Line, b: &Line) -> bool {
     let h = a.rect.height().max(b.rect.height()).max(1);
     let gap = b.rect.top - a.rect.bottom;
-    let aligned = (a.rect.left - b.rect.left).abs() < h * 3 || a.rect.intersect(&Rect::new(b.rect.left, a.rect.top, b.rect.right, a.rect.bottom)).is_some();
+    let aligned = (a.rect.left - b.rect.left).abs() < h * 3
+        || a.rect.intersect(&Rect::new(b.rect.left, a.rect.top, b.rect.right, a.rect.bottom)).is_some();
     (-h / 2..=h).contains(&gap) && aligned
 }
 
@@ -361,14 +366,14 @@ mod tests {
     }
     #[test]
     fn full_censor_detector_finds_small_russian_and_english_lines_without_decoding_words() {
-        assert!(crate::ocr_paddle::available(),"test requires the bundled PaddleOCR models");
-        for dark in [false,true] {
-            let image=render_with("Логин Raptor\nThis is private text\nПароль test-123",16,dark);
-            let started=std::time::Instant::now();
-            let regions=crate::ocr_paddle::regions(&image).unwrap();
-            assert!(regions.len()>=3,"{dark}: {regions:?}");
-            assert!(regions.iter().all(|r|image.rect.intersect(r)==Some(*r)));
-            eprintln!("full detector dark={dark}: {} regions, {:?}",regions.len(),started.elapsed());
+        assert!(crate::ocr_paddle::available(), "test requires the bundled PaddleOCR models");
+        for dark in [false, true] {
+            let image = render_with("Логин Raptor\nThis is private text\nПароль test-123", 16, dark);
+            let started = std::time::Instant::now();
+            let regions = crate::ocr_paddle::regions(&image).unwrap();
+            assert!(regions.len() >= 3, "{dark}: {regions:?}");
+            assert!(regions.iter().all(|r| image.rect.intersect(r) == Some(*r)));
+            eprintln!("full detector dark={dark}: {} regions, {:?}", regions.len(), started.elapsed());
         }
     }
     fn text_of(lines: &[Line]) -> String {
@@ -389,10 +394,7 @@ mod tests {
     }
     #[test]
     fn merge_keeps_cyrillic_lines_from_the_cyrillic_reader_and_latin_from_the_latin_one() {
-        let ru = vec![
-            line("Скопировать текст", 10, 10, 300, 30),
-            line("Неllо wоrld", 10, 50, 300, 70),
-        ];
+        let ru = vec![line("Скопировать текст", 10, 10, 300, 30), line("Неllо wоrld", 10, 50, 300, 70)];
         let en = vec![
             line("CKonhp0BaTb TeKCT", 12, 11, 298, 31),
             line("Hello world", 10, 50, 300, 70),
@@ -408,8 +410,13 @@ mod tests {
         if !engines.iter().any(|(c, _)| *c) {
             return;
         }
-        let all = text(&recognize_windows(&render("Скопировать текст
-Hello Kadr 2026")).unwrap());
+        let all = text(
+            &recognize_windows(&render(
+                "Скопировать текст
+Hello Kadr 2026",
+            ))
+            .unwrap(),
+        );
         assert!(all.contains("Скопировать") && all.contains("текст"), "{all:?}");
         assert!(all.contains("Hello") && all.contains("2026"), "{all:?}");
     }
@@ -420,8 +427,13 @@ Hello Kadr 2026")).unwrap());
             return;
         }
         for dark in [false, true] {
-            let lines = recognize_windows(&render_with("Логин Raptor
-Пароль FSDfSSR*EUITS4", 20, dark)).unwrap();
+            let lines = recognize_windows(&render_with(
+                "Логин Raptor
+Пароль FSDfSSR*EUITS4",
+                20,
+                dark,
+            ))
+            .unwrap();
             let kinds: Vec<_> = crate::sensitive::find(&lines).into_iter().map(|(k, _)| k).collect();
             assert_eq!(
                 kinds,
@@ -439,7 +451,9 @@ Hello Kadr 2026")).unwrap());
         }
         use crate::sensitive::Kind::*;
         for dark in [false, true] {
-            let lines = recognize_windows(&render_with("Анна Смирнова\nПривет, это raptor_92, встреча в 18:30", 20, dark)).unwrap();
+            let lines =
+                recognize_windows(&render_with("Анна Смирнова\nПривет, это raptor_92, встреча в 18:30", 20, dark))
+                    .unwrap();
             let mut kinds: Vec<_> = crate::sensitive::find_strict(&lines).into_iter().map(|(k, _)| k).collect();
             kinds.sort_by_key(|k| *k as u8);
             assert_eq!(
@@ -491,7 +505,8 @@ clippy проходят. На настоящем экране не провер�
             true,
         );
         let all = text(&recognize_windows(&image).unwrap());
-        for phrase in ["Перевод починил", "проходят", "Русские строки остаются"] {
+        for phrase in ["Перевод починил", "проходят", "Русские строки остаются"]
+        {
             assert!(all.contains(phrase), "{phrase:?} in {all:?}");
         }
     }
@@ -515,12 +530,21 @@ clippy проходят. На настоящем экране не провер�
             for (text, px) in samples {
                 let image = render_with(text, px, dark);
                 let t = std::time::Instant::now();
-                let windows = recognize_windows(&image).map(|l| self::text(&l)).unwrap_or_else(|e| format!("ошибка: {e}"));
+                let windows =
+                    recognize_windows(&image).map(|l| self::text(&l)).unwrap_or_else(|e| format!("ошибка: {e}"));
                 let wt = t.elapsed().as_millis();
                 let t = std::time::Instant::now();
-                let paddle = crate::ocr_paddle::recognize(&image).map(|l| self::text(&l)).unwrap_or_else(|e| format!("ошибка: {e}"));
+                let paddle = crate::ocr_paddle::recognize(&image)
+                    .map(|l| self::text(&l))
+                    .unwrap_or_else(|e| format!("ошибка: {e}"));
                 let pt = t.elapsed().as_millis();
-                eprintln!("--- {px}px {}\n  нужно:   {:?}\n  Windows: {:?} ({wt} мс)\n  Paddle:  {:?} ({pt} мс)", if dark { "тёмный" } else { "светлый" }, text.replace('\n', " / "), windows.replace('\n', " / "), paddle.replace('\n', " / "));
+                eprintln!(
+                    "--- {px}px {}\n  нужно:   {:?}\n  Windows: {:?} ({wt} мс)\n  Paddle:  {:?} ({pt} мс)",
+                    if dark { "тёмный" } else { "светлый" },
+                    text.replace('\n', " / "),
+                    windows.replace('\n', " / "),
+                    paddle.replace('\n', " / ")
+                );
             }
         }
     }
@@ -554,7 +578,22 @@ clippy проходят. На настоящем экране не провер�
             } else {
                 FillRect(dc, &all, HBRUSH(GetStockObject(WHITE_BRUSH).0));
             }
-            let font = CreateFontW(-px, 0, 0, 0, 400, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, windows::core::w!("Segoe UI"));
+            let font = CreateFontW(
+                -px,
+                0,
+                0,
+                0,
+                400,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY,
+                0,
+                windows::core::w!("Segoe UI"),
+            );
             let old_font = SelectObject(dc, font.into());
             let mut wide: Vec<u16> = value.encode_utf16().collect();
             let mut r = windows::Win32::Foundation::RECT { left: 16, top: 16, right: w, bottom: h };

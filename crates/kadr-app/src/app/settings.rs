@@ -4,8 +4,9 @@ use super::*;
 impl App {
     pub(super) fn register_hotkeys(&self) -> Vec<String> {
         let mut keys = Vec::new();
-        for (id, (_, text)) in
-            [HK_PRTSC, HK_FULLSCREEN, HK_WINDOW, HK_LAST_REGION, HK_RECENT].into_iter().zip(self.config.hotkeys.entries())
+        for (id, (_, text)) in [HK_PRTSC, HK_FULLSCREEN, HK_WINDOW, HK_LAST_REGION, HK_RECENT]
+            .into_iter()
+            .zip(self.config.hotkeys.entries())
         {
             if let Ok(Some(key)) = hotkey::parse(text) {
                 keys.push((id, key, text));
@@ -108,7 +109,14 @@ impl App {
                 crate::settings_window::Request::OpenFile => {
                     let path = wide(&format!("\"{}\"", self.config_path.display()));
                     unsafe {
-                        ShellExecuteW(None, w!("open"), w!("notepad.exe"), PCWSTR(path.as_ptr()), PCWSTR::null(), SW_SHOWNORMAL);
+                        ShellExecuteW(
+                            None,
+                            w!("open"),
+                            w!("notepad.exe"),
+                            PCWSTR(path.as_ptr()),
+                            PCWSTR::null(),
+                            SW_SHOWNORMAL,
+                        );
                     }
                 }
             }

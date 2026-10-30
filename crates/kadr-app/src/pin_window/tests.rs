@@ -6,10 +6,7 @@ unsafe fn send(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) {
     }
 }
 fn image() -> Arc<Image> {
-    Arc::new(Image::new(
-        kadr_doc::Rect::new(0, 0, 640, 360),
-        vec![180; 640 * 360 * 4],
-    ))
+    Arc::new(Image::new(kadr_doc::Rect::new(0, 0, 640, 360), vec![180; 640 * 360 * 4]))
 }
 #[test]
 fn hidden_native_window_accepts_commands_and_releases_state_without_touching_focus() {
@@ -27,19 +24,9 @@ fn hidden_native_window_accepts_commands_and_releases_state_without_touching_foc
         let original = data(window.hwnd).unwrap().borrow().pin.zoom;
         send(window.hwnd, WM_COMMAND, WPARAM(MINUS), LPARAM(0));
         assert!(data(window.hwnd).unwrap().borrow().pin.zoom < original);
-        send(
-            window.hwnd,
-            WM_MOUSEWHEEL,
-            WPARAM(8 | (((120u32) as usize) << 16)),
-            LPARAM(0),
-        );
+        send(window.hwnd, WM_MOUSEWHEEL, WPARAM(8 | (((120u32) as usize) << 16)), LPARAM(0));
         assert_eq!(data(window.hwnd).unwrap().borrow().pin.opacity, 255);
-        send(
-            window.hwnd,
-            WM_MOUSEWHEEL,
-            WPARAM(8 | (((-120i16 as u16) as usize) << 16)),
-            LPARAM(0),
-        );
+        send(window.hwnd, WM_MOUSEWHEEL, WPARAM(8 | (((-120i16 as u16) as usize) << 16)), LPARAM(0));
         assert!(data(window.hwnd).unwrap().borrow().pin.opacity < 255);
         send(window.hwnd, WM_COMMAND, WPARAM(COPY), LPARAM(0));
         assert!(matches!(requests().as_slice(),[Request::Copy(i)] if i.as_ref()==source.as_ref()));
@@ -55,12 +42,7 @@ fn hidden_native_window_accepts_commands_and_releases_state_without_touching_foc
 fn pin_controls_fit_and_render_at_three_dpi_scales() {
     for scale in [1.0, 1.5, 2.0] {
         let preview = preview(&image(), scale).unwrap();
-        let r = RECT {
-            left: 0,
-            top: 0,
-            right: preview.width() as i32,
-            bottom: preview.height() as i32,
-        };
+        let r = RECT { left: 0, top: 0, right: preview.width() as i32, bottom: preview.height() as i32 };
         let buttons = paint::buttons(r, scale);
         assert_eq!(buttons.len(), 6);
         for b in &buttons {

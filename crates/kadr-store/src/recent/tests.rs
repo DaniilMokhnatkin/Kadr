@@ -45,9 +45,7 @@ fn annotations_roundtrip_and_old_drafts_default_to_empty() {
     store.update("abc-44", &doc, false, &frames()).unwrap();
     assert_eq!(store.load("abc-44").unwrap().document, doc);
     assert!(store.list().unwrap()[0].preview.is_none());
-    store
-        .set_preview("abc-44", &Image::new(Rect::new(0, 0, 2, 2), vec![17; 16]))
-        .unwrap();
+    store.set_preview("abc-44", &Image::new(Rect::new(0, 0, 2, 2), vec![17; 16])).unwrap();
     assert!(store.list().unwrap()[0].preview.is_some());
     doc.annotations[0].points.clear();
     assert!(store.update("abc-44", &doc, false, &frames()).is_err());
@@ -159,11 +157,7 @@ fn retries_transient_not_empty_only_for_empty_directories() {
     // Fault injection: такой же OS error 145, который вернул полный прогон.
     remove_empty_dir(&store.root, |dir| {
         calls += 1;
-        if calls == 1 {
-            Err(io::Error::from(io::ErrorKind::DirectoryNotEmpty))
-        } else {
-            fs::remove_dir(dir)
-        }
+        if calls == 1 { Err(io::Error::from(io::ErrorKind::DirectoryNotEmpty)) } else { fs::remove_dir(dir) }
     })
     .unwrap();
     assert_eq!(calls, 2);
@@ -199,10 +193,7 @@ fn abrupt_process_exit_leaves_recoverable_open_draft() {
     }
     let store = setup("process-exit");
     let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "recent::tests::abrupt_process_exit_leaves_recoverable_open_draft",
-        ])
+        .args(["--exact", "recent::tests::abrupt_process_exit_leaves_recoverable_open_draft"])
         .env(CHILD, &store.root)
         .stdout(std::process::Stdio::null())
         .status()

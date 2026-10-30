@@ -54,12 +54,7 @@ fn draw_export_encrypt_restore_and_export_again_without_desktop_input() {
     assert_eq!(drawing.shapes(), committed);
     let shared = Shared::new().unwrap();
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1().unwrap() };
-    let gpu = Gpu::new(
-        &shared,
-        &unsafe { factory.EnumAdapters1(0).unwrap() },
-        "m2-integration".into(),
-    )
-    .unwrap();
+    let gpu = Gpu::new(&shared, &unsafe { factory.EnumAdapters1(0).unwrap() }, "m2-integration".into()).unwrap();
     let result = annotations::flatten(&gpu, &shared, &frames, crop, drawing.shapes()).unwrap();
     let encoded = pixels::encode_png(&result).unwrap();
     assert_eq!(pixels::decode_png(&encoded, crop).unwrap(), result);

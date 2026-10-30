@@ -123,7 +123,9 @@ pub fn take_request() -> Option<Request> {
 
 fn request(value: Request) {
     REQUEST.with(|r| *r.borrow_mut() = Some(value));
-    if let Some((host, msg)) = STATE.with(|s| s.try_borrow().ok().as_deref().and_then(Option::as_ref).map(|s| (s.host, s.message))) {
+    if let Some((host, msg)) =
+        STATE.with(|s| s.try_borrow().ok().as_deref().and_then(Option::as_ref).map(|s| (s.host, s.message)))
+    {
         unsafe {
             let _ = PostMessageW(Some(host), msg, WPARAM(0), LPARAM(0));
         }
@@ -202,7 +204,8 @@ fn show_with(instance: HINSTANCE, host: HWND, message: u32, shot: Shot, settled:
         let Ok(mut state) = s.try_borrow_mut() else { return Default::default() };
         let Some(st) = state.as_mut() else { return };
         // Monitor of the capture, its DPI and work area.
-        let monitor = unsafe { MonitorFromPoint(POINT { x: shot.anchor.0, y: shot.anchor.1 }, MONITOR_DEFAULTTONEAREST) };
+        let monitor =
+            unsafe { MonitorFromPoint(POINT { x: shot.anchor.0, y: shot.anchor.1 }, MONITOR_DEFAULTTONEAREST) };
         let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
         let (mut dx, mut dy) = (96u32, 96u32);
         unsafe {
@@ -492,7 +495,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 }
                 STATE.with(|s| {
                     if let Ok(mut guard) = s.try_borrow_mut()
-                    && let Some(st) = guard.as_mut() {
+                        && let Some(st) = guard.as_mut()
+                    {
                         st.dragging = true;
                     }
                 });
@@ -500,7 +504,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 let dropped = drag_out(hwnd, &path);
                 STATE.with(|s| {
                     if let Ok(mut guard) = s.try_borrow_mut()
-                    && let Some(st) = guard.as_mut() {
+                        && let Some(st) = guard.as_mut()
+                    {
                         st.dragging = false;
                         if dropped {
                             st.leave();
@@ -516,7 +521,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             SWIPE_ORIGIN.with(|o| o.set(Some(x)));
             STATE.with(|s| {
                 if let Ok(mut guard) = s.try_borrow_mut()
-                    && let Some(st) = guard.as_mut() {
+                    && let Some(st) = guard.as_mut()
+                {
                     st.gesture = Gesture::Pressed { x, y };
                 }
             });
@@ -553,7 +559,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     }
                     Gesture::Pressed { .. } => {
                         let shot = st.shot.as_ref()?;
-                        let video = shot.path.as_ref().filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("mp4")));
+                        let video =
+                            shot.path.as_ref().filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("mp4")));
                         if let Some(path) = video {
                             let r = Request::View(path.clone());
                             st.leave();
@@ -590,7 +597,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_MOUSELEAVE => {
             STATE.with(|s| {
                 if let Ok(mut guard) = s.try_borrow_mut()
-                    && let Some(st) = guard.as_mut() {
+                    && let Some(st) = guard.as_mut()
+                {
                     st.tracking = false;
                     let now = st.now();
                     st.hover.target_with(0.0, Curve::HOVER_OUT, now);

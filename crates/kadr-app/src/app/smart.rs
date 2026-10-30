@@ -39,24 +39,33 @@ struct Source {
     shapes: Vec<kadr_doc::annotation::Annotation>,
 }
 
-struct Readings { source: Source, lines: Vec<crate::ocr::Line> }
+struct Readings {
+    source: Source,
+    lines: Vec<crate::ocr::Line>,
+}
 impl Source {
     fn same(&self, other: &Self) -> bool {
-        self.crop==other.crop && self.shapes==other.shapes && self.frames.len()==other.frames.len()
-            && self.frames.iter().zip(&other.frames).all(|(a,b)|Arc::ptr_eq(a,b))
+        self.crop == other.crop
+            && self.shapes == other.shapes
+            && self.frames.len() == other.frames.len()
+            && self.frames.iter().zip(&other.frames).all(|(a, b)| Arc::ptr_eq(a, b))
     }
 }
 
 fn contains(outer: DocRect, inner: DocRect) -> bool {
-    outer.left<=inner.left && outer.top<=inner.top && outer.right>=inner.right && outer.bottom>=inner.bottom
+    outer.left <= inner.left && outer.top <= inner.top && outer.right >= inner.right && outer.bottom >= inner.bottom
 }
 /// Stay within the document limit without silently leaving text after the last region uncovered.
 fn bounded_regions(mut regions: Vec<DocRect>, capacity: usize) -> Vec<DocRect> {
-    if capacity==0 {return Vec::new();}
-    regions=reading_order(regions);
-    if regions.len()>capacity {
-        let rest=regions.split_off(capacity-1);
-        if let Some(area)=rest.into_iter().reduce(|a,b|a.union(&b)) {regions.push(area);}
+    if capacity == 0 {
+        return Vec::new();
+    }
+    regions = reading_order(regions);
+    if regions.len() > capacity {
+        let rest = regions.split_off(capacity - 1);
+        if let Some(area) = rest.into_iter().reduce(|a, b| a.union(&b)) {
+            regions.push(area);
+        }
     }
     regions
 }
@@ -80,20 +89,14 @@ impl Peek {
     }
     fn toward(&mut self, to: f32) {
         if self.to != to {
-            *self = Peek {
-                from: self.value(),
-                to,
-                at: Instant::now(),
-            };
+            *self = Peek { from: self.value(), to, at: Instant::now() };
         }
     }
 }
 
 /// Recognition and blurring are heavy: they yield to the frames being drawn.
 fn yield_to_ui() {
-    use windows::Win32::System::Threading::{
-        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
-    };
+    use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL};
     unsafe {
         let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     }
@@ -110,8 +113,7 @@ impl Anim {
         STAGGER.min(0.45 / self.areas.len().saturating_sub(1).max(1) as f64)
     }
     fn duration(&self) -> f64 {
-        REVEAL + self.stagger() * self.areas.len().saturating_sub(1) as f64
-            + if self.showing { GLOW } else { 0.0 }
+        REVEAL + self.stagger() * self.areas.len().saturating_sub(1) as f64 + if self.showing { GLOW } else { 0.0 }
     }
 }
 
@@ -132,7 +134,8 @@ fn next(level: Option<Censor>) -> Option<Censor> {
 
 impl App {
     pub(super) fn smart_needs_frames(&self) -> bool {
-        self.smart.scanning.is_some() || self.smart.anim.is_some()
+        self.smart.scanning.is_some()
+            || self.smart.anim.is_some()
             || self.smart.peek.as_ref().is_some_and(|(_, p)| !p.settled())
     }
 
@@ -150,8 +153,7 @@ impl App {
     }
 
     pub(super) fn smart_scan_time(&self) -> Option<f64> {
-        self.smart.anim.as_ref().filter(|a| a.showing)
-            .map(|a| a.started.elapsed().as_secs_f64() / a.duration() * 1.6)
+        self.smart.anim.as_ref().filter(|a| a.showing).map(|a| a.started.elapsed().as_secs_f64() / a.duration() * 1.6)
     }
 
     /// Per area: rect, how much original shows over the blur, and the outline strength.
@@ -210,11 +212,7 @@ impl App {
         if !found.is_empty() {
             // Out: the original dissolves back over the blur, the blurs go, then the next level.
             self.smart.then = to;
-            self.smart.anim = Some(Anim {
-                started: Instant::now(),
-                areas: reading_order(found),
-                showing: false,
-            });
+            self.smart.anim = Some(Anim { started: Instant::now(), areas: reading_order(found), showing: false });
         } else if let Some(level) = to {
             self.scan(level);
         }
@@ -228,15 +226,15 @@ impl App {
         active.drawing.finish_gesture();
         active.drawing.finish_text();
         let Some(crop) = active.session.selection() else { return };
-        if active.frames.is_empty() { return; }
-        let source = Source {
-            crop, frames: active.frames.clone(), shapes: active.drawing.shapes().to_vec(),
-        };
+        if active.frames.is_empty() {
+            return;
+        }
+        let source = Source { crop, frames: active.frames.clone(), shapes: active.drawing.shapes().to_vec() };
         self.smart.source = Some(source.clone());
         self.smart.job += 1;
         self.smart.scanning = Some(level);
         let (job, tx, host) = (self.smart.job, self.text_tx.clone(), self.hwnd.0 as isize);
-        let readings=self.smart.readings.clone();
+        let readings = self.smart.readings.clone();
         std::thread::spawn(move || {
             yield_to_ui();
             unsafe {
@@ -244,33 +242,38 @@ impl App {
             }
             let started = Instant::now();
             let found = (|| -> windows::core::Result<Vec<DocRect>> {
-                if level==Censor::Full {
-                    let image=kadr_render::annotations::flatten_background(&source.frames,source.crop,&source.shapes)?;
+                if level == Censor::Full {
+                    let image =
+                        kadr_render::annotations::flatten_background(&source.frames, source.crop, &source.shapes)?;
                     return crate::ocr::text_regions(&image);
                 }
-                let cached=readings.lock().ok().and_then(|cache|cache.as_ref().filter(|c|c.source.same(&source)).map(|c|c.lines.clone()));
-                let lines=if let Some(lines)=cached {lines} else {
-                    let image=kadr_render::annotations::flatten_background(&source.frames,source.crop,&source.shapes)?;
-                    let lines=crate::ocr::recognize(&image)?;
-                    if let Ok(mut cache)=readings.lock() { *cache=Some(Readings {source:source.clone(),lines:lines.clone()}); }
+                let cached = readings
+                    .lock()
+                    .ok()
+                    .and_then(|cache| cache.as_ref().filter(|c| c.source.same(&source)).map(|c| c.lines.clone()));
+                let lines = if let Some(lines) = cached {
+                    lines
+                } else {
+                    let image =
+                        kadr_render::annotations::flatten_background(&source.frames, source.crop, &source.shapes)?;
+                    let lines = crate::ocr::recognize(&image)?;
+                    if let Ok(mut cache) = readings.lock() {
+                        *cache = Some(Readings { source: source.clone(), lines: lines.clone() });
+                    }
                     lines
                 };
-                let found=match level {
-                    Censor::Light=>crate::sensitive::find(&lines),
-                    Censor::Hard=>crate::sensitive::find_strict(&lines),
-                    Censor::Full=>unreachable!(),
+                let found = match level {
+                    Censor::Light => crate::sensitive::find(&lines),
+                    Censor::Hard => crate::sensitive::find_strict(&lines),
+                    Censor::Full => unreachable!(),
                 };
-                Ok(found.into_iter().map(|(_,r)|r).collect())
-            })().map_err(|e|e.message());
+                Ok(found.into_iter().map(|(_, r)| r).collect())
+            })()
+            .map_err(|e| e.message());
             log_info!("цензура: фоновая подготовка и OCR {:.1} мс", started.elapsed().as_secs_f64() * 1000.0);
             let _ = tx.send(text::TextResult::Smart(job, found));
             unsafe {
-                let _ = PostMessageW(
-                    Some(HWND(host as *mut _)),
-                    WM_APP_TEXT,
-                    WPARAM(0),
-                    LPARAM(0),
-                );
+                let _ = PostMessageW(Some(HWND(host as *mut _)), WM_APP_TEXT, WPARAM(0), LPARAM(0));
             }
         });
         self.request_redraw();
@@ -285,7 +288,9 @@ impl App {
     }
 
     fn discard_stale_scan(&mut self) -> bool {
-        if self.source_is_current() { return false; }
+        if self.source_is_current() {
+            return false;
+        }
         self.smart.scanning = None;
         self.smart.pending = None;
         self.smart.source = None;
@@ -293,18 +298,16 @@ impl App {
         true
     }
 
-    pub(super) fn on_smart_found(
-        &mut self,
-        job: u64,
-        found: std::result::Result<Vec<DocRect>, String>,
-    ) {
+    pub(super) fn on_smart_found(&mut self, job: u64, found: std::result::Result<Vec<DocRect>, String>) {
         let Some(level) = self.smart.scanning else {
             return;
         };
         if job != self.smart.job {
             return;
         }
-        if self.discard_stale_scan() { return; }
+        if self.discard_stale_scan() {
+            return;
+        }
         let Some(active) = &mut self.active else {
             return;
         };
@@ -313,10 +316,7 @@ impl App {
             return;
         };
         let areas: Vec<DocRect> = match found {
-            Ok(rects) => rects
-                .into_iter()
-                .filter_map(|r| r.intersect(&crop))
-                .collect(),
+            Ok(rects) => rects.into_iter().filter_map(|r| r.intersect(&crop)).collect(),
             Err(e) => {
                 log_warn!("цензура: {e}");
                 Vec::new()
@@ -331,57 +331,75 @@ impl App {
         }
         // The blurs are computed on a worker while the search glint keeps running; the frame
         // that shows them then only pastes ready pixels, however many there are.
-        let capacity=256usize.saturating_sub(active.drawing.shapes().len());
-        let mut shapes = active.drawing.plan_smart(&bounded_regions(areas,capacity), seed);
+        let capacity = 256usize.saturating_sub(active.drawing.shapes().len());
+        let mut shapes = active.drawing.plan_smart(&bounded_regions(areas, capacity), seed);
         for shape in &mut shapes {
-            shape.strength=shape.strength.max(match level {Censor::Light=>0,Censor::Hard=>1,Censor::Full=>2});
+            shape.strength = shape.strength.max(match level {
+                Censor::Light => 0,
+                Censor::Hard => 1,
+                Censor::Full => 2,
+            });
         }
         let frames = active.frames.clone();
         self.smart.pending = Some(shapes.clone());
         let mut all_shapes = active.drawing.shapes().to_vec();
         all_shapes.extend(shapes.clone());
-        let existing=active.drawing.shapes().len();
+        let existing = active.drawing.shapes().len();
         let (tx, host) = (self.text_tx.clone(), self.hwnd.0 as isize);
         std::thread::spawn(move || {
             yield_to_ui();
             // The verification pass may fall back to Windows OCR: initialise this worker too.
-            let com=unsafe {CoInitializeEx(None,windows::Win32::System::Com::COINIT_MULTITHREADED)};
+            let com = unsafe { CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED) };
             let started = Instant::now();
-            let mut shapes=shapes;
-            if level==Censor::Full {
-                match kadr_render::annotations::flatten_background(&frames,crop,&all_shapes)
-                    .and_then(|image|crate::ocr::text_regions(&image))
+            let mut shapes = shapes;
+            if level == Censor::Full {
+                match kadr_render::annotations::flatten_background(&frames, crop, &all_shapes)
+                    .and_then(|image| crate::ocr::text_regions(&image))
                 {
-                    Ok(residual)=> {
-                        let missing: Vec<_>=residual.into_iter().filter(|r|!shapes.iter().any(|shape|contains(shape.rect(),*r))).collect();
-                        let room=256usize.saturating_sub(existing+shapes.len());
-                        if room==0 && let Some(extra)=missing.iter().copied().reduce(|a,b|a.union(&b))
-                            && let Some(last)=shapes.last_mut() {
-                            let area=last.rect().union(&extra);
-                            last.points[0]=[area.left,area.top];last.points[1]=[area.right-1,area.bottom-1];
-                            if let Some(last_all)=all_shapes.last_mut() {*last_all=last.clone();}
+                    Ok(residual) => {
+                        let missing: Vec<_> = residual
+                            .into_iter()
+                            .filter(|r| !shapes.iter().any(|shape| contains(shape.rect(), *r)))
+                            .collect();
+                        let room = 256usize.saturating_sub(existing + shapes.len());
+                        if room == 0
+                            && let Some(extra) = missing.iter().copied().reduce(|a, b| a.union(&b))
+                            && let Some(last) = shapes.last_mut()
+                        {
+                            let area = last.rect().union(&extra);
+                            last.points[0] = [area.left, area.top];
+                            last.points[1] = [area.right - 1, area.bottom - 1];
+                            if let Some(last_all) = all_shapes.last_mut() {
+                                *last_all = last.clone();
+                            }
                         }
-                        let corrections=bounded_regions(missing,room);
+                        let corrections = bounded_regions(missing, room);
                         for r in corrections {
-                            let mut shape=kadr_doc::annotation::Annotation::new(0,kadr_doc::annotation::Tool::Blur,DocPoint::new(r.left,r.top));
-                            shape.points[1]=[r.right-1,r.bottom-1];shape.strength=2;shape.seed=seed();
-                            all_shapes.push(shape.clone());shapes.push(shape);
+                            let mut shape = kadr_doc::annotation::Annotation::new(
+                                0,
+                                kadr_doc::annotation::Tool::Blur,
+                                DocPoint::new(r.left, r.top),
+                            );
+                            shape.points[1] = [r.right - 1, r.bottom - 1];
+                            shape.strength = 2;
+                            shape.seed = seed();
+                            all_shapes.push(shape.clone());
+                            shapes.push(shape);
                         }
                     }
-                    Err(e)=>log_warn!("цензура: дополнительная проверка: {e}"),
+                    Err(e) => log_warn!("цензура: дополнительная проверка: {e}"),
                 }
             }
             kadr_render::annotations::prewarm(&frames, crop, &all_shapes);
             log_info!("цензура: готовый слой в фоне {:.1} мс", started.elapsed().as_secs_f64() * 1000.0);
-            if com.is_ok() {unsafe {windows::Win32::System::Com::CoUninitialize();}}
+            if com.is_ok() {
+                unsafe {
+                    windows::Win32::System::Com::CoUninitialize();
+                }
+            }
             let _ = tx.send(text::TextResult::SmartReady(job, shapes));
             unsafe {
-                let _ = PostMessageW(
-                    Some(HWND(host as *mut _)),
-                    WM_APP_TEXT,
-                    WPARAM(0),
-                    LPARAM(0),
-                );
+                let _ = PostMessageW(Some(HWND(host as *mut _)), WM_APP_TEXT, WPARAM(0), LPARAM(0));
             }
         });
         self.request_redraw();
@@ -395,7 +413,9 @@ impl App {
         if job != self.smart.job {
             return;
         }
-        if self.discard_stale_scan() { return; }
+        if self.discard_stale_scan() {
+            return;
+        }
         let Some(_) = self.smart.pending.take() else {
             return;
         };
@@ -411,17 +431,15 @@ impl App {
             let started = Instant::now();
             for overlay in &self.overlays {
                 let gpu = &self.gpus[self.outputs[overlay.output].gpu];
-                if let Err(e) = overlay.prepare_annotations(gpu, &self.shared, &active.frames, crop, active.drawing.shapes()) {
+                if let Err(e) =
+                    overlay.prepare_annotations(gpu, &self.shared, &active.frames, crop, active.drawing.shapes())
+                {
                     log_warn!("цензура: загрузка готового слоя: {e}");
                 }
             }
             log_info!("цензура: загрузка слоя перед анимацией {:.1} мс", started.elapsed().as_secs_f64() * 1000.0);
         }
-        self.smart.anim = Some(Anim {
-            started: Instant::now(),
-            areas,
-            showing: true,
-        });
+        self.smart.anim = Some(Anim { started: Instant::now(), areas, showing: true });
         self.schedule_draft();
         self.request_redraw();
     }
@@ -431,25 +449,12 @@ impl App {
         let Some(active) = &self.active else { return };
         let over = p
             .filter(|_| !active.drawing.busy() && self.smart.anim.is_none())
-            .and_then(|p| {
-                active
-                    .drawing
-                    .smart_shapes()
-                    .into_iter()
-                    .find(|r| r.contains(p))
-            });
+            .and_then(|p| active.drawing.smart_shapes().into_iter().find(|r| r.contains(p)));
         match (&mut self.smart.peek, over) {
             (Some((rect, peek)), Some(r)) if *rect == r => peek.toward(1.0),
             (_, Some(r)) => {
                 // A different blur: start its peek from nothing.
-                self.smart.peek = Some((
-                    r,
-                    Peek {
-                        from: 0.0,
-                        to: 1.0,
-                        at: Instant::now(),
-                    },
-                ));
+                self.smart.peek = Some((r, Peek { from: 0.0, to: 1.0, at: Instant::now() }));
             }
             (Some((_, peek)), None) => peek.toward(0.0),
             (None, None) => return,
@@ -460,14 +465,12 @@ impl App {
     /// Called every turn of the message loop, like the closing motion.
     pub(super) fn tick_smart(&mut self) {
         if self.active.is_none() {
-            self.smart = Smart {
-                job: self.smart.job,
-                ..Default::default()
-            };
+            self.smart = Smart { job: self.smart.job, ..Default::default() };
             return;
         }
         if let Some((_, peek)) = &self.smart.peek
-            && peek.settled() && peek.to == 0.0
+            && peek.settled()
+            && peek.to == 0.0
         {
             self.smart.peek = None;
         }
@@ -517,9 +520,10 @@ mod tests {
     }
     #[test]
     fn region_limit_merges_overflow_instead_of_dropping_text() {
-        let regions:Vec<_>=(0..300).map(|i|DocRect::new(10,i*10,80,i*10+8)).collect();
-        let bounded=bounded_regions(regions.clone(),256); assert_eq!(bounded.len(),256);
-        assert!(regions.into_iter().all(|r|bounded.iter().any(|b|contains(*b,r))));
+        let regions: Vec<_> = (0..300).map(|i| DocRect::new(10, i * 10, 80, i * 10 + 8)).collect();
+        let bounded = bounded_regions(regions.clone(), 256);
+        assert_eq!(bounded.len(), 256);
+        assert!(regions.into_iter().all(|r| bounded.iter().any(|b| contains(*b, r))));
     }
     #[test]
     fn a_dense_censor_finishes_its_reveal_without_a_long_unresponsive_cascade() {
@@ -535,14 +539,6 @@ mod tests {
             level = next(level);
             seen.push(level);
         }
-        assert_eq!(
-            seen,
-            [
-                Some(Censor::Light),
-                Some(Censor::Hard),
-                Some(Censor::Full),
-                None
-            ]
-        );
+        assert_eq!(seen, [Some(Censor::Light), Some(Censor::Hard), Some(Censor::Full), None]);
     }
 }

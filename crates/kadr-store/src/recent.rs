@@ -72,11 +72,7 @@ impl<C: Crypto> Store<C> {
             return Err(invalid("каталог черновиков не должен быть ссылкой"));
         }
         fs::create_dir_all(&root)?;
-        Ok(Self {
-            root,
-            crypto,
-            max: max.clamp(1, 10),
-        })
+        Ok(Self { root, crypto, max: max.clamp(1, 10) })
     }
     fn dir(&self, id: &str) -> io::Result<PathBuf> {
         if id.is_empty() || id.len() > 64 || !id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
@@ -102,15 +98,9 @@ impl<C: Crypto> Store<C> {
             // Перечитывание кадров не требуется: превью будет записано первым update из рабочего процесса.
             write_atomic(
                 &pending.join("state.enc"),
-                &self
-                    .crypto
-                    .seal(toml::to_string(doc).map_err(io::Error::other)?.as_bytes())?,
+                &self.crypto.seal(toml::to_string(doc).map_err(io::Error::other)?.as_bytes())?,
             )?;
-            let meta = Meta {
-                version: 1,
-                created_ms,
-                open: true,
-            };
+            let meta = Meta { version: 1, created_ms, open: true };
             write_meta(&pending, &meta)?;
             fs::rename(&pending, &dir)
         })();
@@ -136,17 +126,12 @@ impl<C: Crypto> Store<C> {
         }
         write_atomic(
             &dir.join("state.enc"),
-            &self
-                .crypto
-                .seal(toml::to_string(doc).map_err(io::Error::other)?.as_bytes())?,
+            &self.crypto.seal(toml::to_string(doc).map_err(io::Error::other)?.as_bytes())?,
         )?;
         if doc.annotations.is_empty()
             && let Some(bounds) = pixels::bounds(frames)
         {
-            let area = doc
-                .selection_rect()
-                .and_then(|s| s.intersect(&bounds))
-                .unwrap_or(bounds);
+            let area = doc.selection_rect().and_then(|s| s.intersect(&bounds)).unwrap_or(bounds);
             let preview = pixels::thumbnail(frames, area, 320, 160);
             self.set_preview(id, &preview)?;
         }
@@ -172,9 +157,7 @@ impl<C: Crypto> Store<C> {
         Ok(Draft { frames, document })
     }
     fn document(&self, dir: &Path) -> io::Result<Document> {
-        let bytes = self
-            .crypto
-            .open(&read_limited(&dir.join("state.enc"), 4 * 1024 * 1024)?)?;
+        let bytes = self.crypto.open(&read_limited(&dir.join("state.enc"), 4 * 1024 * 1024)?)?;
         let doc: Document =
             toml::from_str(std::str::from_utf8(&bytes).map_err(io::Error::other)?).map_err(io::Error::other)?;
         doc.validate()?;
@@ -187,9 +170,7 @@ impl<C: Crypto> Store<C> {
             let Ok(dir) = self.dir(&id) else { continue };
             let Ok(meta) = read_meta(&dir) else { continue };
             let preview = (|| -> io::Result<Image> {
-                let bytes = self
-                    .crypto
-                    .open(&read_limited(&dir.join("preview.enc"), 1024 * 1024)?)?;
+                let bytes = self.crypto.open(&read_limited(&dir.join("preview.enc"), 1024 * 1024)?)?;
                 if bytes.len() < 8 {
                     return Err(invalid("неполное превью"));
                 }
@@ -201,12 +182,7 @@ impl<C: Crypto> Store<C> {
                 pixels::decode_png(&bytes[8..], Rect::new(0, 0, w as i32, h as i32))
             })()
             .ok();
-            entries.push(Entry {
-                id,
-                created_ms: meta.created_ms,
-                open: meta.open,
-                preview,
-            });
+            entries.push(Entry { id, created_ms: meta.created_ms, open: meta.open, preview });
         }
         entries.sort_by(|a, b| b.created_ms.cmp(&a.created_ms).then(b.id.cmp(&a.id)));
         Ok(entries)
@@ -268,12 +244,7 @@ impl<C: Crypto> Store<C> {
     }
     fn prune(&self) -> io::Result<()> {
         let mut entries = self.list()?;
-        entries.sort_by(|a, b| {
-            b.open
-                .cmp(&a.open)
-                .then(b.created_ms.cmp(&a.created_ms))
-                .then(b.id.cmp(&a.id))
-        });
+        entries.sort_by(|a, b| b.open.cmp(&a.open).then(b.created_ms.cmp(&a.created_ms)).then(b.id.cmp(&a.id)));
         for entry in entries.into_iter().skip(self.max) {
             self.remove(&entry.id)?;
         }
@@ -347,10 +318,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     result
 }
 fn write_meta(dir: &Path, meta: &Meta) -> io::Result<()> {
-    write_atomic(
-        &dir.join("meta.toml"),
-        toml::to_string(meta).map_err(io::Error::other)?.as_bytes(),
-    )
+    write_atomic(&dir.join("meta.toml"), toml::to_string(meta).map_err(io::Error::other)?.as_bytes())
 }
 fn read_meta(dir: &Path) -> io::Result<Meta> {
     let bytes = read_limited(&dir.join("meta.toml"), 4096)?;

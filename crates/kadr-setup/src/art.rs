@@ -181,10 +181,11 @@ impl Scene<'_> {
     }
     fn arrow_cursor(&self, (x, y): (f32, f32)) {
         let s = self.s * 0.9;
-        let pts: Vec<(f32, f32)> = [(0.0, 0.0), (0.0, 16.0), (4.0, 12.5), (7.0, 18.5), (9.5, 17.5), (6.6, 11.6), (12.0, 11.6)]
-            .iter()
-            .map(|(a, b)| (x + a * s, y + b * s))
-            .collect();
+        let pts: Vec<(f32, f32)> =
+            [(0.0, 0.0), (0.0, 16.0), (4.0, 12.5), (7.0, 18.5), (9.5, 17.5), (6.6, 11.6), (12.0, 11.6)]
+                .iter()
+                .map(|(a, b)| (x + a * s, y + b * s))
+                .collect();
         self.polygon(&pts, rgb(0x111111, 1.0));
         let mut outline = pts.clone();
         outline.push(pts[0]);
@@ -220,7 +221,10 @@ impl Scene<'_> {
                 && let Ok(sink) = g.Open()
             {
                 let on = |a: f32| Vector2::new(center.0 + radius * a.cos(), center.1 + radius * a.sin());
-                sink.BeginFigure(Vector2::new(lerp(center.0, tip.0, k), lerp(center.1, tip.1, k)), D2D1_FIGURE_BEGIN_FILLED);
+                sink.BeginFigure(
+                    Vector2::new(lerp(center.0, tip.0, k), lerp(center.1, tip.1, k)),
+                    D2D1_FIGURE_BEGIN_FILLED,
+                );
                 sink.AddLine(on(toward + half));
                 sink.AddArc(&D2D1_ARC_SEGMENT {
                     point: on(toward - half),
@@ -271,7 +275,9 @@ impl Scene<'_> {
             }
             self.stroke(sel, WHITE, 0.0, 1.6 * s);
             if p >= 1.0 {
-                for (x, y) in [(sel.left, sel.top), (sel.right, sel.top), (sel.left, sel.bottom), (sel.right, sel.bottom)] {
+                for (x, y) in
+                    [(sel.left, sel.top), (sel.right, sel.top), (sel.left, sel.bottom), (sel.right, sel.bottom)]
+                {
                     self.fill(rect(x - 3.0 * s, y - 3.0 * s, x + 3.0 * s, y + 3.0 * s), WHITE, 1.0 * s);
                 }
             }
@@ -321,7 +327,8 @@ impl Scene<'_> {
         if q > 0.0 {
             let r = crate::glass::inflate(block, 5.0 * s);
             let corners = [(r.left, r.top), (r.right, r.top), (r.right, r.bottom), (r.left, r.bottom), (r.left, r.top)];
-            let lens: Vec<f32> = corners.windows(2).map(|w| (w[1].0 - w[0].0).abs() + (w[1].1 - w[0].1).abs()).collect();
+            let lens: Vec<f32> =
+                corners.windows(2).map(|w| (w[1].0 - w[0].0).abs() + (w[1].1 - w[0].1).abs()).collect();
             let mut left = q * lens.iter().sum::<f32>();
             let mut pts = vec![corners[0]];
             for (i, l) in lens.iter().enumerate() {
@@ -366,17 +373,27 @@ impl Scene<'_> {
             for (j, (word, from)) in row.iter().enumerate() {
                 let w = self.measure(font, word);
                 let r = rect(x, y, x + w, y + 16.0 * s);
-                self.write(font, word, rect(x, y, x + w + 40.0 * s, y + 18.0 * s), if i == 0 { self.theme.text } else { mix(self.theme.text, self.theme.text_muted, 0.2) });
+                self.write(
+                    font,
+                    word,
+                    rect(x, y, x + w + 40.0 * s, y + 18.0 * s),
+                    if i == 0 { self.theme.text } else { mix(self.theme.text, self.theme.text_muted, 0.2) },
+                );
                 if *from <= level && !word.trim().is_empty() {
                     hidden += 1;
                     // Blurs arrive in reading order, each sliding open from the left.
-                    let k = ease(phase(local, 0.25 + 0.07 * (i * 3 + j) as f64, 0.35)) * (1.0 - phase(local, 2.15, 0.25));
+                    let k =
+                        ease(phase(local, 0.25 + 0.07 * (i * 3 + j) as f64, 0.35)) * (1.0 - phase(local, 2.15, 0.25));
                     let b = rect(r.left - 2.0 * s, r.top, r.left - 2.0 * s + (w + 4.0 * s) * k, r.bottom);
                     self.fill(b, mix(self.paper(), self.theme.text_muted, 0.55), 4.0 * s);
                     for d in 0..((w / (6.0 * s)) as usize) {
                         let cx = b.left + (3.0 + 6.0 * d as f32) * s;
                         if cx < b.right - 2.0 * s {
-                            self.dot((cx, (b.top + b.bottom) / 2.0 + ((d * 7) % 5) as f32 * 0.6 * s - 1.2 * s), 1.6 * s, fade(self.paper(), 0.35));
+                            self.dot(
+                                (cx, (b.top + b.bottom) / 2.0 + ((d * 7) % 5) as f32 * 0.6 * s - 1.2 * s),
+                                1.6 * s,
+                                fade(self.paper(), 0.35),
+                            );
                         }
                     }
                 }
@@ -386,7 +403,13 @@ impl Scene<'_> {
         let names = ["Лёгкая", "Жёсткая", "Полная"];
         let k = pop(phase(local, 0.0, 0.45));
         let label = format!("{} · {}", names[level], hidden);
-        self.pill(self.at(0.5, 0.88), &label, mix(self.theme.selected, self.theme.accent, 0.15), self.theme.on_selected, k);
+        self.pill(
+            self.at(0.5, 0.88),
+            &label,
+            mix(self.theme.selected, self.theme.accent, 0.15),
+            self.theme.on_selected,
+            k,
+        );
         names[level]
     }
 
@@ -402,15 +425,27 @@ impl Scene<'_> {
             let y = card.top + (16.0 + 22.0 * i as f32) * s;
             let read = phase(t, 0.5 + 0.25 * i as f64, 0.2);
             let w = self.measure(self.ink.small, l);
-            self.fill(rect(card.left + 14.0 * s, y - 2.0 * s, card.left + 18.0 * s + w, y + 18.0 * s), fade(self.theme.accent, 0.12 * read), 4.0 * s);
+            self.fill(
+                rect(card.left + 14.0 * s, y - 2.0 * s, card.left + 18.0 * s + w, y + 18.0 * s),
+                fade(self.theme.accent, 0.12 * read),
+                4.0 * s,
+            );
             self.write(self.ink.small, l, rect(card.left + 16.0 * s, y, card.right, y + 18.0 * s), self.theme.text);
         }
         // The scanning beam.
         let p = phase(t, 0.4, 1.0);
         if p > 0.0 && p < 1.0 {
             let y = lerp(card.top + 8.0 * s, card.bottom - 8.0 * s, ease(p));
-            self.fill(rect(card.left + 8.0 * s, y - 1.0 * s, card.right - 8.0 * s, y + 1.0 * s), self.theme.accent, 1.0 * s);
-            self.fill(rect(card.left + 8.0 * s, y - 10.0 * s, card.right - 8.0 * s, y), fade(self.theme.accent, 0.12), 0.0);
+            self.fill(
+                rect(card.left + 8.0 * s, y - 1.0 * s, card.right - 8.0 * s, y + 1.0 * s),
+                self.theme.accent,
+                1.0 * s,
+            );
+            self.fill(
+                rect(card.left + 8.0 * s, y - 10.0 * s, card.right - 8.0 * s, y),
+                fade(self.theme.accent, 0.12),
+                0.0,
+            );
         }
         let chip = pop(phase(t, 1.7, 0.4)) * (1.0 - phase(t, 2.6, 0.3));
         self.pill(self.at(0.7, 0.3), "Alt + клик", rgb(0x1c1c1e, 0.92), WHITE, chip);
@@ -427,10 +462,22 @@ impl Scene<'_> {
             self.fill(bubble, if self.theme.dark { rgb(0x3a3a3c, 1.0) } else { WHITE }, 12.0 * s);
             if k > 0.8 {
                 let a = (k - 0.8) / 0.2;
-                self.write(self.ink.bold, "Перевод · EN → RU", rect(bubble.left + 14.0 * s, bubble.top + 8.0 * s, bubble.right, bubble.top + 24.0 * s), fade(self.theme.accent, a));
-                for (i, l) in ["Встречу перенесли на пятницу.", "Возьми слайды и кофе.", "Увидимся в 10 утра!"].iter().enumerate() {
+                self.write(
+                    self.ink.bold,
+                    "Перевод · EN → RU",
+                    rect(bubble.left + 14.0 * s, bubble.top + 8.0 * s, bubble.right, bubble.top + 24.0 * s),
+                    fade(self.theme.accent, a),
+                );
+                for (i, l) in
+                    ["Встречу перенесли на пятницу.", "Возьми слайды и кофе.", "Увидимся в 10 утра!"].iter().enumerate()
+                {
                     let y = bubble.top + (28.0 + 18.0 * i as f32) * s;
-                    self.write(self.ink.small, l, rect(bubble.left + 14.0 * s, y, bubble.right, y + 18.0 * s), fade(self.theme.text, a));
+                    self.write(
+                        self.ink.small,
+                        l,
+                        rect(bubble.left + 14.0 * s, y, bubble.right, y + 18.0 * s),
+                        fade(self.theme.text, a),
+                    );
                 }
             }
         }
@@ -464,7 +511,12 @@ impl Scene<'_> {
             let cy = (panel.top + panel.bottom) / 2.0;
             self.dot((panel.left + 16.0 * s, cy), 5.0 * s, fade(RED, breathe * k));
             let secs = (t.min(4.6)) as u32;
-            self.write(self.ink.center, &format!("0:{secs:02}"), rect(panel.left + 24.0 * s, panel.top, panel.left + 64.0 * s, panel.bottom), fade(self.theme.text, k));
+            self.write(
+                self.ink.center,
+                &format!("0:{secs:02}"),
+                rect(panel.left + 24.0 * s, panel.top, panel.left + 64.0 * s, panel.bottom),
+                fade(self.theme.text, k),
+            );
             // Sound: five bars.
             for i in 0..5 {
                 let level = (0.35 + 0.65 * ((t * 7.0 + i as f64 * 1.7).sin() * 0.5 + 0.5)) as f32;
@@ -500,12 +552,21 @@ impl Scene<'_> {
         let chat = self.area(0.1, 0.12, 0.58, 0.88);
         self.shadow(chat, 8.0 * s, 0.18);
         self.fill(chat, self.paper(), 8.0 * s);
-        self.write(self.ink.bold, "Чат", rect(chat.left + 12.0 * s, chat.top + 8.0 * s, chat.right, chat.top + 24.0 * s), self.theme.text);
+        self.write(
+            self.ink.bold,
+            "Чат",
+            rect(chat.left + 12.0 * s, chat.top + 8.0 * s, chat.right, chat.top + 24.0 * s),
+            self.theme.text,
+        );
         for (i, (w, mine)) in [(0.6, false), (0.45, true), (0.7, false)].iter().enumerate() {
             let y = chat.top + (34.0 + 22.0 * i as f32) * s;
             let width = (chat.right - chat.left - 24.0 * s) * *w as f32;
             let x = if *mine { chat.right - 12.0 * s - width } else { chat.left + 12.0 * s };
-            self.fill(rect(x, y, x + width, y + 16.0 * s), if *mine { fade(self.theme.accent, 0.85) } else { mix(self.paper(), self.theme.text_muted, 0.18) }, 8.0 * s);
+            self.fill(
+                rect(x, y, x + width, y + 16.0 * s),
+                if *mine { fade(self.theme.accent, 0.85) } else { mix(self.paper(), self.theme.text_muted, 0.18) },
+                8.0 * s,
+            );
         }
         // The thumbnail: in from the right, then carried to the chat.
         let home = self.area(0.66, 0.6, 0.9, 0.86);
@@ -522,7 +583,11 @@ impl Scene<'_> {
             let r = rect(c.0 - hw * k, c.1 - hh * k, c.0 + hw * k, c.1 + hh * k);
             self.shadow(r, 8.0 * s, 0.3 * slide);
             self.fill(r, fade(self.paper(), slide), 8.0 * s);
-            self.fill(crate::glass::inflate(r, -4.0 * s), fade(mix(self.theme.accent, PURPLE, 0.3), 0.35 * slide), 5.0 * s);
+            self.fill(
+                crate::glass::inflate(r, -4.0 * s),
+                fade(mix(self.theme.accent, PURPLE, 0.3), 0.35 * slide),
+                5.0 * s,
+            );
             self.stroke(r, fade(WHITE, 0.8 * slide), 8.0 * s, 1.5 * s);
             if t > 1.3 {
                 self.arrow_cursor((c.0 + 6.0 * s, c.1 + 4.0 * s));
@@ -531,7 +596,12 @@ impl Scene<'_> {
             // In the chat as a sent picture.
             let k = pop(phase(t, 2.85, 0.45)) * out;
             let w = (chat.right - chat.left) * 0.5 * k;
-            let r = rect(chat.right - 12.0 * s - w, chat.bottom - 12.0 * s - 56.0 * s * k, chat.right - 12.0 * s, chat.bottom - 12.0 * s);
+            let r = rect(
+                chat.right - 12.0 * s - w,
+                chat.bottom - 12.0 * s - 56.0 * s * k,
+                chat.right - 12.0 * s,
+                chat.bottom - 12.0 * s,
+            );
             self.fill(r, fade(mix(self.theme.accent, PURPLE, 0.3), 0.55), 8.0 * s);
             self.pill(((r.left + r.right) / 2.0, r.top - 4.0 * s), "Отправлено", GREEN, WHITE, k);
         }

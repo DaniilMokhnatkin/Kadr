@@ -9,11 +9,7 @@ impl Frames {
         self.dirty.fill(true);
     }
     pub fn pending(&self) -> Vec<usize> {
-        self.dirty
-            .iter()
-            .enumerate()
-            .filter_map(|(i, dirty)| dirty.then_some(i))
-            .collect()
+        self.dirty.iter().enumerate().filter_map(|(i, dirty)| dirty.then_some(i)).collect()
     }
     pub fn presented(&mut self, index: usize, animating: bool) {
         if let Some(dirty) = self.dirty.get_mut(index) {

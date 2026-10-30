@@ -36,34 +36,20 @@ impl History {
     }
 }
 pub fn message_point(packed: isize, origin: Point) -> Point {
-    Point::new(
-        origin.x + packed as u16 as i16 as i32,
-        origin.y + (packed >> 16) as u16 as i16 as i32,
-    )
+    Point::new(origin.x + packed as u16 as i16 as i32, origin.y + (packed >> 16) as u16 as i16 as i32)
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     fn s(x: i32, y: i32, time: u32) -> Sample {
-        Sample {
-            point: Point::new(x, y),
-            time,
-        }
+        Sample { point: Point::new(x, y), time }
     }
     #[test]
     fn coalesced_move_keeps_curve_and_never_replays_before_mouse_down() {
         let mut h = History::default();
         h.begin(s(10, 10, 100));
-        let points = h.recover(
-            &[
-                s(40, 10, 103),
-                s(30, 30, 102),
-                s(20, 40, 101),
-                s(10, 10, 100),
-                s(0, 0, 99),
-            ],
-            s(40, 10, 103),
-        );
+        let points =
+            h.recover(&[s(40, 10, 103), s(30, 30, 102), s(20, 40, 101), s(10, 10, 100), s(0, 0, 99)], s(40, 10, 103));
         assert_eq!(points, vec![Point::new(20, 40), Point::new(30, 30), Point::new(40, 10)]);
         let crop = kadr_doc::Rect::new(0, 0, 100, 100);
         let mut d = crate::drawing::Drawing::default();

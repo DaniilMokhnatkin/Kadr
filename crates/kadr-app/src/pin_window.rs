@@ -58,10 +58,7 @@ fn data(hwnd: HWND) -> Option<Rc<RefCell<Data>>> {
 }
 fn work_area(hwnd: HWND) -> RECT {
     let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
-    let mut info = MONITORINFO {
-        cbSize: size_of::<MONITORINFO>() as u32,
-        ..Default::default()
-    };
+    let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
     unsafe {
         let _ = GetMonitorInfoW(monitor, &mut info);
     }
@@ -69,10 +66,7 @@ fn work_area(hwnd: HWND) -> RECT {
 }
 fn available(hwnd: HWND, scale: f32) -> (i32, i32) {
     let r = work_area(hwnd);
-    (
-        (r.right - r.left - 24).max(1),
-        (r.bottom - r.top - (140.0 * scale) as i32).max(1),
-    )
+    ((r.right - r.left - 24).max(1), (r.bottom - r.top - (140.0 * scale) as i32).max(1))
 }
 fn font(scale: f32) -> HFONT {
     unsafe {
@@ -111,11 +105,7 @@ impl Window {
             if RegisterClassExW(&class) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS {
                 return Err(windows::core::Error::from_thread());
             }
-            let title = wide(&format!(
-                "Kadr · Закреплённый снимок · {} × {}",
-                image.width(),
-                image.height()
-            ));
+            let title = wide(&format!("Kadr · Закреплённый снимок · {} × {}", image.width(), image.height()));
             let hwnd = CreateWindowExW(
                 WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_CONTROLPARENT,
                 w!("KadrPin"),
@@ -308,15 +298,7 @@ fn key(hwnd: HWND, vk: usize, ctrl: bool, shift: bool) -> bool {
                 0x27 => (step, 0),
                 _ => (0, step),
             };
-            let _ = SetWindowPos(
-                hwnd,
-                None,
-                r.left + dx,
-                r.top + dy,
-                0,
-                0,
-                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-            );
+            let _ = SetWindowPos(hwnd, None, r.left + dx, r.top + dy, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         },
         _ => return false,
     }
@@ -416,10 +398,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 && let Some(d) = data(hwnd)
             {
                 let d = d.borrow();
-                let mut p = POINT {
-                    x: lp.0 as u16 as i16 as i32,
-                    y: (lp.0 >> 16) as u16 as i16 as i32,
-                };
+                let mut p = POINT { x: lp.0 as u16 as i16 as i32, y: (lp.0 >> 16) as u16 as i16 as i32 };
                 let mut r = RECT::default();
                 unsafe {
                     let _ = ScreenToClient(hwnd, &mut p);

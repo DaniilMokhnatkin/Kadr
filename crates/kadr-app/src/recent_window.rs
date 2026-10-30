@@ -2,7 +2,9 @@
 //! GDI, so nothing flickers, and every state change (opening cascade, hover lift, focus ring,
 //! button press, clear confirmation) is a spring. The title bar is our own; DWM keeps the shadow,
 //! rounded corners and dragging.
-use crate::glass::{self, Device, Surface, client_size, fade, fill, inflate, inside, mix, rect, rgb, scaled_about, shadow, stroke, text};
+use crate::glass::{
+    self, Device, Surface, client_size, fade, fill, inflate, inside, mix, rect, rgb, scaled_about, shadow, stroke, text,
+};
 use kadr_render::gpu::Shared;
 use kadr_render::motion::{Curve, Spring};
 use kadr_render::theme::Theme;
@@ -15,15 +17,15 @@ use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dwm::*;
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, PAINTSTRUCT,
-    ScreenToClient,
+    BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+    PAINTSTRUCT, ScreenToClient,
 };
 use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetDpiForWindow};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB,
-    VK_UP,
+    ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN,
+    VK_RIGHT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
@@ -61,7 +63,6 @@ struct Layout {
     clear: D2D_RECT_F,
     cards: Vec<D2D_RECT_F>,
 }
-
 
 fn columns(width: f32, s: f32) -> usize {
     if width / s >= 760.0 { 4 } else { 3 }
@@ -210,7 +211,6 @@ impl Ui {
         Ok(Self { device, fonts })
     }
 }
-
 
 struct State {
     hwnd: HWND,
@@ -376,7 +376,15 @@ impl Window {
             set_attribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_TRANSIENTWINDOW);
             set_attribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND);
             set_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, windows::core::BOOL(0));
-            let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
             Ok(Self { hwnd })
         }
     }
@@ -384,7 +392,8 @@ impl Window {
     pub fn show(&self, enabled: bool, returning: bool) {
         DATA.with(|d| {
             if let Ok(mut guard) = d.try_borrow_mut()
-                    && let Some(d) = guard.as_mut() {
+                && let Some(d) = guard.as_mut()
+            {
                 d.loading = true;
                 d.enabled = enabled;
                 d.error = None;
@@ -454,9 +463,13 @@ impl Window {
 
     /// Height follows the number of rows; the first show also centres the window on its monitor.
     fn fit(&self, center: bool) {
-        let Some((scale, count)) =
-            DATA.with(|d| d.try_borrow_mut().ok().as_deref_mut().and_then(Option::as_mut).map(|d| (d.scale, d.cards.len().max(if d.loading { 4 } else { 0 }))))
-        else {
+        let Some((scale, count)) = DATA.with(|d| {
+            d.try_borrow_mut()
+                .ok()
+                .as_deref_mut()
+                .and_then(Option::as_mut)
+                .map(|d| (d.scale, d.cards.len().max(if d.loading { 4 } else { 0 })))
+        }) else {
             return;
         };
         unsafe {
@@ -487,7 +500,8 @@ impl Window {
     pub fn error(&self, message: &str) {
         DATA.with(|d| {
             if let Ok(mut guard) = d.try_borrow_mut()
-                    && let Some(d) = guard.as_mut() {
+                && let Some(d) = guard.as_mut()
+            {
                 d.loading = false;
                 d.error = Some(message.to_string());
             }
@@ -533,9 +547,6 @@ fn close(hwnd: HWND) {
     request(Request::Close);
 }
 
-
-
-
 /// Thumbnails that were set before the device existed get their bitmaps now.
 fn ensure_bitmaps(st: &mut State, previews: &mut Vec<(usize, kadr_doc::Image)>) {
     let Some(ui) = st.ui.as_ref() else { return };
@@ -580,7 +591,6 @@ fn paint_window(hwnd: HWND) {
         }
     });
 }
-
 
 /// Draws the whole window; returns whether anything is still moving.
 fn paint(ui: &Ui, st: &State, size: (f32, f32), now: f64, opaque: bool) -> bool {
@@ -695,9 +705,8 @@ fn paint(ui: &Ui, st: &State, size: (f32, f32), now: f64, opaque: bool) -> bool 
             ctx.SetTransform(&scaled_about(*r, 1.0, 0.0, rise));
         }
         let label = rect(r.left + 2.0, r.bottom + 6.0 * s, r.right, r.bottom + 28.0 * s);
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as u64);
+        let now_ms =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
         text(
             gpu,
             &ui.fonts.small,
@@ -782,7 +791,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let (x, y) = point(hwnd, lp);
             DATA.with(|d| {
                 if let Ok(mut guard) = d.try_borrow_mut()
-                    && let Some(st) = guard.as_mut() {
+                    && let Some(st) = guard.as_mut()
+                {
                     if !st.tracking {
                         let mut t = TRACKMOUSEEVENT {
                             cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
@@ -806,7 +816,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_MOUSELEAVE => {
             DATA.with(|d| {
                 if let Ok(mut guard) = d.try_borrow_mut()
-                    && let Some(st) = guard.as_mut() {
+                    && let Some(st) = guard.as_mut()
+                {
                     st.tracking = false;
                     st.set_hover(None);
                     st.press(None);
@@ -816,7 +827,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             return LRESULT(0);
         }
         WM_SETCURSOR if (lp.0 & 0xffff) as u32 == HTCLIENT => {
-            let hand = DATA.with(|d| d.try_borrow().ok().as_deref().and_then(Option::as_ref).is_some_and(|st| st.hover.is_some()));
+            let hand = DATA
+                .with(|d| d.try_borrow().ok().as_deref().and_then(Option::as_ref).is_some_and(|st| st.hover.is_some()));
             unsafe {
                 SetCursor(LoadCursorW(None, if hand { IDC_HAND } else { IDC_ARROW }).ok());
             }
@@ -826,7 +838,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let (x, y) = point(hwnd, lp);
             DATA.with(|d| {
                 if let Ok(mut guard) = d.try_borrow_mut()
-                    && let Some(st) = guard.as_mut() {
+                    && let Some(st) = guard.as_mut()
+                {
                     let l = st.layout(width());
                     let h = hit(&l, x, y, st.cards.len(), !st.cards.is_empty());
                     st.press(h);
@@ -876,7 +889,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_TIMER if wp.0 == TIMER_CONFIRM => {
             DATA.with(|d| {
                 if let Ok(mut guard) = d.try_borrow_mut()
-                    && let Some(st) = guard.as_mut() {
+                    && let Some(st) = guard.as_mut()
+                {
                     st.set_confirm(false);
                 }
             });
@@ -926,7 +940,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let r = unsafe { &*(lp.0 as *const RECT) };
             DATA.with(|d| {
                 if let Ok(mut guard) = d.try_borrow_mut()
-                    && let Some(st) = guard.as_mut() {
+                    && let Some(st) = guard.as_mut()
+                {
                     st.scale = unsafe { GetDpiForWindow(hwnd) } as f32 / 96.0;
                     if let Some(ui) = st.ui.as_mut()
                         && let Ok(fonts) = Fonts::new(&ui.device.shared, st.scale)
@@ -963,7 +978,9 @@ pub fn preview(
         .into_iter()
         .map(|e| Card {
             bitmap: e.preview.as_ref().and_then(|p| {
-                kadr_render::annotations::bitmap(&ui.device.gpu, p).ok().map(|b| (b, p.width() as f32, p.height() as f32))
+                kadr_render::annotations::bitmap(&ui.device.gpu, p)
+                    .ok()
+                    .map(|b| (b, p.width() as f32, p.height() as f32))
             }),
             id: e.id,
             created_ms: e.created_ms,
@@ -996,7 +1013,10 @@ mod tests {
             }
             let back = l.back.unwrap();
             assert!(l.clear.right <= back.left && back.right <= l.close.left);
-            assert_eq!(hit(&l, (back.left + back.right) / 2.0, (back.top + back.bottom) / 2.0, 10, true), Some(Hit::Back));
+            assert_eq!(
+                hit(&l, (back.left + back.right) / 2.0, (back.top + back.bottom) / 2.0, 10, true),
+                Some(Hit::Back)
+            );
             let c = l.cards[5];
             assert_eq!(hit(&l, (c.left + c.right) / 2.0, (c.top + c.bottom) / 2.0, 10, true), Some(Hit::Card(5)));
             assert_eq!(hit(&l, 5.0, 5.0, 10, true), None, "empty header area drags the window");
@@ -1016,7 +1036,8 @@ mod tests {
         unsafe {
             let before = GetForegroundWindow();
             let instance: HINSTANCE = windows::Win32::System::LibraryLoader::GetModuleHandleW(None).unwrap().into();
-            let window = Window::new(instance, HWND::default(), WM_APP + 90, HICON::default(), HICON::default()).unwrap();
+            let window =
+                Window::new(instance, HWND::default(), WM_APP + 90, HICON::default(), HICON::default()).unwrap();
             window.set_entries(Vec::new());
             assert!(!IsWindowVisible(window.hwnd).as_bool());
             assert_eq!(GetForegroundWindow(), before);
@@ -1026,7 +1047,9 @@ mod tests {
             // hiding, focusing). Such messages must be answered, not panic the process.
             DATA.with(|d| {
                 let _busy = d.borrow_mut();
-                for (msg, wp) in [(WM_NCHITTEST, 0), (WM_SETCURSOR, 1), (WM_MOUSEMOVE, 0), (WM_ACTIVATE, 0), (WM_KEYDOWN, 0x28)] {
+                for (msg, wp) in
+                    [(WM_NCHITTEST, 0), (WM_SETCURSOR, 1), (WM_MOUSEMOVE, 0), (WM_ACTIVATE, 0), (WM_KEYDOWN, 0x28)]
+                {
                     let _ = SendMessageW(window.hwnd, msg, Some(WPARAM(wp)), Some(LPARAM(0)));
                 }
             });

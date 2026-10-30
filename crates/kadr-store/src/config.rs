@@ -18,12 +18,27 @@ pub struct Config {
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all="lowercase")]
-pub enum TranslationEngine { #[default] Auto, Offline, Google }
-impl TranslationEngine {pub fn name(self)->&'static str {match self {Self::Auto=>"auto",Self::Offline=>"offline",Self::Google=>"google"}}}
+#[serde(rename_all = "lowercase")]
+pub enum TranslationEngine {
+    #[default]
+    Auto,
+    Offline,
+    Google,
+}
+impl TranslationEngine {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Offline => "offline",
+            Self::Google => "google",
+        }
+    }
+}
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(default)]
-pub struct Translation {pub engine:TranslationEngine}
+pub struct Translation {
+    pub engine: TranslationEngine,
+}
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -106,14 +121,23 @@ pub struct Save {
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(default)]
-pub struct Recent { pub enabled: bool, pub max: usize }
-impl Default for Recent { fn default() -> Self { Self { enabled: true, max: 10 } } }
+pub struct Recent {
+    pub enabled: bool,
+    pub max: usize,
+}
+impl Default for Recent {
+    fn default() -> Self {
+        Self { enabled: true, max: 10 }
+    }
+}
 
 impl Config {
     /// Проверяем весь набор до замены действующих настроек и регистрации клавиш.
     pub fn parse(text: &str) -> Result<Self, String> {
         let config: Self = toml::from_str(text).map_err(|e| e.to_string())?;
-        if !(1..=10).contains(&config.recent.max) { return Err("recent.max должен быть от 1 до 10".into()); }
+        if !(1..=10).contains(&config.recent.max) {
+            return Err("recent.max должен быть от 1 до 10".into());
+        }
         // Относительный путь считался бы от текущей папки процесса, а при автозапуске она случайна.
         let folder = config.save.folder.trim();
         if !folder.is_empty() && !Path::new(folder).is_absolute() {
@@ -243,7 +267,10 @@ pub fn render(c: &Config) -> String {
         "\n[appearance]\ntheme = {:<8}# auto — как в Windows, light — светлая, dark — тёмная\n",
         basic(c.appearance.theme.name())
     ));
-    out.push_str(&format!("marching_ants = {} # бегущий пунктир рамки и выбранных объектов\n", c.appearance.marching_ants));
+    out.push_str(&format!(
+        "marching_ants = {} # бегущий пунктир рамки и выбранных объектов\n",
+        c.appearance.marching_ants
+    ));
     out.push_str(&format!(
         "\n[recognition]\nengine = {:<8}# auto — как выбрано при установке, windows — встроенное в Windows, paddle — PaddleOCR\n",
         basic(c.recognition.engine.name())

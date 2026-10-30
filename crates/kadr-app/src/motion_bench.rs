@@ -29,10 +29,7 @@ pub fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut output = 0;
     while let Ok(out) = unsafe { adapter.EnumOutputs(output) } {
         let desc = unsafe { out.GetDesc()? };
-        let mut mode = DEVMODEW {
-            dmSize: size_of::<DEVMODEW>() as u16,
-            ..Default::default()
-        };
+        let mut mode = DEVMODEW { dmSize: size_of::<DEVMODEW>() as u16, ..Default::default() };
         if unsafe { EnumDisplaySettingsW(PCWSTR(desc.DeviceName.as_ptr()), ENUM_CURRENT_SETTINGS, &mut mode) }.as_bool()
         {
             report.push(format!(
@@ -63,10 +60,7 @@ pub fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let background = annotations::bitmap(&gpu, &frames[0])?;
     let target = unsafe {
         gpu.d2d.CreateBitmap(
-            D2D_SIZE_U {
-                width: 2560,
-                height: 1440,
-            },
+            D2D_SIZE_U { width: 2560, height: 1440 },
             None,
             0,
             &bitmap_props(D2D1_BITMAP_OPTIONS_TARGET),
@@ -74,13 +68,7 @@ pub fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     };
     let mut query = None;
     unsafe {
-        gpu.device.CreateQuery(
-            &D3D11_QUERY_DESC {
-                Query: D3D11_QUERY_EVENT,
-                MiscFlags: 0,
-            },
-            Some(&mut query),
-        )?;
+        gpu.device.CreateQuery(&D3D11_QUERY_DESC { Query: D3D11_QUERY_EVENT, MiscFlags: 0 }, Some(&mut query))?;
         gpu.d2d.SetTarget(&target);
     }
     let query = query.ok_or("GPU query unavailable")?;
@@ -91,24 +79,35 @@ pub fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let censor = std::env::var_os("KADR_BENCH_CENSOR").is_some();
     let crop = Rect::new(400, 200, 2000, 1100);
     let shapes: Vec<_> = if censor {
-        (0..100).map(|i| {
-            let x = 420 + (i % 4) * 380;
-            let y = 220 + (i / 4) * 32;
-            let mut shape = kadr_doc::annotation::Annotation::new(i as u64 + 1, Tool::Blur, kadr_doc::Point::new(x, y));
-            shape.points[1] = [x + 320, y + 23];
-            shape.seed = i as u64 + 123;
-            shape
-        }).collect()
-    } else { Vec::new() };
+        (0..100)
+            .map(|i| {
+                let x = 420 + (i % 4) * 380;
+                let y = 220 + (i / 4) * 32;
+                let mut shape =
+                    kadr_doc::annotation::Annotation::new(i as u64 + 1, Tool::Blur, kadr_doc::Point::new(x, y));
+                shape.points[1] = [x + 320, y + 23];
+                shape.seed = i as u64 + 123;
+                shape
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     if censor {
         let start = Instant::now();
         annotations::prewarm(&frames, crop, &shapes);
-        report.push(format!("100 censor regions background preparation: {:.3} ms", start.elapsed().as_secs_f64() * 1000.0));
+        report.push(format!(
+            "100 censor regions background preparation: {:.3} ms",
+            start.elapsed().as_secs_f64() * 1000.0
+        ));
     }
-    let censor_areas: Vec<_> = shapes.iter().map(|shape| {
-        let r = shape.rect();
-        (RECT { left: r.left, top: r.top, right: r.right, bottom: r.bottom }, 0.5, 0.5)
-    }).collect();
+    let censor_areas: Vec<_> = shapes
+        .iter()
+        .map(|shape| {
+            let r = shape.rect();
+            (RECT { left: r.left, top: r.top, right: r.right, bottom: r.bottom }, 0.5, 0.5)
+        })
+        .collect();
     if censor {
         let start = Instant::now();
         annotations::prepare_display(&gpu, &shared, &frames, crop, &shapes, &mut cache)?;
@@ -146,21 +145,12 @@ pub fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 size: (2560, 1440),
                 scale: 1.0,
                 marks: Marks {
-                    selection: Some(RECT {
-                        left: 400,
-                        top: 200,
-                        right: 2000,
-                        bottom: 1100,
-                    }),
+                    selection: Some(RECT { left: 400, top: 200, right: 2000, bottom: 1100 }),
                     toolbar: Some(Toolbar {
-                        hovered: Some(if frame % 50 < 25 {
-                            ToolbarButton::Tool(tool)
-                        } else {
-                            ToolbarButton::Save
-                        }),
+                        hovered: Some(if frame % 50 < 25 { ToolbarButton::Tool(tool) } else { ToolbarButton::Save }),
                         editor: Some(EditorBar {
-            text_style: Default::default(),
-            callout: false,
+                            text_style: Default::default(),
+                            callout: false,
                             tool,
                             color: 0,
                             width: 3,
@@ -171,8 +161,13 @@ pub fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
                         }),
                     }),
                     drawing: censor.then_some(annotations::View {
-                        shapes: &shapes, preview: None, frames: &frames, crop,
-                        selected: None, control: None, text_edit: None,
+                        shapes: &shapes,
+                        preview: None,
+                        frames: &frames,
+                        crop,
+                        selected: None,
+                        control: None,
+                        text_edit: None,
                     }),
                     smart: censor.then_some(scene::SmartFx { scanning: true, scan_time: None, areas: &censor_areas }),
                     ..Default::default()
@@ -190,12 +185,7 @@ pub fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
         loop {
             let mut ready = BOOL(0);
             unsafe {
-                gpu.context.GetData(
-                    &query,
-                    Some(&mut ready as *mut _ as *mut _),
-                    size_of::<BOOL>() as u32,
-                    0,
-                )?;
+                gpu.context.GetData(&query, Some(&mut ready as *mut _ as *mut _), size_of::<BOOL>() as u32, 0)?;
             }
             if ready.as_bool() {
                 break;
@@ -206,7 +196,10 @@ pub fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
             std::thread::yield_now();
         }
         if censor && frame == 0 {
-            report.push(format!("First prepared censor frame (CPU + GPU): {:.3} ms", start.elapsed().as_secs_f64() * 1000.0));
+            report.push(format!(
+                "First prepared censor frame (CPU + GPU): {:.3} ms",
+                start.elapsed().as_secs_f64() * 1000.0
+            ));
         }
         if frame >= 10 {
             samples.push(start.elapsed().as_secs_f64() * 1000.0);
@@ -214,18 +207,23 @@ pub fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
             submission.push(submitted.duration_since(recorded).as_secs_f64() * 1000.0);
             completion.push(submitted.elapsed().as_secs_f64() * 1000.0);
         }
-        if !censor && [0, 6, 16, 34, 40, 46, 56, 102, 108, 114, 120, 132, 238, 241, 244, 248, 254, 270, 339].contains(&frame) {
+        if !censor
+            && [0, 6, 16, 34, 40, 46, 56, 102, 108, 114, 120, 132, 238, 241, 244, 248, 254, 270, 339].contains(&frame)
+        {
             let image = read(&gpu, &target)?;
-            std::fs::write(
-                pictures.join(format!("frame-{frame:03}.png")),
-                kadr_doc::pixels::encode_png(&image)?,
-            )?;
+            std::fs::write(pictures.join(format!("frame-{frame:03}.png")), kadr_doc::pixels::encode_png(&image)?)?;
         }
     }
     samples.sort_by(f64::total_cmp);
-    for (name, mut values) in [("D2D recording", recording), ("EndDraw + Flush", submission), ("GPU completion wait", completion)] {
+    for (name, mut values) in
+        [("D2D recording", recording), ("EndDraw + Flush", submission), ("GPU completion wait", completion)]
+    {
         values.sort_by(f64::total_cmp);
-        report.push(format!("{name}: p50 {:.3} ms, p95 {:.3} ms", values[values.len()/2], values[values.len()*95/100]));
+        report.push(format!(
+            "{name}: p50 {:.3} ms, p95 {:.3} ms",
+            values[values.len() / 2],
+            values[values.len() * 95 / 100]
+        ));
     }
     let budget = 1000.0 / 170.0;
     report.push(format!(
@@ -248,10 +246,7 @@ fn read(gpu: &Gpu, target: &windows::Win32::Graphics::Direct2D::ID2D1Bitmap1) ->
     use windows::Win32::Graphics::Direct2D::*;
     unsafe {
         let bitmap = gpu.d2d.CreateBitmap(
-            D2D_SIZE_U {
-                width: 2560,
-                height: 1440,
-            },
+            D2D_SIZE_U { width: 2560, height: 1440 },
             None,
             0,
             &bitmap_props(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW),
@@ -260,10 +255,8 @@ fn read(gpu: &Gpu, target: &windows::Win32::Graphics::Direct2D::ID2D1Bitmap1) ->
         let mapped = bitmap.Map(D2D1_MAP_OPTIONS_READ)?;
         let mut pixels = Vec::with_capacity(2560 * 1440 * 4);
         for y in 0..1440 {
-            pixels.extend_from_slice(std::slice::from_raw_parts(
-                mapped.bits.add((y * mapped.pitch) as usize),
-                2560 * 4,
-            ));
+            pixels
+                .extend_from_slice(std::slice::from_raw_parts(mapped.bits.add((y * mapped.pitch) as usize), 2560 * 4));
         }
         bitmap.Unmap()?;
         Ok(Image::new(Rect::new(0, 0, 2560, 1440), pixels))

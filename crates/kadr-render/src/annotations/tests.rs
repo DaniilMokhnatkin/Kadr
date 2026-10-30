@@ -50,10 +50,7 @@ fn gpu_exposes_a_ready_frame_event_without_showing_a_window() {
             Flags: DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0 as u32,
             ..Default::default()
         };
-        let chain = gpu
-            .factory
-            .CreateSwapChainForComposition(&gpu.device, &desc, None::<&IDXGIOutput>)
-            .unwrap();
+        let chain = gpu.factory.CreateSwapChainForComposition(&gpu.device, &desc, None::<&IDXGIOutput>).unwrap();
         use windows::core::Interface;
         let chain: IDXGISwapChain2 = chain.cast().unwrap();
         let foreground = GetForegroundWindow();
@@ -87,10 +84,7 @@ fn gpu_exposes_a_ready_frame_event_without_showing_a_window() {
         let _ = DestroyWindow(window);
         let _ = CloseHandle(event);
         assert_eq!(ready, WAIT_OBJECT_0);
-        assert!(
-            shown.is_ok() || shown == DXGI_ERROR_WAS_STILL_DRAWING,
-            "Present returned {shown:?}"
-        );
+        assert!(shown.is_ok() || shown == DXGI_ERROR_WAS_STILL_DRAWING, "Present returned {shown:?}");
     }
 }
 fn image(r: Rect, inverse: bool) -> Arc<Image> {
@@ -106,18 +100,10 @@ fn image(r: Rect, inverse: bool) -> Arc<Image> {
 }
 unsafe fn read(gpu: &Gpu, target: &ID2D1Bitmap1, r: Rect) -> Image {
     unsafe {
-        let size = D2D_SIZE_U {
-            width: r.width() as u32,
-            height: r.height() as u32,
-        };
+        let size = D2D_SIZE_U { width: r.width() as u32, height: r.height() as u32 };
         let cpu = gpu
             .d2d
-            .CreateBitmap(
-                size,
-                None,
-                0,
-                &bitmap_props(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW),
-            )
+            .CreateBitmap(size, None, 0, &bitmap_props(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW))
             .unwrap();
         cpu.CopyFromBitmap(None, target, None).unwrap();
         let map = cpu.Map(D2D1_MAP_OPTIONS_READ).unwrap();
@@ -155,15 +141,7 @@ fn overlay_crop_matches_export_and_all_tools_render_on_negative_monitor() {
     unsafe {
         let target = gpu
             .d2d
-            .CreateBitmap(
-                D2D_SIZE_U {
-                    width: 900,
-                    height: 500,
-                },
-                None,
-                0,
-                &bitmap_props(D2D1_BITMAP_OPTIONS_TARGET),
-            )
+            .CreateBitmap(D2D_SIZE_U { width: 900, height: 500 }, None, 0, &bitmap_props(D2D1_BITMAP_OPTIONS_TARGET))
             .unwrap();
         let base = bitmap(&gpu, &frames[0]).unwrap();
         gpu.d2d.SetTarget(&target);
@@ -173,7 +151,8 @@ fn overlay_crop_matches_export_and_all_tools_render_on_negative_monitor() {
             preview: None,
             frames: &frames,
             crop,
-            selected: None, control: None,
+            selected: None,
+            control: None,
             text_edit: None,
         };
         let scene = Scene {
@@ -182,12 +161,7 @@ fn overlay_crop_matches_export_and_all_tools_render_on_negative_monitor() {
             size: (900, 500),
             scale: 1.0,
             marks: Marks {
-                selection: Some(RECT {
-                    left: crop.left,
-                    top: crop.top,
-                    right: crop.right,
-                    bottom: crop.bottom,
-                }),
+                selection: Some(RECT { left: crop.left, top: crop.top, right: crop.right, bottom: crop.bottom }),
                 drawing: Some(view),
                 ..Default::default()
             },
@@ -216,16 +190,8 @@ fn overlay_crop_matches_export_and_all_tools_render_on_negative_monitor() {
         // Larger errors (wrong crop, UI, missing shape/blur) still fail; redaction is exact below.
         if differences.iter().any(|(_, delta)| *delta > 1) {
             if let Ok(dir) = std::env::var("KADR_TEST_ARTIFACTS") {
-                std::fs::write(
-                    format!("{dir}/screen.png"),
-                    kadr_doc::pixels::encode_png(&selected).unwrap(),
-                )
-                .unwrap();
-                std::fs::write(
-                    format!("{dir}/export.png"),
-                    kadr_doc::pixels::encode_png(&exported).unwrap(),
-                )
-                .unwrap();
+                std::fs::write(format!("{dir}/screen.png"), kadr_doc::pixels::encode_png(&selected).unwrap()).unwrap();
+                std::fs::write(format!("{dir}/export.png"), kadr_doc::pixels::encode_png(&exported).unwrap()).unwrap();
             }
             panic!(
                 "{} channels differ, max {}, first {:?}",
@@ -292,55 +258,101 @@ fn prewarm_caches_the_complete_layer_across_assigned_shape_ids() {
 
 #[test]
 fn an_ellipse_patch_never_restores_text_hidden_by_a_neighbour() {
-    let crop=Rect::new(0,0,100,100); let frames=vec![image(crop,false)];
-    let mut first=Annotation::new(1,Tool::Blur,Point::new(0,0)); first.points[1]=[99,99];first.seed=123;
-    let alone=prepared_layer(&frames,crop,&[first.clone()]);
-    let mut ellipse=Annotation::new(2,Tool::BlurEllipse,Point::new(10,10));ellipse.points[1]=[89,89];ellipse.seed=777;
-    let both=prepared_layer(&frames,crop,&[first,ellipse]);
+    let crop = Rect::new(0, 0, 100, 100);
+    let frames = vec![image(crop, false)];
+    let mut first = Annotation::new(1, Tool::Blur, Point::new(0, 0));
+    first.points[1] = [99, 99];
+    first.seed = 123;
+    let alone = prepared_layer(&frames, crop, &[first.clone()]);
+    let mut ellipse = Annotation::new(2, Tool::BlurEllipse, Point::new(10, 10));
+    ellipse.points[1] = [89, 89];
+    ellipse.seed = 777;
+    let both = prepared_layer(&frames, crop, &[first, ellipse]);
     // This point is inside the second patch's bounding box, but outside its ellipse and feather.
-    let point=Point::new(8,8);
-    assert_eq!(both.pixel(point),alone.pixel(point));
-    assert_ne!(both.pixel(point),frames[0].pixel(point));
+    let point = Point::new(8, 8);
+    assert_eq!(both.pixel(point), alone.pixel(point));
+    assert_ne!(both.pixel(point), frames[0].pixel(point));
 }
 
 #[test]
 fn text_styles_export_distinct_pixels_and_callout_is_part_of_the_image() {
-    let (shared,gpu)=setup();let crop=Rect::new(0,0,500,260);let frames=vec![image(crop,false)];
-    let mut text=Annotation::new(1,Tool::Text,Point::new(50,40));text.text="Текст / Text".into();text.color=[239,68,68];
-    let plain=flatten(&gpu,&shared,&frames,crop,&[text.clone()]).unwrap();
-    text.text_style=TextStyle::Filled;let filled=flatten(&gpu,&shared,&frames,crop,&[text.clone()]).unwrap();
-    text.text_style=TextStyle::Outline;let outline=flatten(&gpu,&shared,&frames,crop,&[text.clone()]).unwrap();
-    assert_ne!(plain,filled);assert_ne!(plain,outline);assert_ne!(filled,outline);
-    text.callout=true;text.points.push([140,190]);let callout=flatten(&gpu,&shared,&frames,crop,&[text]).unwrap();
-    assert_ne!(callout.pixel(Point::new(140,190)),frames[0].pixel(Point::new(140,190)));
-    if let Ok(dir)=std::env::var("KADR_TEST_ARTIFACTS") {for (name,img) in [("text-plain",plain),("text-filled",filled),("text-outline",outline),("text-callout",callout)] {std::fs::write(format!("{dir}/{name}.png"),kadr_doc::pixels::encode_png(&img).unwrap()).unwrap();}}
+    let (shared, gpu) = setup();
+    let crop = Rect::new(0, 0, 500, 260);
+    let frames = vec![image(crop, false)];
+    let mut text = Annotation::new(1, Tool::Text, Point::new(50, 40));
+    text.text = "Текст / Text".into();
+    text.color = [239, 68, 68];
+    let plain = flatten(&gpu, &shared, &frames, crop, &[text.clone()]).unwrap();
+    text.text_style = TextStyle::Filled;
+    let filled = flatten(&gpu, &shared, &frames, crop, &[text.clone()]).unwrap();
+    text.text_style = TextStyle::Outline;
+    let outline = flatten(&gpu, &shared, &frames, crop, &[text.clone()]).unwrap();
+    assert_ne!(plain, filled);
+    assert_ne!(plain, outline);
+    assert_ne!(filled, outline);
+    text.callout = true;
+    text.points.push([140, 190]);
+    let callout = flatten(&gpu, &shared, &frames, crop, &[text]).unwrap();
+    assert_ne!(callout.pixel(Point::new(140, 190)), frames[0].pixel(Point::new(140, 190)));
+    if let Ok(dir) = std::env::var("KADR_TEST_ARTIFACTS") {
+        for (name, img) in
+            [("text-plain", plain), ("text-filled", filled), ("text-outline", outline), ("text-callout", callout)]
+        {
+            std::fs::write(format!("{dir}/{name}.png"), kadr_doc::pixels::encode_png(&img).unwrap()).unwrap();
+        }
+    }
 }
 #[test]
 fn lens_magnifies_only_the_censored_layer_not_the_original_secret() {
-    let (shared,gpu)=setup();let crop=Rect::new(0,0,150,150);let frames=vec![image(crop,false)];
-    let mut blur=Annotation::new(1,Tool::Blur,Point::new(0,0));blur.points[1]=[149,149];blur.seed=987;
-    let mut lens=Annotation::new(2,Tool::Lens,Point::new(20,20));lens.points[1]=[129,129];lens.strength=2;
-    let base=flatten(&gpu,&shared,&frames,crop,&[blur.clone()]).unwrap();
-    let censored=flatten(&gpu,&shared,&frames,crop,&[blur,lens.clone()]).unwrap();
-    let raw=flatten(&gpu,&shared,&frames,crop,&[lens]).unwrap();
+    let (shared, gpu) = setup();
+    let crop = Rect::new(0, 0, 150, 150);
+    let frames = vec![image(crop, false)];
+    let mut blur = Annotation::new(1, Tool::Blur, Point::new(0, 0));
+    blur.points[1] = [149, 149];
+    blur.seed = 987;
+    let mut lens = Annotation::new(2, Tool::Lens, Point::new(20, 20));
+    lens.points[1] = [129, 129];
+    lens.strength = 2;
+    let base = flatten(&gpu, &shared, &frames, crop, &[blur.clone()]).unwrap();
+    let censored = flatten(&gpu, &shared, &frames, crop, &[blur, lens.clone()]).unwrap();
+    let raw = flatten(&gpu, &shared, &frames, crop, &[lens]).unwrap();
     // The centre maps to the centre at every zoom factor, with no original bitmap mixed back in.
-    let centre=Point::new(75,75);
-    let a=censored.pixel(centre).unwrap();let b=base.pixel(centre).unwrap();
-    assert!(a.iter().zip(b).all(|(a,b)|a.abs_diff(b)<=2));
-    assert_ne!(censored,raw);
+    let centre = Point::new(75, 75);
+    let a = censored.pixel(centre).unwrap();
+    let b = base.pixel(centre).unwrap();
+    assert!(a.iter().zip(b).all(|(a, b)| a.abs_diff(b) <= 2));
+    assert_ne!(censored, raw);
 }
 
 #[test]
 fn marching_selection_changes_phase_and_reduced_motion_stays_static_without_exporting_ui() {
-    let (shared,gpu)=setup();let area=Rect::new(0,0,200,100);let frames=vec![image(area,false)];
-    let target=unsafe {gpu.d2d.CreateBitmap(D2D_SIZE_U {width:200,height:100},None,0,&bitmap_props(D2D1_BITMAP_OPTIONS_TARGET)).unwrap()};
-    let theme=Theme::current();
-    let sample=|time,animate|unsafe {
-        gpu.d2d.SetTarget(&target);gpu.d2d.BeginDraw();gpu.d2d.Clear(Some(&D2D1_COLOR_F {r:0.0,g:0.0,b:0.0,a:1.0}));
-        scene::marching_border(&gpu,&shared,&theme,D2D_RECT_F {left:10.0,top:10.0,right:190.0,bottom:90.0},1.5,time,animate).unwrap();
-        gpu.d2d.EndDraw(None,None).unwrap();read(&gpu,&target,area)
+    let (shared, gpu) = setup();
+    let area = Rect::new(0, 0, 200, 100);
+    let frames = vec![image(area, false)];
+    let target = unsafe {
+        gpu.d2d
+            .CreateBitmap(D2D_SIZE_U { width: 200, height: 100 }, None, 0, &bitmap_props(D2D1_BITMAP_OPTIONS_TARGET))
+            .unwrap()
     };
-    assert_ne!(sample(0.0,true),sample(0.2,true));
-    assert_eq!(sample(0.0,false),sample(0.2,false));
-    assert_eq!(flatten(&gpu,&shared,&frames,area,&[]).unwrap(),*frames[0]);
+    let theme = Theme::current();
+    let sample = |time, animate| unsafe {
+        gpu.d2d.SetTarget(&target);
+        gpu.d2d.BeginDraw();
+        gpu.d2d.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }));
+        scene::marching_border(
+            &gpu,
+            &shared,
+            &theme,
+            D2D_RECT_F { left: 10.0, top: 10.0, right: 190.0, bottom: 90.0 },
+            1.5,
+            time,
+            animate,
+        )
+        .unwrap();
+        gpu.d2d.EndDraw(None, None).unwrap();
+        read(&gpu, &target, area)
+    };
+    assert_ne!(sample(0.0, true), sample(0.2, true));
+    assert_eq!(sample(0.0, false), sample(0.2, false));
+    assert_eq!(flatten(&gpu, &shared, &frames, area, &[]).unwrap(), *frames[0]);
 }

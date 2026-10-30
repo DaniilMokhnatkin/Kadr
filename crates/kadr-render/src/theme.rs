@@ -13,8 +13,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 static MARCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-pub fn set_marching_ants(enabled: bool) { MARCHING.store(enabled, std::sync::atomic::Ordering::Relaxed); }
-pub fn marching_ants() -> bool { MARCHING.load(std::sync::atomic::Ordering::Relaxed) }
+pub fn set_marching_ants(enabled: bool) {
+    MARCHING.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+pub fn marching_ants() -> bool {
+    MARCHING.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 #[derive(Clone, Copy)]
 pub struct Theme {
@@ -261,10 +265,7 @@ fn apps_use_dark() -> bool {
 }
 
 fn high_contrast_on() -> bool {
-    let mut hc = HIGHCONTRASTW {
-        cbSize: size_of::<HIGHCONTRASTW>() as u32,
-        ..Default::default()
-    };
+    let mut hc = HIGHCONTRASTW { cbSize: size_of::<HIGHCONTRASTW>() as u32, ..Default::default() };
     let ok = unsafe {
         SystemParametersInfoW(
             SPI_GETHIGHCONTRAST,
@@ -297,11 +298,7 @@ mod tests {
     fn contrast(a: D2D1_COLOR_F, b: D2D1_COLOR_F) -> f32 {
         let luminance = |c: D2D1_COLOR_F| {
             let f = |v: f32| {
-                if v <= 0.04045 {
-                    v / 12.92
-                } else {
-                    ((v + 0.055) / 1.055).powf(2.4)
-                }
+                if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
             };
             0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b)
         };

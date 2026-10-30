@@ -17,8 +17,8 @@ use windows::Win32::Graphics::Dwm::{
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{
     DXGI_ERROR_WAS_STILL_DRAWING, DXGI_PRESENT, DXGI_PRESENT_DO_NOT_WAIT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
-    DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
-    IDXGIOutput, IDXGISurface, IDXGISwapChain1, IDXGISwapChain2,
+    DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+    DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIOutput, IDXGISurface, IDXGISwapChain1, IDXGISwapChain2,
 };
 use windows::Win32::Graphics::Gdi::HMONITOR;
 use windows::Win32::System::Threading::WaitForSingleObject;
@@ -102,13 +102,10 @@ impl Overlay {
                 Flags: DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0 as u32,
                 ..Default::default()
             };
-            let swapchain = gpu
-                .factory
-                .CreateSwapChainForComposition(&gpu.device, &desc, None::<&IDXGIOutput>)
-                .or_else(|_| {
+            let swapchain =
+                gpu.factory.CreateSwapChainForComposition(&gpu.device, &desc, None::<&IDXGIOutput>).or_else(|_| {
                     desc.Flags = 0;
-                    gpu.factory
-                        .CreateSwapChainForComposition(&gpu.device, &desc, None::<&IDXGIOutput>)
+                    gpu.factory.CreateSwapChainForComposition(&gpu.device, &desc, None::<&IDXGIOutput>)
                 })?;
             let latency = if desc.Flags != 0 {
                 let chain: IDXGISwapChain2 = swapchain.cast()?;
@@ -166,10 +163,8 @@ impl Overlay {
 
     /// Загруженный черновик уже находится в памяти CPU, захват живого экрана не нужен.
     pub fn set_image(&mut self, gpu: &Gpu, image: &kadr_doc::Image) -> Result<()> {
-        let size = windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_U {
-            width: image.width(),
-            height: image.height(),
-        };
+        let size =
+            windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_U { width: image.width(), height: image.height() };
         self.frame = Some(unsafe {
             gpu.d2d.CreateBitmap(
                 size,
@@ -182,10 +177,21 @@ impl Overlay {
     }
 
     pub fn prepare_annotations(
-        &self, gpu: &Gpu, shared: &Shared, frames: &[std::sync::Arc<kadr_doc::Image>],
-        crop: kadr_doc::Rect, shapes: &[kadr_doc::annotation::Annotation],
+        &self,
+        gpu: &Gpu,
+        shared: &Shared,
+        frames: &[std::sync::Arc<kadr_doc::Image>],
+        crop: kadr_doc::Rect,
+        shapes: &[kadr_doc::annotation::Annotation],
     ) -> Result<()> {
-        kadr_render::annotations::prepare_display(gpu, shared, frames, crop, shapes, &mut self.annotation_cache.borrow_mut())
+        kadr_render::annotations::prepare_display(
+            gpu,
+            shared,
+            frames,
+            crop,
+            shapes,
+            &mut self.annotation_cache.borrow_mut(),
+        )
     }
 
     pub fn present(&self, gpu: &Gpu, shared: &Shared, theme: &Theme, marks: Marks) -> Result<()> {
@@ -202,10 +208,7 @@ impl Overlay {
         self.latency
     }
     pub fn ready(&self) -> bool {
-        self.retry_present.get()
-            || self
-                .latency
-                .is_none_or(|h| unsafe { WaitForSingleObject(h, 0) == WAIT_OBJECT_0 })
+        self.retry_present.get() || self.latency.is_none_or(|h| unsafe { WaitForSingleObject(h, 0) == WAIT_OBJECT_0 })
     }
     pub fn needs_retry(&self) -> bool {
         self.retry_present.get()
@@ -223,33 +226,19 @@ impl Overlay {
         let scene = Scene {
             frame: self.frame.as_ref(),
             origin: (self.rect.left, self.rect.top),
-            size: (
-                (self.rect.right - self.rect.left) as u32,
-                (self.rect.bottom - self.rect.top) as u32,
-            ),
+            size: ((self.rect.right - self.rect.left) as u32, (self.rect.bottom - self.rect.top) as u32),
             scale: self.scale,
             marks,
         };
         unsafe {
             gpu.d2d.SetTarget(&self.target);
             gpu.d2d.BeginDraw();
-            let drawn = scene::draw(
-                gpu,
-                shared,
-                &self.text,
-                theme,
-                &scene,
-                &mut self.annotation_cache.borrow_mut(),
-            );
+            let drawn = scene::draw(gpu, shared, &self.text, theme, &scene, &mut self.annotation_cache.borrow_mut());
             gpu.d2d.EndDraw(None, None)?;
             drawn?;
             let result = self.swapchain.Present(
                 if nonblocking { 1 } else { 0 },
-                if nonblocking {
-                    DXGI_PRESENT_DO_NOT_WAIT
-                } else {
-                    DXGI_PRESENT(0)
-                },
+                if nonblocking { DXGI_PRESENT_DO_NOT_WAIT } else { DXGI_PRESENT(0) },
             );
             present_result(result, nonblocking, &self.retry_present)
         }
@@ -303,12 +292,8 @@ pub fn set_cloaked(hwnd: HWND, cloaked: bool) {
 fn set_bool_attribute(hwnd: HWND, attribute: DWMWINDOWATTRIBUTE, value: bool) {
     let value = BOOL::from(value);
     unsafe {
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            attribute,
-            &value as *const BOOL as *const c_void,
-            size_of::<BOOL>() as u32,
-        );
+        let _ =
+            DwmSetWindowAttribute(hwnd, attribute, &value as *const BOOL as *const c_void, size_of::<BOOL>() as u32);
     }
 }
 
@@ -335,34 +320,49 @@ mod tests {
     fn cloaked_swapchain_keeps_advancing_without_any_desktop_input() {
         use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
         use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-        use windows::Win32::UI::WindowsAndMessaging::{
-            DefWindowProcW, GetForegroundWindow, RegisterClassW, WNDCLASSW,
-        };
-        unsafe extern "system" fn proc(hwnd: HWND, msg: u32,
-            wp: windows::Win32::Foundation::WPARAM, lp: windows::Win32::Foundation::LPARAM,
+        use windows::Win32::UI::WindowsAndMessaging::{DefWindowProcW, GetForegroundWindow, RegisterClassW, WNDCLASSW};
+        unsafe extern "system" fn proc(
+            hwnd: HWND,
+            msg: u32,
+            wp: windows::Win32::Foundation::WPARAM,
+            lp: windows::Win32::Foundation::LPARAM,
         ) -> windows::Win32::Foundation::LRESULT {
             unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
         }
         let foreground = unsafe { GetForegroundWindow() };
         let shared = Shared::new().unwrap();
         let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1().unwrap() };
-        let gpu = Gpu::new(&shared, &unsafe { factory.EnumAdapters1(0).unwrap() }, "idle animation test".into()).unwrap();
+        let gpu =
+            Gpu::new(&shared, &unsafe { factory.EnumAdapters1(0).unwrap() }, "idle animation test".into()).unwrap();
         let instance: HINSTANCE = unsafe { GetModuleHandleW(None).unwrap().into() };
-        unsafe { RegisterClassW(&WNDCLASSW {
-            lpfnWndProc: Some(proc), hInstance: instance, lpszClassName: CLASS,
-            ..Default::default()
-        }); }
+        unsafe {
+            RegisterClassW(&WNDCLASSW {
+                lpfnWndProc: Some(proc),
+                hInstance: instance,
+                lpszClassName: CLASS,
+                ..Default::default()
+            });
+        }
         // Always DWM-cloaked, offscreen, never activates; no capture, hooks or hotkeys.
-        let overlay = Overlay::new(&gpu, &shared, 0,
+        let overlay = Overlay::new(
+            &gpu,
+            &shared,
+            0,
             RECT { left: -32000, top: -32000, right: -31360, bottom: -31520 },
-            HMONITOR::default(), instance).unwrap();
+            HMONITOR::default(),
+            instance,
+        )
+        .unwrap();
         let handle = overlay.latency_handle().expect("DXGI frame signal");
         let mut frames = crate::pacing::Frames::default();
         frames.request(1);
         for i in 0..40 {
             assert_eq!(frames.pending(), vec![0]);
-            assert_eq!(unsafe { WaitForSingleObject(handle, 500) }, WAIT_OBJECT_0,
-                "frame {i} must arrive without a mouse message");
+            assert_eq!(
+                unsafe { WaitForSingleObject(handle, 500) },
+                WAIT_OBJECT_0,
+                "frame {i} must arrive without a mouse message"
+            );
             let marks = Marks {
                 selection: Some(RECT { left: -31950, top: -31950, right: -31450, bottom: -31600 }),
                 ..Default::default()

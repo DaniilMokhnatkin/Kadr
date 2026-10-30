@@ -32,31 +32,23 @@ impl App {
         if active.frames.is_empty() {
             return;
         }
-        let Some(monitor) = self
-            .outputs
-            .iter()
-            .map(Output::bounds)
-            .find(|m| m.contains(p))
-        else {
+        let Some(monitor) = self.outputs.iter().map(Output::bounds).find(|m| m.contains(p)) else {
             return;
         };
         // A generous band around the click: enough for a wrapped paragraph, small enough to be fast.
-        let Some(area) =
-            DocRect::new(p.x - 900, p.y - 320, p.x + 900, p.y + 320).intersect(&monitor)
-        else {
+        let Some(area) = DocRect::new(p.x - 900, p.y - 320, p.x + 900, p.y + 320).intersect(&monitor) else {
             return;
         };
-        let Some(gpu)=self.gpus.first() else {return};
-        let image=match kadr_render::annotations::flatten(gpu,&self.shared,&active.frames,area,active.drawing.shapes()) {
-            Ok(image)=>image,
-            Err(error)=>{log_warn!("подготовка текста для перевода: {error}");return;}
-        };
-        self.run_text_job(
-            image,
-            Job::Translate,
-            Some(p),
-            DocRect::new(p.x, p.y - 10, p.x + 1, p.y + 10),
-        );
+        let Some(gpu) = self.gpus.first() else { return };
+        let image =
+            match kadr_render::annotations::flatten(gpu, &self.shared, &active.frames, area, active.drawing.shapes()) {
+                Ok(image) => image,
+                Err(error) => {
+                    log_warn!("подготовка текста для перевода: {error}");
+                    return;
+                }
+            };
+        self.run_text_job(image, Job::Translate, Some(p), DocRect::new(p.x, p.y - 10, p.x + 1, p.y + 10));
         self.begin_exit(false, None);
     }
 
@@ -95,11 +87,9 @@ impl App {
                 let _ = CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
             }
             let result = (|| -> std::result::Result<TextResult, String> {
-                let lines = crate::ocr::recognize(&image)
-                    .map_err(|e| format!("Распознавание: {}", e.message()))?;
+                let lines = crate::ocr::recognize(&image).map_err(|e| format!("Распознавание: {}", e.message()))?;
                 let (text, rect) = match click {
-                    Some(p) => crate::ocr::paragraph_at(&lines, p)
-                        .ok_or("Под курсором не нашлось текста")?,
+                    Some(p) => crate::ocr::paragraph_at(&lines, p).ok_or("Под курсором не нашлось текста")?,
                     None => {
                         let text = crate::ocr::text(&lines);
                         if text.trim().is_empty() {
@@ -112,24 +102,14 @@ impl App {
                     Job::Copy => TextResult::Copied(text),
                     Job::Translate => {
                         let t = crate::translate::for_reader(&text)?;
-                        TextResult::Translated {
-                            text: t.text,
-                            from: t.from,
-                            to: t.to,
-                            anchor: click.map(|_| rect),
-                        }
+                        TextResult::Translated { text: t.text, from: t.from, to: t.to, anchor: click.map(|_| rect) }
                     }
                 })
             })()
             .unwrap_or_else(TextResult::Failed);
             let _ = tx.send(result);
             unsafe {
-                let _ = PostMessageW(
-                    Some(HWND(host as *mut _)),
-                    WM_APP_TEXT,
-                    WPARAM(0),
-                    LPARAM(0),
-                );
+                let _ = PostMessageW(Some(HWND(host as *mut _)), WM_APP_TEXT, WPARAM(0), LPARAM(0));
             }
         });
     }
@@ -153,18 +133,10 @@ impl App {
                         Ok(()) => self.clipboard = None,
                         Err(e) => log_warn!("текст в буфер: {e}"),
                     }
-                    log_info!(
-                        "распознано и скопировано: {} символов",
-                        text.chars().count()
-                    );
+                    log_info!("распознано и скопировано: {} символов", text.chars().count());
                     (Content::Copied(text), None)
                 }
-                TextResult::Translated {
-                    text,
-                    from,
-                    to,
-                    anchor,
-                } => {
+                TextResult::Translated { text, from, to, anchor } => {
                     log_info!("перевод с «{from}»: {} символов", text.chars().count());
                     (Content::Translated { text, from, to }, anchor)
                 }

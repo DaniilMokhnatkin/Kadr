@@ -107,9 +107,21 @@ pub fn start(owner: HWND, payload: &Payload, job: Job) -> Start {
         .and_then(|()| std::fs::write(&exe, &payload.exe))
         .and_then(|()| std::fs::write(&script, &payload.script))
         .and_then(|()| std::fs::write(&ocr, &payload.ocr))
-        .and_then(|()| std::fs::write(folder.join("translation-manifest.json"),include_bytes!("../../../installer/translation-manifest.json")))
-        .and_then(|()| std::fs::write(folder.join("translation-worker.py"),include_bytes!("../../../installer/translation-worker.py")))
-        .and_then(|()| std::fs::write(folder.join("nvidia-profile.cs"),include_bytes!("../../../installer/nvidia-profile.cs")))
+        .and_then(|()| {
+            std::fs::write(
+                folder.join("translation-manifest.json"),
+                include_bytes!("../../../installer/translation-manifest.json"),
+            )
+        })
+        .and_then(|()| {
+            std::fs::write(
+                folder.join("translation-worker.py"),
+                include_bytes!("../../../installer/translation-worker.py"),
+            )
+        })
+        .and_then(|()| {
+            std::fs::write(folder.join("nvidia-profile.cs"), include_bytes!("../../../installer/nvidia-profile.cs"))
+        })
         .and_then(|()| std::fs::write(&progress, b""));
     if let Err(e) = written {
         return Start::Failed(format!("Не удалось подготовить файлы во временной папке: {e}"));
@@ -124,11 +136,19 @@ pub fn start(owner: HWND, payload: &Payload, job: Job) -> Start {
     match job {
         Job::Full { autostart, paddle, translation } => {
             if translation {
-                if let Ok(exe)=std::env::current_exe() && let Some(parent)=exe.parent() {
-                    let cache=parent.join("translation-downloads");
-                    if cache.is_dir() {params.push_str(&format!(" -TranslationCache \"{}\"",cache.display()));}
+                if let Ok(exe) = std::env::current_exe()
+                    && let Some(parent) = exe.parent()
+                {
+                    let cache = parent.join("translation-downloads");
+                    if cache.is_dir() {
+                        params.push_str(&format!(" -TranslationCache \"{}\"", cache.display()));
+                    }
                 }
-                params.push_str(&format!(" -WithTranslation -TranslationManifest \"{}\" -TranslationWorker \"{}\"",folder.join("translation-manifest.json").display(),folder.join("translation-worker.py").display()));
+                params.push_str(&format!(
+                    " -WithTranslation -TranslationManifest \"{}\" -TranslationWorker \"{}\"",
+                    folder.join("translation-manifest.json").display(),
+                    folder.join("translation-worker.py").display()
+                ));
             }
             if !autostart {
                 params.push_str(" -NoAutostart");
@@ -149,7 +169,9 @@ pub fn start(owner: HWND, payload: &Payload, job: Job) -> Start {
         ..Default::default()
     };
     match unsafe { ShellExecuteExW(&mut info) } {
-        Ok(()) if !info.hProcess.is_invalid() => Start::Running(Task { process: info.hProcess, progress, seen: 0, folder }),
+        Ok(()) if !info.hProcess.is_invalid() => {
+            Start::Running(Task { process: info.hProcess, progress, seen: 0, folder })
+        }
         Ok(()) => Start::Failed("Windows не запустила установку.".into()),
         Err(e) if e.code() == ERROR_CANCELLED.to_hresult() => {
             let _ = std::fs::remove_dir_all(&folder);
@@ -212,7 +234,10 @@ mod tests {
     fn reports_read_as_the_script_writes_them() {
         assert_eq!(parse("\u{feff}step prepare"), Some(Report::Step("prepare".into())));
         assert_eq!(parse("ok ocr-en"), Some(Report::Ok("ocr-en".into())));
-        assert_eq!(parse("warn ocr-ru Нет связи с сервером"), Some(Report::Warn("ocr-ru".into(), "Нет связи с сервером".into())));
+        assert_eq!(
+            parse("warn ocr-ru Нет связи с сервером"),
+            Some(Report::Warn("ocr-ru".into(), "Нет связи с сервером".into()))
+        );
         assert_eq!(parse("error Подпись не удалась"), Some(Report::Error("Подпись не удалась".into())));
         assert_eq!(parse("finish"), Some(Report::Finish));
         assert_eq!(parse("что-то ещё"), None);

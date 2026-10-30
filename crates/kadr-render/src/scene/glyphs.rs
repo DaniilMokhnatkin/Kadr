@@ -2,7 +2,9 @@
 //! Every outline is a real path geometry stroked with round caps and round joins, so corners and
 //! curves stay clean at any scale instead of being butt-ended segments laid side by side.
 use super::*;
-use windows::Win32::Graphics::Direct2D::Common::{D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN};
+use windows::Win32::Graphics::Direct2D::Common::{
+    D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN,
+};
 use windows::Win32::Graphics::Direct2D::{
     D2D1_CAP_STYLE_ROUND, D2D1_ELLIPSE, D2D1_LINE_JOIN_ROUND, D2D1_STROKE_STYLE_PROPERTIES, ID2D1Factory,
 };
@@ -130,7 +132,15 @@ pub(super) fn draw(gpu: &Gpu, button: ToolbarButton, r: D2D_RECT_F, ink: D2D1_CO
     };
     match button {
         ToolbarButton::Tool(tool) => match tool {
-            Tool::Select => p.shape(&[(6.5, 3.5), (6.5, 19.0), (10.3, 15.3), (13.0, 21.0), (15.6, 19.8), (13.0, 14.2), (18.2, 14.0)]),
+            Tool::Select => p.shape(&[
+                (6.5, 3.5),
+                (6.5, 19.0),
+                (10.3, 15.3),
+                (13.0, 21.0),
+                (15.6, 19.8),
+                (13.0, 14.2),
+                (18.2, 14.0),
+            ]),
             // A shaft and an open head two fifths of its length, at a right angle.
             Tool::Arrow => {
                 p.line((5.5, 18.5), (17.8, 6.2));
@@ -140,8 +150,10 @@ pub(super) fn draw(gpu: &Gpu, button: ToolbarButton, r: D2D_RECT_F, ink: D2D1_CO
             Tool::Rectangle => p.rounded(4.5, 6.0, 19.5, 18.0, 2.0),
             Tool::Ellipse => p.ellipse((12.0, 12.0), 8.0, 8.0),
             Tool::Lens => {
-                p.ellipse((10.0,10.0),6.5,6.5);p.line((15.0,15.0),(20.0,20.0));
-                p.line((7.0,10.0),(13.0,10.0));p.line((10.0,7.0),(10.0,13.0));
+                p.ellipse((10.0, 10.0), 6.5, 6.5);
+                p.line((15.0, 15.0), (20.0, 20.0));
+                p.line((7.0, 10.0), (13.0, 10.0));
+                p.line((10.0, 7.0), (10.0, 13.0));
             }
             Tool::Pen => {
                 p.shape(&[(4.5, 19.5), (5.6, 14.6), (15.6, 4.6), (19.4, 8.4), (9.4, 18.4)]);

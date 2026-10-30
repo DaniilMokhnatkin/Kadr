@@ -72,26 +72,15 @@ impl Drawing {
         self.text.is_some()
     }
     pub fn text_selection(&self) -> Option<(u64, usize, usize)> {
-        self.text.map(|i| {
-            (
-                self.shapes[i].id,
-                self.text_input.cursor,
-                self.text_input.anchor,
-            )
-        })
+        self.text.map(|i| (self.shapes[i].id, self.text_input.cursor, self.text_input.anchor))
     }
     pub fn selected_text(&self) -> Option<&str> {
-        self.text
-            .map(|i| &self.shapes[i].text[self.text_input.range()])
+        self.text.map(|i| &self.shapes[i].text[self.text_input.range()])
     }
     pub fn text_insert(&mut self, value: &str) {
         if let Some(i) = self.text {
-            let clean: String = value
-                .replace("\r\n", "\n")
-                .chars()
-                .filter(|c| *c == '\n' || !c.is_control())
-                .take(4097)
-                .collect();
+            let clean: String =
+                value.replace("\r\n", "\n").chars().filter(|c| *c == '\n' || !c.is_control()).take(4097).collect();
             self.text_input.insert(&mut self.shapes[i].text, &clean);
             self.revision += 1;
         }
@@ -113,9 +102,7 @@ impl Drawing {
         self.pending.is_some() || self.edit.is_some() || self.erasing.is_some()
     }
     pub fn selected_bounds(&self) -> Option<Rect> {
-        self.selected
-            .and_then(|i| self.shapes.get(i))
-            .map(Annotation::bounds)
+        self.selected.and_then(|i| self.shapes.get(i)).map(Annotation::bounds)
     }
     /// Visible control point: stretch the circle, or pull a numbered bubble's tail.
     pub fn selected_control(&self) -> Option<Point> {
@@ -125,10 +112,14 @@ impl Drawing {
     fn erase_at(&mut self, p: Point) {
         let last = self.erasing.as_ref().map_or(p, |(_, last)| *last);
         let steps = ((p.x - last.x).abs().max((p.y - last.y).abs()) / 4).clamp(1, 32768);
-        self.shapes.retain(|shape| !(0..=steps).any(|i| {
-            shape.hit(Point::new(last.x + (p.x - last.x) * i / steps, last.y + (p.y - last.y) * i / steps))
-        }));
-        if let Some((_, last)) = &mut self.erasing { *last = p; }
+        self.shapes.retain(|shape| {
+            !(0..=steps).any(|i| {
+                shape.hit(Point::new(last.x + (p.x - last.x) * i / steps, last.y + (p.y - last.y) * i / steps))
+            })
+        });
+        if let Some((_, last)) = &mut self.erasing {
+            *last = p;
+        }
         self.selected = None;
         self.last = None;
         self.revision += 1;
@@ -140,12 +131,7 @@ impl Drawing {
         !self.redo.is_empty()
     }
     pub fn restore(&mut self, shapes: Vec<Annotation>) {
-        self.next_id = shapes
-            .iter()
-            .map(|s| s.id)
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1);
+        self.next_id = shapes.iter().map(|s| s.id).max().unwrap_or(0).saturating_add(1);
         self.shapes = shapes;
         self.undo.clear();
         self.redo.clear();
@@ -173,11 +159,7 @@ impl Drawing {
     }
     /// Smart blurs present in the document (undo may have taken them away).
     pub fn smart_shapes(&self) -> Vec<Rect> {
-        self.shapes
-            .iter()
-            .filter(|s| self.smart.contains(&s.id))
-            .map(Annotation::rect)
-            .collect()
+        self.shapes.iter().filter(|s| self.smart.contains(&s.id)).map(Annotation::rect).collect()
     }
     /// Blurs over found personal data: one history step, at the current strength.
     pub fn add_smart(&mut self, rects: &[Rect], seed: impl FnMut() -> u64) {
@@ -236,10 +218,7 @@ impl Drawing {
     fn target(&self) -> Option<usize> {
         self.text
             .or(self.selected)
-            .or_else(|| {
-                self.last
-                    .and_then(|id| self.shapes.iter().position(|s| s.id == id))
-            })
+            .or_else(|| self.last.and_then(|id| self.shapes.iter().position(|s| s.id == id)))
             .filter(|i| *i < self.shapes.len())
     }
     fn restyle(&mut self, apply: impl Fn(&mut Annotation) -> bool) {
@@ -266,30 +245,45 @@ impl Drawing {
         self.restyle(|s| std::mem::replace(&mut s.width, width) != width);
     }
     pub fn set_text_style(&mut self, style: TextStyle) {
-        self.text_style=style;
-        self.restyle(|shape| {if shape.tool!=Tool::Text {return false;} let changed=shape.text_style!=style;shape.text_style=style;changed});
+        self.text_style = style;
+        self.restyle(|shape| {
+            if shape.tool != Tool::Text {
+                return false;
+            }
+            let changed = shape.text_style != style;
+            shape.text_style = style;
+            changed
+        });
     }
     pub fn toggle_callout(&mut self) {
-        self.callout = !self.callout; let value=self.callout;
-        if value {self.selected=self.target();}
+        self.callout = !self.callout;
+        let value = self.callout;
+        if value {
+            self.selected = self.target();
+        }
         self.restyle(|shape| {
-            if shape.tool!=Tool::Text {return false;} shape.callout=value;
-            if value && shape.points.len()<3 {shape.points.push([shape.points[0][0]-36,shape.points[0][1]+shape.font_size()*3]);}
+            if shape.tool != Tool::Text {
+                return false;
+            }
+            shape.callout = value;
+            if value && shape.points.len() < 3 {
+                shape.points.push([shape.points[0][0] - 36, shape.points[0][1] + shape.font_size() * 3]);
+            }
             true
         });
     }
     pub fn set_strength(&mut self, strength: u8) {
         self.strength = strength.min(2);
         let strength = self.strength;
-        self.restyle(|s| {
-            s.tool.is_blur() && std::mem::replace(&mut s.strength, strength) != strength
-        });
+        self.restyle(|s| s.tool.is_blur() && std::mem::replace(&mut s.strength, strength) != strength);
     }
     /// Возвращает true, когда событие принадлежит слою рисования, иначе рамке захвата.
     pub fn down(&mut self, p: Point, crop: Rect, seed: u64) -> bool {
         self.finish_text();
         if self.tool == Tool::Eraser {
-            if !crop.contains(p) {return true;}
+            if !crop.contains(p) {
+                return true;
+            }
             self.erasing = Some((self.snapshot(), p));
             self.erase_at(p);
             return true;
@@ -298,11 +292,18 @@ impl Drawing {
         if let Some(i) = self.selected.filter(|i| *i < self.shapes.len()) {
             let shape = &self.shapes[i];
             if let Some(point) = control(shape)
-                && (p.x - point.x).abs() <= 10 && (p.y - point.y).abs() <= 10
+                && (p.x - point.x).abs() <= 10
+                && (p.y - point.y).abs() <= 10
             {
                 self.edit = Some(Edit {
-                    start: p, shape: shape.clone(), handle: Handle::E,
-                    point: match shape.tool {Tool::Counter=>Some(0),Tool::Text=>Some(2),_=>None},
+                    start: p,
+                    shape: shape.clone(),
+                    handle: Handle::E,
+                    point: match shape.tool {
+                        Tool::Counter => Some(0),
+                        Tool::Text => Some(2),
+                        _ => None,
+                    },
                 });
                 return true;
             }
@@ -319,11 +320,8 @@ impl Drawing {
                     && ((p.x - s.points[0][0]) as f64).hypot((p.y - s.points[0][1]) as f64) <= 10.0
             };
             let point = self.shapes.iter().rposition(tip);
-            let handle = if point.is_some() {
-                None
-            } else {
-                previous.and_then(|i| hit_handle(&self.shapes[i].bounds(), p, 8))
-            };
+            let handle =
+                if point.is_some() { None } else { previous.and_then(|i| hit_handle(&self.shapes[i].bounds(), p, 8)) };
             let index = if point.is_some() {
                 point
             } else if handle.is_some() {
@@ -334,13 +332,11 @@ impl Drawing {
             self.selected = index;
             self.last = None;
             if let Some(i) = index {
-                self.color = COLORS
-                    .iter()
-                    .position(|c| *c == self.shapes[i].color)
-                    .unwrap_or(self.color);
+                self.color = COLORS.iter().position(|c| *c == self.shapes[i].color).unwrap_or(self.color);
                 self.width = self.shapes[i].width;
                 self.strength = self.shapes[i].strength;
-                self.text_style=self.shapes[i].text_style;self.callout=self.shapes[i].callout;
+                self.text_style = self.shapes[i].text_style;
+                self.callout = self.shapes[i].callout;
                 self.edit = Some(Edit {
                     start: p,
                     shape: self.shapes[i].clone(),
@@ -376,8 +372,11 @@ impl Drawing {
             // Creation always leaves a round numbered bubble. Its separate handle adds a tail.
             self.pending = Some(shape);
         } else if self.tool == Tool::Text {
-            shape.text_style=self.text_style; shape.callout=self.callout;
-            if self.callout {shape.points.push([p.x-36,p.y+shape.font_size()*3]);}
+            shape.text_style = self.text_style;
+            shape.callout = self.callout;
+            if self.callout {
+                shape.points.push([p.x - 36, p.y + shape.font_size() * 3]);
+            }
             let before = self.snapshot();
             self.last = Some(shape.id);
             let i = self.shapes.len();
@@ -392,31 +391,25 @@ impl Drawing {
         true
     }
     pub fn motion(&mut self, p: Point, crop: Rect, shift: bool) -> bool {
-        if self.erasing.is_some() { self.erase_at(p); return true; }
-        let remaining = 65536
-            - self
-                .shapes
-                .iter()
-                .map(|s| s.points.len())
-                .sum::<usize>()
-                .min(65536);
-        let p = Point::new(
-            p.x.clamp(crop.left, crop.right - 1),
-            p.y.clamp(crop.top, crop.bottom - 1),
-        );
+        if self.erasing.is_some() {
+            self.erase_at(p);
+            return true;
+        }
+        let remaining = 65536 - self.shapes.iter().map(|s| s.points.len()).sum::<usize>().min(65536);
+        let p = Point::new(p.x.clamp(crop.left, crop.right - 1), p.y.clamp(crop.top, crop.bottom - 1));
         if let Some(shape) = &mut self.pending {
-            if shape.tool == Tool::Counter { return true; }
+            if shape.tool == Tool::Counter {
+                return true;
+            }
             if shape.tool.is_path() {
                 let last = shape.points.last().unwrap();
-                if (last[0] - p.x).abs() + (last[1] - p.y).abs() >= 2
-                    && shape.points.len() < 8192.min(remaining)
-                {
+                if (last[0] - p.x).abs() + (last[1] - p.y).abs() >= 2 && shape.points.len() < 8192.min(remaining) {
                     shape.points.push([p.x, p.y]);
                 }
             } else {
                 let mut end = [p.x, p.y];
                 let start = shape.points[0];
-                if shift || matches!(shape.tool,Tool::Ellipse|Tool::Lens) {
+                if shift || matches!(shape.tool, Tool::Ellipse | Tool::Lens) {
                     let dx = end[0] - start[0];
                     let dy = end[1] - start[1];
                     let side = dx.abs().max(dy.abs());
@@ -435,7 +428,7 @@ impl Drawing {
                         ];
                     }
                 }
-                if matches!(shape.tool,Tool::Ellipse|Tool::Lens) {
+                if matches!(shape.tool, Tool::Ellipse | Tool::Lens) {
                     let sx = if end[0] < start[0] { -1 } else { 1 };
                     let sy = if end[1] < start[1] { -1 } else { 1 };
                     let room_x = if sx < 0 { start[0] - crop.left } else { crop.right - 1 - start[0] };
@@ -443,10 +436,7 @@ impl Drawing {
                     let side = (end[0] - start[0]).abs().min(room_x).min(room_y);
                     end = [start[0] + sx * side, start[1] + sy * side];
                 }
-                shape.points[1] = [
-                    end[0].clamp(crop.left, crop.right - 1),
-                    end[1].clamp(crop.top, crop.bottom - 1),
-                ];
+                shape.points[1] = [end[0].clamp(crop.left, crop.right - 1), end[1].clamp(crop.top, crop.bottom - 1)];
             }
             return true;
         }
@@ -458,9 +448,7 @@ impl Drawing {
                 shape.points[k] = [p.x, p.y];
                 self.shapes[i] = shape;
             } else if edit.handle == Handle::Move {
-                let target = bounds
-                    .offset(p.x - edit.start.x, p.y - edit.start.y)
-                    .moved_inside(&crop);
+                let target = bounds.offset(p.x - edit.start.x, p.y - edit.start.y).moved_inside(&crop);
                 let mut shape = edit.shape.clone();
                 for xy in &mut shape.points {
                     xy[0] += target.left - bounds.left;
@@ -482,7 +470,10 @@ impl Drawing {
     }
     /// Фиксирует уже видимый preview перед переходом в другое окно, без новой позиции мыши.
     pub fn finish_gesture(&mut self) -> bool {
-        if let Some((before, _)) = self.erasing.take() { self.record(before); return true; }
+        if let Some((before, _)) = self.erasing.take() {
+            self.record(before);
+            return true;
+        }
         if let Some(shape) = self.pending.take() {
             let before = self.snapshot();
             self.last = Some(shape.id);
@@ -554,7 +545,10 @@ impl Drawing {
         false
     }
     fn cancel_drag(&mut self) {
-        if let Some((before, _)) = self.erasing.take() { self.shapes = (*before).clone(); self.revision += 1; }
+        if let Some((before, _)) = self.erasing.take() {
+            self.shapes = (*before).clone();
+            self.revision += 1;
+        }
         self.pending = None;
         if let Some(edit) = self.edit.take()
             && let Some(i) = self.selected
@@ -610,11 +604,16 @@ fn control(shape: &Annotation) -> Option<Point> {
         Tool::Counter => {
             let [x, y] = if shape.points[0] == shape.points[1] {
                 [shape.points[1][0], shape.points[1][1] + shape.font_size() * 3 / 4 + 12]
-            } else { shape.points[0] };
+            } else {
+                shape.points[0]
+            };
             Some(Point::new(x, y))
         }
-        Tool::Text if shape.callout => shape.points.get(2).map(|p|Point::new(p[0],p[1])),
-        Tool::Ellipse => { let r = shape.bounds(); Some(Point::new(r.right, (r.top + r.bottom) / 2)) }
+        Tool::Text if shape.callout => shape.points.get(2).map(|p| Point::new(p[0], p[1])),
+        Tool::Ellipse => {
+            let r = shape.bounds();
+            Some(Point::new(r.right, (r.top + r.bottom) / 2))
+        }
         _ => None,
     }
 }
@@ -625,51 +624,84 @@ mod tests {
     const C: Rect = Rect::new(-100, 0, 500, 500);
     #[test]
     fn a_control_just_outside_the_crop_can_be_grabbed_without_starting_another_shape() {
-        let mut d=Drawing::default();d.set_tool(Tool::Counter);
-        d.down(Point::new(200,480),C,1);d.up(Point::new(200,480),C,false);
-        let control=d.selected_control().unwrap();assert!(!C.contains(control));
-        d.down(control,C,1);d.up(Point::new(120,450),C,false);
-        assert_eq!(d.shapes().len(),1);assert_eq!(d.shapes()[0].points[0],[120,450]);
+        let mut d = Drawing::default();
+        d.set_tool(Tool::Counter);
+        d.down(Point::new(200, 480), C, 1);
+        d.up(Point::new(200, 480), C, false);
+        let control = d.selected_control().unwrap();
+        assert!(!C.contains(control));
+        d.down(control, C, 1);
+        d.up(Point::new(120, 450), C, false);
+        assert_eq!(d.shapes().len(), 1);
+        assert_eq!(d.shapes()[0].points[0], [120, 450]);
     }
     #[test]
     fn text_styles_and_callout_survive_history_and_move_together() {
-        let mut d=Drawing::default();d.set_tool(Tool::Text);
-        d.down(Point::new(100,100),C,1); for ch in "Пример".chars(){d.text_char(ch);}
-        d.set_text_style(TextStyle::Outline);d.toggle_callout();d.finish_text();
-        assert_eq!(d.shapes()[0].text_style,TextStyle::Outline);assert!(d.shapes()[0].callout);
-        let before=d.shapes()[0].clone();
-        d.set_tool(Tool::Select);d.down(Point::new(110,110),C,1);d.up(Point::new(130,130),C,false);
-        assert_eq!(d.shapes()[0].points[2],[before.points[2][0]+20,before.points[2][1]+20]);
-        d.undo();assert_eq!(d.shapes()[0],before);
+        let mut d = Drawing::default();
+        d.set_tool(Tool::Text);
+        d.down(Point::new(100, 100), C, 1);
+        for ch in "Пример".chars() {
+            d.text_char(ch);
+        }
+        d.set_text_style(TextStyle::Outline);
+        d.toggle_callout();
+        d.finish_text();
+        assert_eq!(d.shapes()[0].text_style, TextStyle::Outline);
+        assert!(d.shapes()[0].callout);
+        let before = d.shapes()[0].clone();
+        d.set_tool(Tool::Select);
+        d.down(Point::new(110, 110), C, 1);
+        d.up(Point::new(130, 130), C, false);
+        assert_eq!(d.shapes()[0].points[2], [before.points[2][0] + 20, before.points[2][1] + 20]);
+        d.undo();
+        assert_eq!(d.shapes()[0], before);
     }
     #[test]
     fn circle_is_round_then_can_be_stretched_from_its_handle() {
-        let mut d = Drawing::default(); d.set_tool(Tool::Ellipse);
-        d.down(Point::new(100,100), C, 1); d.up(Point::new(180,140), C, false);
-        let r = d.shapes()[0].rect(); assert_eq!(r.width(), r.height());
+        let mut d = Drawing::default();
+        d.set_tool(Tool::Ellipse);
+        d.down(Point::new(100, 100), C, 1);
+        d.up(Point::new(180, 140), C, false);
+        let r = d.shapes()[0].rect();
+        assert_eq!(r.width(), r.height());
         let handle = d.selected_control().unwrap();
-        d.down(handle, C, 1); d.up(Point::new(handle.x+80,handle.y), C, false);
+        d.down(handle, C, 1);
+        d.up(Point::new(handle.x + 80, handle.y), C, false);
         assert!(d.shapes()[0].rect().width() > d.shapes()[0].rect().height());
-        d.undo(); assert_eq!(d.shapes()[0].rect(), r);
+        d.undo();
+        assert_eq!(d.shapes()[0].rect(), r);
     }
     #[test]
     fn numbered_bubble_stays_round_until_its_separate_tail_handle_is_pulled() {
-        let mut d=Drawing::default(); d.set_tool(Tool::Counter);
-        d.down(Point::new(200,200), C, 1); d.up(Point::new(270,300), C, false);
-        assert_eq!(d.shapes()[0].points, [[200,200],[200,200]]);
-        let h=d.selected_control().unwrap();
-        d.down(h,C,1); d.up(Point::new(150,320),C,false);
-        assert_eq!(d.shapes()[0].points, [[150,320],[200,200]]);
-        d.undo(); assert_eq!(d.shapes()[0].points, [[200,200],[200,200]]);
+        let mut d = Drawing::default();
+        d.set_tool(Tool::Counter);
+        d.down(Point::new(200, 200), C, 1);
+        d.up(Point::new(270, 300), C, false);
+        assert_eq!(d.shapes()[0].points, [[200, 200], [200, 200]]);
+        let h = d.selected_control().unwrap();
+        d.down(h, C, 1);
+        d.up(Point::new(150, 320), C, false);
+        assert_eq!(d.shapes()[0].points, [[150, 320], [200, 200]]);
+        d.undo();
+        assert_eq!(d.shapes()[0].points, [[200, 200], [200, 200]]);
     }
     #[test]
     fn eraser_stroke_is_one_undo_operation_and_never_changes_source_pixels() {
-        let mut d=Drawing::default(); d.set_tool(Tool::Rectangle);
-        for x in [50,150] { d.down(Point::new(x,50),C,1); d.up(Point::new(x+30,80),C,false); }
-        let original=d.shapes().to_vec(); d.set_tool(Tool::Eraser);
-        d.down(Point::new(40,60),C,1); d.up(Point::new(200,60),C,false);
-        assert!(d.shapes().is_empty()); d.undo(); assert_eq!(d.shapes(), original);
-        d.redo(); assert!(d.shapes().is_empty());
+        let mut d = Drawing::default();
+        d.set_tool(Tool::Rectangle);
+        for x in [50, 150] {
+            d.down(Point::new(x, 50), C, 1);
+            d.up(Point::new(x + 30, 80), C, false);
+        }
+        let original = d.shapes().to_vec();
+        d.set_tool(Tool::Eraser);
+        d.down(Point::new(40, 60), C, 1);
+        d.up(Point::new(200, 60), C, false);
+        assert!(d.shapes().is_empty());
+        d.undo();
+        assert_eq!(d.shapes(), original);
+        d.redo();
+        assert!(d.shapes().is_empty());
     }
     #[test]
     fn switching_windows_commits_visible_stroke_and_does_not_continue_it_on_return() {
@@ -738,18 +770,12 @@ mod tests {
         d.down(Point::new(10, 10), C, 1);
         d.up(Point::new(60, 40), C, false);
         let mut n = 0;
-        d.add_smart(
-            &[Rect::new(100, 100, 180, 120), Rect::new(100, 200, 260, 220)],
-            || {
-                n += 1;
-                n
-            },
-        );
+        d.add_smart(&[Rect::new(100, 100, 180, 120), Rect::new(100, 200, 260, 220)], || {
+            n += 1;
+            n
+        });
         assert_eq!(d.shapes().len(), 3);
-        assert_eq!(
-            d.smart_shapes(),
-            [Rect::new(100, 100, 180, 120), Rect::new(100, 200, 260, 220)]
-        );
+        assert_eq!(d.smart_shapes(), [Rect::new(100, 100, 180, 120), Rect::new(100, 200, 260, 220)]);
         d.remove_smart();
         assert_eq!(d.shapes().len(), 1);
         assert!(d.smart_shapes().is_empty());
@@ -781,11 +807,7 @@ mod tests {
         d.set_color(1);
         d.set_width(7);
         assert_eq!((d.shapes()[1].color, d.shapes()[1].width), (COLORS[1], 7));
-        assert_eq!(
-            d.shapes()[0].color,
-            COLORS[3],
-            "earlier shapes keep their colour"
-        );
+        assert_eq!(d.shapes()[0].color, COLORS[3], "earlier shapes keep their colour");
         d.undo();
         assert_eq!(d.shapes()[1].width, 3);
         assert_eq!(d.shapes()[1].color, COLORS[1]);
@@ -801,10 +823,7 @@ mod tests {
         let blur = d.shapes()[2].clone();
         d.set_color(4);
         d.set_strength(2);
-        assert_eq!(
-            (d.shapes()[2].color, d.shapes()[2].strength),
-            (blur.color, 2)
-        );
+        assert_eq!((d.shapes()[2].color, d.shapes()[2].strength), (blur.color, 2));
     }
     #[test]
     fn unicode_text_is_one_operation_and_escape_reverts_edit() {

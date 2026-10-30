@@ -6,10 +6,7 @@ pub struct TextInput {
 }
 impl TextInput {
     pub fn at_end(value: &str) -> Self {
-        Self {
-            cursor: value.len(),
-            anchor: value.len(),
-        }
+        Self { cursor: value.len(), anchor: value.len() }
     }
     pub fn select_all(&mut self, value: &str) {
         self.anchor = 0;
@@ -31,11 +28,7 @@ impl TextInput {
     }
     pub fn erase(&mut self, value: &mut String, back: bool) {
         if self.cursor == self.anchor {
-            self.anchor = if back {
-                previous(value, self.cursor)
-            } else {
-                next(value, self.cursor)
-            };
+            self.anchor = if back { previous(value, self.cursor) } else { next(value, self.cursor) };
         }
         self.insert(value, "");
     }

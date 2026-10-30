@@ -12,10 +12,7 @@ impl App {
         let Some(crop) = active.session.selection() else {
             return false;
         };
-        let current = Sample {
-            point: p,
-            time: unsafe { GetMessageTime() } as u32,
-        };
+        let current = Sample { point: p, time: unsafe { GetMessageTime() } as u32 };
         if msg == WM_LBUTTONDOWN {
             self.pointer_history.begin(current);
         }
@@ -29,12 +26,7 @@ impl App {
             };
             let mut history = [MOUSEMOVEPOINT::default(); 64];
             let count = unsafe {
-                GetMouseMovePointsEx(
-                    size_of::<MOUSEMOVEPOINT>() as u32,
-                    &query,
-                    &mut history,
-                    GMMP_USE_DISPLAY_POINTS,
-                )
+                GetMouseMovePointsEx(size_of::<MOUSEMOVEPOINT>() as u32, &query, &mut history, GMMP_USE_DISPLAY_POINTS)
             };
             let samples: Vec<_> = history
                 .iter()
@@ -233,7 +225,7 @@ impl App {
             return;
         };
         let d = &mut active.drawing;
-        if d.tool.is_blur() || d.tool==Tool::Lens {
+        if d.tool.is_blur() || d.tool == Tool::Lens {
             let strength = (d.strength as i32 + delta.signum()).clamp(0, 2);
             d.set_strength(strength as u8);
         } else {
@@ -251,10 +243,10 @@ impl App {
             ToolbarButton::Tool(tool) => d.set_tool(tool),
             ToolbarButton::Color(index) => d.set_color(index),
             ToolbarButton::Width => d.set_width(if d.width >= 8 { 1 } else { d.width + 1 }),
-            ToolbarButton::TextPlain=>d.set_text_style(kadr_doc::annotation::TextStyle::Plain),
-            ToolbarButton::TextFilled=>d.set_text_style(kadr_doc::annotation::TextStyle::Filled),
-            ToolbarButton::TextOutline=>d.set_text_style(kadr_doc::annotation::TextStyle::Outline),
-            ToolbarButton::TextCallout=>d.toggle_callout(),
+            ToolbarButton::TextPlain => d.set_text_style(kadr_doc::annotation::TextStyle::Plain),
+            ToolbarButton::TextFilled => d.set_text_style(kadr_doc::annotation::TextStyle::Filled),
+            ToolbarButton::TextOutline => d.set_text_style(kadr_doc::annotation::TextStyle::Outline),
+            ToolbarButton::TextCallout => d.toggle_callout(),
             ToolbarButton::Strength => d.set_strength((d.strength + 1) % 3),
             ToolbarButton::Undo => d.undo(),
             ToolbarButton::Redo => d.redo(),

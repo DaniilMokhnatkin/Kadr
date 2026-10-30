@@ -149,21 +149,24 @@ pub fn blur_patch_masked(source: &Image, shape: &Annotation) -> (Image, Vec<f32>
     };
 
     let spotlight = shape.tool == Tool::Spotlight;
-    let mask: Vec<f32> = (0..h).flat_map(|y| {
-        let outside=&outside;
-        (0..w).map(move |x| {
-            let t=(outside(x,y)/f).clamp(0.0,1.0);
-            let alpha=1.0-t*t*(3.0-2.0*t);
-            if spotlight {1.0-alpha} else {alpha}
+    let mask: Vec<f32> = (0..h)
+        .flat_map(|y| {
+            let outside = &outside;
+            (0..w).map(move |x| {
+                let t = (outside(x, y) / f).clamp(0.0, 1.0);
+                let alpha = 1.0 - t * t * (3.0 - 2.0 * t);
+                if spotlight { 1.0 - alpha } else { alpha }
+            })
         })
-    }).collect();
+        .collect();
 
     // 4. Blend with saturation lift and grain. Rows are independent, so they spread over all cores;
     //    the grain is a hash of the pixel position, identical however the rows are split.
     let mut out = source.clone();
     let row_bytes = w * 4;
     // Small patches stay on one thread: starting workers costs more than they save.
-    let threads = if w * h < 250_000 { 1 } else { std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 2) };
+    let threads =
+        if w * h < 250_000 { 1 } else { std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 2) };
     let band = h.div_ceil(threads).max(16);
     std::thread::scope(|scope| {
         for (n, chunk) in out.bgra.chunks_mut(row_bytes * band).enumerate() {
@@ -174,7 +177,7 @@ pub fn blur_patch_masked(source: &Image, shape: &Annotation) -> (Image, Vec<f32>
                     let (i, wt) = &ys[y];
                     let taps = i.map(|k| &rows[k * w..k * w + w]);
                     for x in 0..w {
-                        let alpha=mask[y*w+x];
+                        let alpha = mask[y * w + x];
                         if alpha <= 0.0 {
                             continue;
                         }

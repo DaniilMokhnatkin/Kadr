@@ -18,20 +18,13 @@ use windows::Win32::{
 pub fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let shared = Shared::new()?;
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1()? };
-    let gpu = Gpu::new(
-        &shared,
-        &unsafe { factory.EnumAdapters1(0)? },
-        "interaction-bench".into(),
-    )?;
+    let gpu = Gpu::new(&shared, &unsafe { factory.EnumAdapters1(0)? }, "interaction-bench".into())?;
     let crop = Rect::new(0, 0, 1920, 1080);
     let frames = vec![Arc::new(Image::new(crop, vec![180; 1920 * 1080 * 4]))];
     let base = annotations::bitmap(&gpu, &frames[0])?;
     let target = unsafe {
         gpu.d2d.CreateBitmap(
-            D2D_SIZE_U {
-                width: 1920,
-                height: 1080,
-            },
+            D2D_SIZE_U { width: 1920, height: 1080 },
             None,
             0,
             &bitmap_props(D2D1_BITMAP_OPTIONS_TARGET),
@@ -50,11 +43,7 @@ pub fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
         let mut cache = Cache::default();
         let mut ms = Vec::new();
         for i in 0..80 {
-            d.motion(
-                Point::new(100 + i * 16, 400 + ((i as f64 / 5.0).sin() * 160.0) as i32),
-                crop,
-                false,
-            );
+            d.motion(Point::new(100 + i * 16, 400 + ((i as f64 / 5.0).sin() * 160.0) as i32), crop, false);
             let start = Instant::now();
             unsafe {
                 gpu.d2d.BeginDraw();
@@ -64,7 +53,8 @@ pub fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 preview: d.preview(),
                 frames: &frames,
                 crop,
-                selected: None, control: None,
+                selected: None,
+                control: None,
                 text_edit: None,
             };
             scene::draw(
@@ -78,12 +68,7 @@ pub fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     size: (1920, 1080),
                     scale: 1.0,
                     marks: Marks {
-                        selection: Some(RECT {
-                            left: 0,
-                            top: 0,
-                            right: 1920,
-                            bottom: 1080,
-                        }),
+                        selection: Some(RECT { left: 0, top: 0, right: 1920, bottom: 1080 }),
                         drawing: Some(view),
                         ..Default::default()
                     },
@@ -105,8 +90,8 @@ pub fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
         ));
     }
     let editor = Some(EditorBar {
-            text_style: Default::default(),
-            callout: false,
+        text_style: Default::default(),
+        callout: false,
         tool: Tool::Select,
         color: 0,
         width: 3,
@@ -120,27 +105,14 @@ pub fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
         std::hint::black_box(scene::toolbar_hit(
             &shared,
             &text,
-            RECT {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1080,
-            },
+            RECT { left: 0, top: 0, right: 1920, bottom: 1080 },
             1.0,
-            RECT {
-                left: 100,
-                top: 100,
-                right: 1600,
-                bottom: 900,
-            },
+            RECT { left: 100, top: 100, right: 1600, bottom: 900 },
             (600, 600),
             editor,
         ));
     }
-    lines.push(format!(
-        "toolbar hit test average={:.3}ms",
-        start.elapsed().as_secs_f64() * 1000.0 / 400.0
-    ));
+    lines.push(format!("toolbar hit test average={:.3}ms", start.elapsed().as_secs_f64() * 1000.0 / 400.0));
     let report =
         lines.join("\n") + "\nCPU/GPU submission only; no live desktop, vsync or input-to-photon measurement.\n";
     std::fs::write(path, &report)?;

@@ -71,7 +71,13 @@ impl Rect {
     /// Сдвигает внутрь `bounds`, сохраняя размер; не влезает — прижимает к левому верхнему краю.
     pub fn moved_inside(&self, bounds: &Rect) -> Rect {
         let shift = |lo: i32, hi: i32, min: i32, max: i32| {
-            if hi > max { (max - hi).max(min - lo) } else if lo < min { min - lo } else { 0 }
+            if hi > max {
+                (max - hi).max(min - lo)
+            } else if lo < min {
+                min - lo
+            } else {
+                0
+            }
         };
         self.offset(
             shift(self.left, self.right, bounds.left, bounds.right),
@@ -124,7 +130,13 @@ pub fn hit_handle(sel: &Rect, p: Point, grab: i32) -> Option<Handle> {
             (false, false) => 0,
             (true, false) => -1,
             (false, true) => 1,
-            (true, true) => if to_lo <= to_hi { -1 } else { 1 },
+            (true, true) => {
+                if to_lo <= to_hi {
+                    -1
+                } else {
+                    1
+                }
+            }
         }
     };
     let handle = match (side(p.x, sel.left, sel.right), side(p.y, sel.top, sel.bottom)) {

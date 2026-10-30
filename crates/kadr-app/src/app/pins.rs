@@ -9,19 +9,11 @@ impl App {
         let Some(image) = self.selected_image() else { return };
         self.pins.retain(crate::pin_window::Window::alive);
         if self.pins.len() >= 20 {
-            self.notify(
-                "Открыто 20 закреплённых снимков",
-                "Закройте один из снимков, чтобы закрепить новый.",
-            );
+            self.notify("Открыто 20 закреплённых снимков", "Закройте один из снимков, чтобы закрепить новый.");
             return;
         }
-        match crate::pin_window::Window::new(
-            self.instance,
-            self.hwnd,
-            WM_APP_PIN,
-            Arc::new(image),
-            self.icons.small(),
-        ) {
+        match crate::pin_window::Window::new(self.instance, self.hwnd, WM_APP_PIN, Arc::new(image), self.icons.small())
+        {
             Ok(pin) => {
                 self.close_session();
                 pin.show();

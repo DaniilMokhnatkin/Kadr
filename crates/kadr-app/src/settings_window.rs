@@ -115,7 +115,8 @@ fn layout(width: f32, s: f32) -> Layout {
         sections[section] = *y;
         *y += SECTION * s;
         let top = *y;
-        let out: Vec<_> = (0..n).map(|i| rect(left, top + i as f32 * ROW * s, right, top + (i + 1) as f32 * ROW * s)).collect();
+        let out: Vec<_> =
+            (0..n).map(|i| rect(left, top + i as f32 * ROW * s, right, top + (i + 1) as f32 * ROW * s)).collect();
         *y += n as f32 * ROW * s;
         groups[section] = rect(left, top, right, *y);
         *y += 18.0 * s;
@@ -127,7 +128,8 @@ fn layout(width: f32, s: f32) -> Layout {
     let keys: [D2D_RECT_F; 5] = rows(5, 3, &mut y).try_into().unwrap();
     let open_file = rect(left, y, left + 180.0 * s, y + 28.0 * s);
     let folder_button = rect(right - 112.0 * s, folder.top + 8.0 * s, right - 12.0 * s, folder.bottom - 8.0 * s);
-    let folder_reset = rect(folder_button.left - 92.0 * s, folder_button.top, folder_button.left - 8.0 * s, folder_button.bottom);
+    let folder_reset =
+        rect(folder_button.left - 92.0 * s, folder_button.top, folder_button.left - 8.0 * s, folder_button.bottom);
     Layout {
         close: rect(width - 44.0 * s, 12.0 * s, width - 12.0 * s, 44.0 * s),
         toggles,
@@ -144,16 +146,29 @@ fn layout(width: f32, s: f32) -> Layout {
     }
 }
 
-fn scrolled_layout(width:f32, scale:f32, offset:f32) -> Layout {
-    let mut l=layout(width,scale);
-    for r in l.toggles.iter_mut().chain(l.choices.iter_mut()).chain(l.keys.iter_mut()).chain(l.groups.iter_mut())
-        .chain([&mut l.folder,&mut l.folder_button,&mut l.folder_reset,&mut l.open_file]) {r.top-=offset;r.bottom-=offset;}
-    for top in &mut l.sections {*top-=offset;}
+fn scrolled_layout(width: f32, scale: f32, offset: f32) -> Layout {
+    let mut l = layout(width, scale);
+    for r in l
+        .toggles
+        .iter_mut()
+        .chain(l.choices.iter_mut())
+        .chain(l.keys.iter_mut())
+        .chain(l.groups.iter_mut())
+        .chain([&mut l.folder, &mut l.folder_button, &mut l.folder_reset, &mut l.open_file])
+    {
+        r.top -= offset;
+        r.bottom -= offset;
+    }
+    for top in &mut l.sections {
+        *top -= offset;
+    }
     l
 }
 
 fn hit(l: &Layout, x: f32, y: f32, custom_folder: bool) -> Option<Hit> {
-    if y<76.0*l.scale {return inside(l.close,x,y).then_some(Hit::Close);}
+    if y < 76.0 * l.scale {
+        return inside(l.close, x, y).then_some(Hit::Close);
+    }
 
     if inside(l.close, x, y) {
         return Some(Hit::Close);
@@ -219,21 +234,34 @@ fn toggle_value(c: &Config, i: usize, auto: bool) -> bool {
 const THEMES: [kadr_store::config::Theme; 3] =
     [kadr_store::config::Theme::Auto, kadr_store::config::Theme::Light, kadr_store::config::Theme::Dark];
 
-const ENGINES: [kadr_store::config::OcrEngine; 3] =
-    [kadr_store::config::OcrEngine::Auto, kadr_store::config::OcrEngine::Windows, kadr_store::config::OcrEngine::Paddle];
+const ENGINES: [kadr_store::config::OcrEngine; 3] = [
+    kadr_store::config::OcrEngine::Auto,
+    kadr_store::config::OcrEngine::Windows,
+    kadr_store::config::OcrEngine::Paddle,
+];
 
 /// Rows of CHOICES: the theme, then the text recognition engine.
 fn choice_value(c: &Config, row: usize) -> usize {
     match row {
         0 => THEMES.iter().position(|t| *t == c.appearance.theme).unwrap_or(0),
-        2 => match c.translation.engine {kadr_store::config::TranslationEngine::Auto=>0,kadr_store::config::TranslationEngine::Offline=>1,kadr_store::config::TranslationEngine::Google=>2},
+        2 => match c.translation.engine {
+            kadr_store::config::TranslationEngine::Auto => 0,
+            kadr_store::config::TranslationEngine::Offline => 1,
+            kadr_store::config::TranslationEngine::Google => 2,
+        },
         _ => ENGINES.iter().position(|e| *e == c.recognition.engine).unwrap_or(0),
     }
 }
 fn set_choice(c: &mut Config, row: usize, i: usize) {
     match row {
         0 => c.appearance.theme = THEMES[i.min(THEMES.len() - 1)],
-        2 => c.translation.engine=[kadr_store::config::TranslationEngine::Auto,kadr_store::config::TranslationEngine::Offline,kadr_store::config::TranslationEngine::Google][i.min(2)],
+        2 => {
+            c.translation.engine = [
+                kadr_store::config::TranslationEngine::Auto,
+                kadr_store::config::TranslationEngine::Offline,
+                kadr_store::config::TranslationEngine::Google,
+            ][i.min(2)]
+        }
         _ => c.recognition.engine = ENGINES[i.min(ENGINES.len() - 1)],
     }
 }
@@ -257,7 +285,10 @@ fn pretty(text: &str) -> String {
     if text.trim().is_empty() {
         return "Выкл.".into();
     }
-    text.split('+').map(|p| if p.eq_ignore_ascii_case("PrintScreen") { "PrtSc" } else { p }).collect::<Vec<_>>().join(" + ")
+    text.split('+')
+        .map(|p| if p.eq_ignore_ascii_case("PrintScreen") { "PrtSc" } else { p })
+        .collect::<Vec<_>>()
+        .join(" + ")
 }
 
 struct Fonts {
@@ -290,7 +321,9 @@ struct State {
     scroll: Spring,
 }
 impl State {
-    fn layout(&self,width:f32)->Layout {scrolled_layout(width,self.scale,self.scroll.value(self.now()))}
+    fn layout(&self, width: f32) -> Layout {
+        scrolled_layout(width, self.scale, self.scroll.value(self.now()))
+    }
     fn now(&self) -> f64 {
         self.epoch.elapsed().as_secs_f64()
     }
@@ -368,7 +401,7 @@ pub fn take_requests() -> Vec<Request> {
 pub fn refresh(config: &Config) {
     STATE.with(|s| {
         if let Ok(mut guard) = s.try_borrow_mut()
-                    && let Some(st) = guard.as_mut()
+            && let Some(st) = guard.as_mut()
             && st.capturing.is_none()
         {
             st.config = config.clone();
@@ -429,7 +462,15 @@ pub fn show(instance: HINSTANCE, host: HWND, message: u32, config: &Config) {
             let _ = DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop as *const _ as *const _, 4);
             let corner = DWMWCP_ROUND;
             let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner as *const _ as *const _, 4);
-            let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
         }
         let knob = || Spring::with(0.0, Curve::POP).precise(0.002);
         STATE.with(|s| {
@@ -451,7 +492,7 @@ pub fn show(instance: HINSTANCE, host: HWND, message: u32, config: &Config) {
                 capturing: None,
                 error: None,
                 tracking: false,
-                scroll: Spring::with(0.0,Curve::GLIDE),
+                scroll: Spring::with(0.0, Curve::GLIDE),
             })
         });
     }
@@ -519,7 +560,8 @@ fn ensure_fonts(st: &mut State) -> bool {
         let _ = f.SetTextAlignment(align);
         // Long folder paths end with an ellipsis instead of running under the buttons.
         let sign = shared.dwrite.CreateEllipsisTrimmingSign(&f).ok();
-        let trimming = DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER, delimiter: 0, delimiterCount: 0 };
+        let trimming =
+            DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER, delimiter: 0, delimiterCount: 0 };
         let _ = f.SetTrimming(&trimming, sign.as_ref());
         Some(f)
     };
@@ -588,16 +630,29 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
             );
         }
     }
-    unsafe {gpu.d2d.PushAxisAlignedClip(&rect(0.0,76.0*s,w,h),windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_ALIASED);}
+    unsafe {
+        gpu.d2d.PushAxisAlignedClip(
+            &rect(0.0, 76.0 * s, w, h),
+            windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_ALIASED,
+        );
+    }
     // Groups: white cards with hairlines between rows.
-    for (i, title) in ["ОСНОВНЫЕ", "ВИД И ТЕКСТ", "СОХРАНЕНИЕ", "СОЧЕТАНИЯ КЛАВИШ"].iter().enumerate() {
+    for (i, title) in ["ОСНОВНЫЕ", "ВИД И ТЕКСТ", "СОХРАНЕНИЕ", "СОЧЕТАНИЯ КЛАВИШ"].iter().enumerate()
+    {
         let y = l.sections[i];
-        text(gpu, &f.section, title, rect(PAD * s + 12.0 * s, y + 8.0 * s, w, y + SECTION * s - 4.0 * s), theme.text_muted);
+        text(
+            gpu,
+            &f.section,
+            title,
+            rect(PAD * s + 12.0 * s, y + 8.0 * s, w, y + SECTION * s - 4.0 * s),
+            theme.text_muted,
+        );
         let g = l.groups[i];
         fill(gpu, theme.group, g, 12.0 * s);
         stroke(gpu, fade(theme.hairline, 0.7), inflate(g, -0.5), 12.0 * s, 1.0);
     }
-    let separator = |r: D2D_RECT_F| fill(gpu, fade(theme.hairline, 0.6), rect(r.left + 16.0 * s, r.top, r.right, r.top + 1.0), 0.0);
+    let separator =
+        |r: D2D_RECT_F| fill(gpu, fade(theme.hairline, 0.6), rect(r.left + 16.0 * s, r.top, r.right, r.top + 1.0), 0.0);
     let label_rect = |r: D2D_RECT_F, right: f32| rect(r.left + 16.0 * s, r.top, right, r.bottom);
     // Switches.
     for (i, r) in l.toggles.iter().enumerate() {
@@ -617,7 +672,12 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
         }
         let on = st.knobs[i].value(now);
         moving |= st.knobs[i].active(now);
-        let track = rect(r.right - 60.0 * s, r.top + (ROW - 24.0) / 2.0 * s, r.right - 16.0 * s, r.top + (ROW + 24.0) / 2.0 * s);
+        let track = rect(
+            r.right - 60.0 * s,
+            r.top + (ROW - 24.0) / 2.0 * s,
+            r.right - 16.0 * s,
+            r.top + (ROW + 24.0) / 2.0 * s,
+        );
         fill(gpu, mix(theme.track, theme.accent, on.clamp(0.0, 1.0)), track, 12.0 * s);
         let d = 20.0 * s;
         let x = track.left + 2.0 * s + (track.right - track.left - d - 4.0 * s) * on;
@@ -657,7 +717,11 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
     // Folder.
     let r = l.folder;
     let custom = !st.config.save.folder.trim().is_empty();
-    let folder = if custom { st.config.save.folder.clone() } else { "Изображения\\Screenshots (по умолчанию)".into() };
+    let folder = if custom {
+        st.config.save.folder.clone()
+    } else {
+        "Изображения\\Screenshots (по умолчанию)".into()
+    };
     let edge = if custom { l.folder_reset.left } else { l.folder_button.left };
     text(gpu, &f.label, &folder, label_rect(r, edge - 12.0 * s), theme.text);
     let button = |b: D2D_RECT_F, hit: Hit, label: &str| {
@@ -677,7 +741,11 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
         let hover = glow(Hit::Key(i));
         text(gpu, &f.label, KEYS[i], label_rect(*r, r.right - 200.0 * s), theme.text);
         let recording = st.capturing == Some(i);
-        let value = if recording { "Нажмите сочетание…".to_string() } else { pretty(key_text(&st.config, i)) };
+        let value = if recording {
+            "Нажмите сочетание…".to_string()
+        } else {
+            pretty(key_text(&st.config, i))
+        };
         let chip = rect(r.right - 196.0 * s, r.top + 8.0 * s, r.right - 12.0 * s, r.bottom - 8.0 * s);
         if recording {
             // A gently breathing accent ring: the window is listening.
@@ -701,13 +769,15 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
     } else if st.capturing.is_some() {
         text(gpu, &f.hint, "Esc — отмена · Backspace — выключить", footer, theme.text_muted);
     }
-    unsafe {gpu.d2d.PopAxisAlignedClip();}
-    let overflow=(l.height-h).max(0.0);
-    if overflow>0.0 {
-        let track=rect(w-8.0*s,80.0*s,w-4.0*s,h-8.0*s);
-        let height=(track.bottom-track.top)*(h/l.height);
-        let top=track.top+(track.bottom-track.top-height)*(st.scroll.value(now)/overflow).clamp(0.0,1.0);
-        fill(gpu,theme.text_muted,rect(track.left,top,track.right,top+height),2.0*s);
+    unsafe {
+        gpu.d2d.PopAxisAlignedClip();
+    }
+    let overflow = (l.height - h).max(0.0);
+    if overflow > 0.0 {
+        let track = rect(w - 8.0 * s, 80.0 * s, w - 4.0 * s, h - 8.0 * s);
+        let height = (track.bottom - track.top) * (h / l.height);
+        let top = track.top + (track.bottom - track.top - height) * (st.scroll.value(now) / overflow).clamp(0.0, 1.0);
+        fill(gpu, theme.text_muted, rect(track.left, top, track.right, top + height), 2.0 * s);
     }
     moving
 }
@@ -795,15 +865,20 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             return LRESULT(0);
         }
         WM_MOUSEWHEEL => {
-            let delta=((wp.0>>16) as u16 as i16) as f32/120.0;
+            let delta = ((wp.0 >> 16) as u16 as i16) as f32 / 120.0;
             STATE.with(|state| {
-                if let Ok(mut state)=state.try_borrow_mut() && let Some(st)=state.as_mut() {
-                    let height=client_size(hwnd).1 as f32;
-                    let max=(layout(width(),st.scale).height-height).max(0.0);
-                    let goal=(st.scroll.goal()-delta*72.0*st.scale).clamp(0.0,max);
-                    st.scroll.target_with(goal,Curve::GLIDE,st.now());st.set_hover(None);
+                if let Ok(mut state) = state.try_borrow_mut()
+                    && let Some(st) = state.as_mut()
+                {
+                    let height = client_size(hwnd).1 as f32;
+                    let max = (layout(width(), st.scale).height - height).max(0.0);
+                    let goal = (st.scroll.goal() - delta * 72.0 * st.scale).clamp(0.0, max);
+                    st.scroll.target_with(goal, Curve::GLIDE, st.now());
+                    st.set_hover(None);
                 }
-            });redraw();return LRESULT(0);
+            });
+            redraw();
+            return LRESULT(0);
         }
         WM_MOUSELEAVE => {
             STATE.with(|s| {
@@ -887,8 +962,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             if pick && let Some(folder) = pick_folder(hwnd) {
                 STATE.with(|s| {
                     if let Ok(mut guard) = s.try_borrow_mut()
-                    && let Some(st) = guard.as_mut()
-                {
+                        && let Some(st) = guard.as_mut()
+                    {
                         st.config.save.folder = folder;
                         st.commit();
                     }
@@ -922,8 +997,9 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     st.commit();
                     return true;
                 }
-                let modifier = [VK_CONTROL.0, VK_MENU.0, VK_SHIFT.0, VK_LWIN.0, VK_RWIN.0, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5]
-                    .contains(&vk);
+                let modifier =
+                    [VK_CONTROL.0, VK_MENU.0, VK_SHIFT.0, VK_LWIN.0, VK_RWIN.0, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5]
+                        .contains(&vk);
                 if modifier || (down == (vk == VK_SNAPSHOT.0)) {
                     return true;
                 }
@@ -1018,7 +1094,7 @@ pub fn preview(scale: f32) -> windows::core::Result<kadr_doc::Image> {
         capturing: Some(4),
         error: None,
         tracking: false,
-        scroll: Spring::with(0.0,Curve::GLIDE),
+        scroll: Spring::with(0.0, Curve::GLIDE),
     };
     if !ensure_fonts(&mut st) {
         return Err(windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL));
@@ -1027,7 +1103,12 @@ pub fn preview(scale: f32) -> windows::core::Result<kadr_doc::Image> {
     let h = layout(w, scale).height.round();
     let device = st.device.as_ref().unwrap();
     glass::render_offscreen(device, w as u32, h as u32, || {
-        fill(&device.gpu, if Theme::current().dark { rgb(0x202022, 1.0) } else { rgb(0xeef0f4, 1.0) }, rect(0.0, 0.0, w, h), 0.0);
+        fill(
+            &device.gpu,
+            if Theme::current().dark { rgb(0x202022, 1.0) } else { rgb(0xeef0f4, 1.0) },
+            rect(0.0, 0.0, w, h),
+            0.0,
+        );
         paint(device, &st, (w as u32, h as u32));
     })
 }
@@ -1037,11 +1118,22 @@ mod tests {
     use super::*;
     #[test]
     fn scrolling_exposes_the_footer_on_a_short_high_dpi_screen_and_keeps_close_fixed() {
-        let scale=1.5;let width=WIDTH*scale;let height=900.0;
-        let original=layout(width,scale);let scrolled=scrolled_layout(width,scale,original.height-height);
-        assert_eq!(scrolled.close,original.close);
-        assert!(scrolled.open_file.bottom<=height);
-        assert_eq!(hit(&scrolled,(scrolled.open_file.left+scrolled.open_file.right)/2.0,(scrolled.open_file.top+scrolled.open_file.bottom)/2.0,true),Some(Hit::OpenFile));
+        let scale = 1.5;
+        let width = WIDTH * scale;
+        let height = 900.0;
+        let original = layout(width, scale);
+        let scrolled = scrolled_layout(width, scale, original.height - height);
+        assert_eq!(scrolled.close, original.close);
+        assert!(scrolled.open_file.bottom <= height);
+        assert_eq!(
+            hit(
+                &scrolled,
+                (scrolled.open_file.left + scrolled.open_file.right) / 2.0,
+                (scrolled.open_file.top + scrolled.open_file.bottom) / 2.0,
+                true
+            ),
+            Some(Hit::OpenFile)
+        );
     }
     #[test]
     fn rows_do_not_overlap_and_every_control_is_reachable_at_each_dpi() {
@@ -1056,7 +1148,10 @@ mod tests {
                 assert!(t.left > r.left + 150.0 * s, "the label keeps room");
                 for i in 0..n {
                     let c = segment(t, s, i as f32);
-                    assert_eq!(hit(&l, (c.left + c.right) / 2.0, (c.top + c.bottom) / 2.0, false), Some(Hit::Choice(row, i)));
+                    assert_eq!(
+                        hit(&l, (c.left + c.right) / 2.0, (c.top + c.bottom) / 2.0, false),
+                        Some(Hit::Choice(row, i))
+                    );
                 }
             }
             for pair in all.windows(2) {

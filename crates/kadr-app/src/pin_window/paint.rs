@@ -18,12 +18,7 @@ fn text(dc: HDC, mut r: RECT, value: &str, font: HFONT, c: COLORREF) {
         SetTextColor(dc, c);
         SetBkMode(dc, TRANSPARENT);
         let mut chars: Vec<_> = value.encode_utf16().collect();
-        DrawTextW(
-            dc,
-            &mut chars,
-            &mut r,
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
-        );
+        DrawTextW(dc, &mut chars, &mut r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
         SelectObject(dc, old);
     }
 }
@@ -61,17 +56,8 @@ pub(super) fn buttons(r: RECT, scale: f32) -> Vec<RECT> {
         .iter()
         .enumerate()
         .map(|(i, weight)| {
-            let right = if i == 5 {
-                r.right - pad
-            } else {
-                left + width * weight / sum
-            };
-            let out = RECT {
-                left,
-                top,
-                right,
-                bottom: top + (36.0 * scale).round() as i32,
-            };
+            let right = if i == 5 { r.right - pad } else { left + width * weight / sum };
+            let out = RECT { left, top, right, bottom: top + (36.0 * scale).round() as i32 };
             left = right + gap;
             out
         })
@@ -81,21 +67,8 @@ pub(super) fn buttons(r: RECT, scale: f32) -> Vec<RECT> {
 pub(super) fn button(dc: HDC, r: RECT, id: usize, pin: &Pin, font: HFONT, focused: bool, pressed: bool, hovered: f32) {
     let t = Theme::current();
     fill(dc, r, color(t.surface));
-    let fg = crate::chrome::button(
-        dc,
-        r,
-        id == COPY,
-        focused,
-        pressed,
-        hovered,
-        (r.bottom - r.top) as f32 / 36.0,
-    );
-    let inset = RECT {
-        left: r.left + 4,
-        top: r.top + 1,
-        right: r.right - 4,
-        bottom: r.bottom - 1,
-    };
+    let fg = crate::chrome::button(dc, r, id == COPY, focused, pressed, hovered, (r.bottom - r.top) as f32 / 36.0);
+    let inset = RECT { left: r.left + 4, top: r.top + 1, right: r.right - 4, bottom: r.bottom - 1 };
     text(dc, inset, &label(id, pin), font, fg);
 }
 pub(super) fn draw(dc: HDC, r: RECT, image: &Image, pin: &Pin, scale: f32) {
@@ -103,9 +76,7 @@ pub(super) fn draw(dc: HDC, r: RECT, image: &Image, pin: &Pin, scale: f32) {
     fill(dc, r, color(t.surface));
     let canvas_h = (r.bottom - footer(scale)).max(1);
     let desired = pin.size();
-    let factor = (r.right as f64 / desired.0 as f64)
-        .min(canvas_h as f64 / desired.1 as f64)
-        .min(1.0);
+    let factor = (r.right as f64 / desired.0 as f64).min(canvas_h as f64 / desired.1 as f64).min(1.0);
     let width = (desired.0 as f64 * factor).round() as i32;
     let height = (desired.1 as f64 * factor).round() as i32;
     let info = BITMAPINFO {
@@ -171,12 +142,7 @@ pub(super) fn preview(image: &Image, scale: f32) -> Result<Image> {
         };
         let old = SelectObject(dc, bitmap.into());
         let font = super::font(scale);
-        let r = RECT {
-            left: 0,
-            top: 0,
-            right: w,
-            bottom: h,
-        };
+        let r = RECT { left: 0, top: 0, right: w, bottom: h };
         let pin = Pin::new(image.width(), image.height(), (w, h - footer(scale)));
         draw(dc, r, image, &pin, scale);
         for (id, r) in ACTIONS.into_iter().zip(buttons(r, scale)) {

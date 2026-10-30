@@ -66,16 +66,15 @@ impl Tool {
         Self::Redact,
     ];
 }
-pub const COLORS: [[u8; 3]; 6] = [
-    [239, 68, 68],
-    [250, 204, 21],
-    [34, 197, 94],
-    [56, 189, 248],
-    [255, 255, 255],
-    [17, 17, 17],
-];
+pub const COLORS: [[u8; 3]; 6] =
+    [[239, 68, 68], [250, 204, 21], [34, 197, 94], [56, 189, 248], [255, 255, 255], [17, 17, 17]];
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TextStyle { #[default] Plain, Filled, Outline }
+pub enum TextStyle {
+    #[default]
+    Plain,
+    Filled,
+    Outline,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Annotation {
@@ -97,7 +96,9 @@ pub struct Annotation {
     #[serde(default)]
     pub seed: u64,
 }
-fn legacy_text_style() -> TextStyle { TextStyle::Filled }
+fn legacy_text_style() -> TextStyle {
+    TextStyle::Filled
+}
 fn normal() -> u8 {
     1
 }
@@ -141,14 +142,22 @@ impl Annotation {
         }
         match self.tool {
             Tool::Text => {
-                l=self.points[0][0]; t=self.points[0][1];
+                l = self.points[0][0];
+                t = self.points[0][1];
                 let size = self.font_size();
                 let lines = self.text.lines().count().max(1) as i32;
                 r = l
                     + (self.text.lines().map(|s| s.chars().count()).max().unwrap_or(0).max(3) as i32 * size * 3 / 5)
                         .max(size);
                 b = t + lines * size * 3 / 2;
-                if self.callout && let Some([x,y])=self.points.get(2) {l=l.min(*x);t=t.min(*y);r=r.max(*x);b=b.max(*y);}
+                if self.callout
+                    && let Some([x, y]) = self.points.get(2)
+                {
+                    l = l.min(*x);
+                    t = t.min(*y);
+                    r = r.max(*x);
+                    b = b.max(*y);
+                }
             }
             Tool::Counter => {
                 let radius = self.font_size() * 3 / 4;
@@ -193,11 +202,7 @@ impl Annotation {
         match self.tool {
             Tool::Line | Tool::Arrow | Tool::Pen | Tool::Marker | Tool::BlurBrush => self.points.windows(2).any(|s| {
                 distance(p, s[0], s[1])
-                    <= if self.tool == Tool::BlurBrush {
-                        (self.width * 4) as f64
-                    } else {
-                        tolerance
-                    }
+                    <= if self.tool == Tool::BlurBrush { (self.width * 4) as f64 } else { tolerance }
             }),
             Tool::Rectangle => {
                 let r = self.rect();

@@ -4,9 +4,16 @@ use std::ffi::c_void;
 use windows::Win32::Networking::WinHttp::*;
 use windows::core::{PCWSTR, w};
 
-static CHOSEN: std::sync::atomic::AtomicU8=std::sync::atomic::AtomicU8::new(0);
-pub fn choose(engine:kadr_store::config::TranslationEngine) {
-    CHOSEN.store(match engine {kadr_store::config::TranslationEngine::Auto=>0,kadr_store::config::TranslationEngine::Offline=>1,kadr_store::config::TranslationEngine::Google=>2},std::sync::atomic::Ordering::Relaxed);
+static CHOSEN: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+pub fn choose(engine: kadr_store::config::TranslationEngine) {
+    CHOSEN.store(
+        match engine {
+            kadr_store::config::TranslationEngine::Auto => 0,
+            kadr_store::config::TranslationEngine::Offline => 1,
+            kadr_store::config::TranslationEngine::Google => 2,
+        },
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 pub struct Translation {
@@ -73,9 +80,11 @@ fn plan_and_translate(
 
 /// Blocking: call from a worker thread. `to` is a language code such as "ru".
 pub fn translate(text: &str, to: &str) -> Result<Translation, String> {
-    let chosen=CHOSEN.load(std::sync::atomic::Ordering::Relaxed);
-    if chosen==1 || (chosen==0 && crate::translate_local::available()) {return crate::translate_local::translate(text,to);}
-    translate_google(text,to)
+    let chosen = CHOSEN.load(std::sync::atomic::Ordering::Relaxed);
+    if chosen == 1 || (chosen == 0 && crate::translate_local::available()) {
+        return crate::translate_local::translate(text, to);
+    }
+    translate_google(text, to)
 }
 /// Google's keyless endpoints, tried in order. They are limited separately, so when one answers
 /// 429 (seen on Windows 10, whose WinHTTP looks less like a browser) the next one usually works.
@@ -126,10 +135,13 @@ impl Drop for Handle {
 
 /// The status code and the body.
 fn post(host: &str, path: &[u16], body: &[u8]) -> Result<(u32, String), String> {
-    let fail = |what: &str| format!("Нет связи с переводчиком ({what}): {}", windows::core::Error::from_thread().message());
+    let fail =
+        |what: &str| format!("Нет связи с переводчиком ({what}): {}", windows::core::Error::from_thread().message());
     unsafe {
         let session = Handle(WinHttpOpen(
-            w!("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"),
+            w!(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+            ),
             WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
             PCWSTR::null(),
             PCWSTR::null(),
@@ -144,7 +156,10 @@ fn post(host: &str, path: &[u16], body: &[u8]) -> Result<(u32, String), String> 
         let option = |id: u32, value: u32| {
             WinHttpSetOption(Some(session.0 as *const c_void), id, Some(&value.to_ne_bytes())).is_ok()
         };
-        if !option(WINHTTP_OPTION_SECURE_PROTOCOLS, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3) {
+        if !option(
+            WINHTTP_OPTION_SECURE_PROTOCOLS,
+            WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3,
+        ) {
             option(WINHTTP_OPTION_SECURE_PROTOCOLS, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2);
         }
         option(WINHTTP_OPTION_ENABLE_HTTP_PROTOCOL, WINHTTP_PROTOCOL_FLAG_HTTP2);
@@ -165,7 +180,8 @@ fn post(host: &str, path: &[u16], body: &[u8]) -> Result<(u32, String), String> 
         if request.0.is_null() {
             return Err(fail("запрос"));
         }
-        let headers: Vec<u16> = "Content-Type: application/x-www-form-urlencoded;charset=UTF-8\r\n".encode_utf16().collect();
+        let headers: Vec<u16> =
+            "Content-Type: application/x-www-form-urlencoded;charset=UTF-8\r\n".encode_utf16().collect();
         WinHttpSendRequest(
             request.0,
             Some(&headers),
@@ -372,10 +388,16 @@ mod tests {
         assert!(parse_short("[]").is_none());
     }
     /// Stand-in translator: tags what it got, records calls.
-    fn fake(calls: &std::cell::RefCell<Vec<(String, String)>>) -> impl Fn(&str, &str) -> Result<Translation, String> + '_ {
+    fn fake(
+        calls: &std::cell::RefCell<Vec<(String, String)>>,
+    ) -> impl Fn(&str, &str) -> Result<Translation, String> + '_ {
         move |text, to| {
             calls.borrow_mut().push((text.to_string(), to.to_string()));
-            Ok(Translation { text: format!("[{to}] {text}"), from: if to == "en" { "ru" } else { "en" }.into(), to: to.into() })
+            Ok(Translation {
+                text: format!("[{to}] {text}"),
+                from: if to == "en" { "ru" } else { "en" }.into(),
+                to: to.into(),
+            })
         }
     }
     #[test]
@@ -424,17 +446,29 @@ mod tests {
     #[test]
     #[ignore = "network: run with --ignored"]
     fn live_reader_translation_keeps_russian_and_turns_all_russian_into_english() {
-        let mixed = for_reader("Сохранить как
-The file was saved.").unwrap();
-        assert!(mixed.text.starts_with("Сохранить как
-"), "{}", mixed.text);
+        let mixed = for_reader(
+            "Сохранить как
+The file was saved.",
+        )
+        .unwrap();
+        assert!(
+            mixed.text.starts_with(
+                "Сохранить как
+"
+            ),
+            "{}",
+            mixed.text
+        );
         assert_eq!(mixed.to, "ru");
         let russian = for_reader("Погода сегодня хорошая.").unwrap();
         assert_eq!((russian.from.as_str(), russian.to.as_str()), ("ru", "en"));
         assert!(russian.text.to_lowercase().contains("weather"), "{}", russian.text);
-        println!("{}
+        println!(
+            "{}
 ---
-{}", mixed.text, russian.text);
+{}",
+            mixed.text, russian.text
+        );
     }
     #[test]
     fn form_encoding_keeps_unicode_and_reserved_characters_safe() {

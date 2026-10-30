@@ -7,8 +7,8 @@ use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTask
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 use windows::Win32::UI::Shell::{
-    FOLDERID_Pictures, FOLDERID_Videos, FileSaveDialog, IFileSaveDialog, IShellItem, KF_FLAG_DEFAULT, SHCreateItemFromParsingName,
-    SHGetKnownFolderPath, SIGDN_FILESYSPATH,
+    FOLDERID_Pictures, FOLDERID_Videos, FileSaveDialog, IFileSaveDialog, IShellItem, KF_FLAG_DEFAULT,
+    SHCreateItemFromParsingName, SHGetKnownFolderPath, SIGDN_FILESYSPATH,
 };
 use windows::core::{IUnknown, PCWSTR, PWSTR, Result, w};
 
@@ -36,10 +36,7 @@ pub fn video_folder() -> PathBuf {
 /// `Screenshot_2026-10-29_18-45-21` по местному времени.
 pub fn timestamp_name() -> String {
     let t = unsafe { GetLocalTime() };
-    format!(
-        "Screenshot_{:04}-{:02}-{:02}_{:02}-{:02}-{:02}",
-        t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
-    )
+    format!("Screenshot_{:04}-{:02}-{:02}_{:02}-{:02}-{:02}", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond)
 }
 
 /// `<stem>.png`, а если такой файл уже есть — `<stem>_2.png`, `<stem>_3.png`…

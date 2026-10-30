@@ -114,7 +114,11 @@ fn fonts(st: &mut State) -> Option<&Fonts> {
                 )
                 .ok()?;
             let _ = f.SetWordWrapping(if wrap { DWRITE_WORD_WRAPPING_WRAP } else { DWRITE_WORD_WRAPPING_NO_WRAP });
-            let _ = f.SetParagraphAlignment(if wrap { DWRITE_PARAGRAPH_ALIGNMENT_NEAR } else { DWRITE_PARAGRAPH_ALIGNMENT_CENTER });
+            let _ = f.SetParagraphAlignment(if wrap {
+                DWRITE_PARAGRAPH_ALIGNMENT_NEAR
+            } else {
+                DWRITE_PARAGRAPH_ALIGNMENT_CENTER
+            });
             if center {
                 let _ = f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
             }
@@ -224,7 +228,15 @@ pub fn open(instance: HINSTANCE, anchor: Rect, content: Content) {
             let _ = DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop as *const _ as *const _, 4);
             let corner = DWMWCP_ROUND;
             let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner as *const _ as *const _, 4);
-            let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
         }
         let spring = |c: Curve| Spring::with(0.0, c).precise(0.002);
         STATE.with(|s| {
@@ -291,12 +303,22 @@ pub fn update(content: Content, anchor: Option<Rect>) {
 }
 
 pub fn is_open() -> bool {
-    STATE.with(|s| s.try_borrow().ok().as_deref().and_then(Option::as_ref).is_some_and(|st| unsafe { IsWindowVisible(st.hwnd) }.as_bool()))
+    STATE.with(|s| {
+        s.try_borrow()
+            .ok()
+            .as_deref()
+            .and_then(Option::as_ref)
+            .is_some_and(|st| unsafe { IsWindowVisible(st.hwnd) }.as_bool())
+    })
 }
 
 pub fn close() {
-    let hwnd=STATE.with(|s|s.try_borrow().ok().and_then(|st|st.as_ref().map(|st|st.hwnd)));
-    if let Some(hwnd)=hwnd { unsafe { let _=ShowWindow(hwnd,SW_HIDE); } }
+    let hwnd = STATE.with(|s| s.try_borrow().ok().and_then(|st| st.as_ref().map(|st| st.hwnd)));
+    if let Some(hwnd) = hwnd {
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+    }
 }
 
 fn paint_window(hwnd: HWND) {
@@ -359,7 +381,12 @@ fn paint(device: &Device, st: &State) -> bool {
                 let pulse = 0.35 + 0.65 * (0.5 + 0.5 * t.sin());
                 let x = body_rect.left + 6.0 * s + i as f32 * 14.0 * s;
                 let y = body_rect.top + 10.0 * s;
-                fill(gpu, fade(theme.text_muted, pulse * a), rect(x - 4.0 * s, y - 4.0 * s, x + 4.0 * s, y + 4.0 * s), 4.0 * s);
+                fill(
+                    gpu,
+                    fade(theme.text_muted, pulse * a),
+                    rect(x - 4.0 * s, y - 4.0 * s, x + 4.0 * s, y + 4.0 * s),
+                    4.0 * s,
+                );
             }
         }
         content => {
@@ -451,7 +478,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_KEYDOWN if wp.0 == 'C' as usize => {
             STATE.with(|s| {
                 if let Ok(mut guard) = s.try_borrow_mut()
-                    && let Some(st) = guard.as_mut() {
+                    && let Some(st) = guard.as_mut()
+                {
                     copy_text(st);
                 }
             });
@@ -462,11 +490,14 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let (x, y) = point();
             STATE.with(|s| {
                 if let Ok(mut guard) = s.try_borrow_mut()
-                    && let Some(st) = guard.as_mut() {
+                    && let Some(st) = guard.as_mut()
+                {
                     let (w, _) = client_size(hwnd);
                     let (copy, close) = layout(w as f32, st.scale);
                     let now = st.epoch.elapsed().as_secs_f64();
-                    for (spring, on) in [(&mut st.hover_copy, inside(copy, x, y)), (&mut st.hover_close, inside(close, x, y))] {
+                    for (spring, on) in
+                        [(&mut st.hover_copy, inside(copy, x, y)), (&mut st.hover_close, inside(close, x, y))]
+                    {
                         let curve = if on { Curve::HOVER_IN } else { Curve::HOVER_OUT };
                         spring.target_with(f32::from(on), curve, now);
                     }
@@ -480,7 +511,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let mut hide = false;
             STATE.with(|s| {
                 if let Ok(mut guard) = s.try_borrow_mut()
-                    && let Some(st) = guard.as_mut() {
+                    && let Some(st) = guard.as_mut()
+                {
                     let (w, _) = client_size(hwnd);
                     let (copy, close) = layout(w as f32, st.scale);
                     if inside(close, x, y) {
@@ -516,7 +548,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_TIMER if wp.0 == TIMER_COPIED => {
             STATE.with(|s| {
                 if let Ok(mut guard) = s.try_borrow_mut()
-                    && let Some(st) = guard.as_mut() {
+                    && let Some(st) = guard.as_mut()
+                {
                     st.copied = false;
                 }
             });
@@ -536,9 +569,18 @@ mod tests {
     use super::*;
     #[test]
     fn header_names_the_language_and_the_state() {
-        assert_eq!(header(&Content::Translated { text: "x".into(), from: "en".into(), to: "ru".into() }), "Английский → Русский");
-        assert_eq!(header(&Content::Translated { text: "x".into(), from: "zh-CN".into(), to: "ru".into() }), "Китайский → Русский");
-        assert_eq!(header(&Content::Translated { text: "x".into(), from: "ru".into(), to: "en".into() }), "Русский → Английский");
+        assert_eq!(
+            header(&Content::Translated { text: "x".into(), from: "en".into(), to: "ru".into() }),
+            "Английский → Русский"
+        );
+        assert_eq!(
+            header(&Content::Translated { text: "x".into(), from: "zh-CN".into(), to: "ru".into() }),
+            "Китайский → Русский"
+        );
+        assert_eq!(
+            header(&Content::Translated { text: "x".into(), from: "ru".into(), to: "en".into() }),
+            "Русский → Английский"
+        );
         assert_eq!(header(&Content::Copied("x".into())), "Текст скопирован");
         assert_eq!(body(&Content::Working("Перевожу")), "");
     }

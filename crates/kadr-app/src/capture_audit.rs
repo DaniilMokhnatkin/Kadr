@@ -6,10 +6,8 @@ pub fn run(folder: &str) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(folder)?;
     let shared = Shared::new()?;
     let (adapters, mut outputs) = kadr_capture::enumerate()?;
-    let gpus: Vec<_> = adapters
-        .iter()
-        .map(|a| Gpu::new(&shared, &a.adapter, a.name.clone()))
-        .collect::<windows::core::Result<_>>()?;
+    let gpus: Vec<_> =
+        adapters.iter().map(|a| Gpu::new(&shared, &a.adapter, a.name.clone())).collect::<windows::core::Result<_>>()?;
     let mut report = String::new();
     for (index, output) in outputs.iter_mut().enumerate() {
         let gpu = &gpus[output.gpu];
@@ -29,10 +27,7 @@ pub fn run(folder: &str) -> Result<(), Box<dyn std::error::Error>> {
             image.height(),
             start.elapsed().as_secs_f64() * 1000.0
         ));
-        std::fs::write(
-            folder.join(format!("monitor-{}.png", index + 1)),
-            kadr_doc::pixels::encode_png(&image)?,
-        )?;
+        std::fs::write(folder.join(format!("monitor-{}.png", index + 1)), kadr_doc::pixels::encode_png(&image)?)?;
     }
     std::fs::write(folder.join("capture.txt"), report)?;
     Ok(())

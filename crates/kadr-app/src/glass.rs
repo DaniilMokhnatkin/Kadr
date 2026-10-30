@@ -130,13 +130,20 @@ pub fn render_offscreen(device: &Device, w: u32, h: u32, paint: impl FnOnce()) -
         ctx.Clear(Some(&rgb(0x000000, 0.0)));
         paint();
         ctx.EndDraw(None, None)?;
-        let readback =
-            ctx.CreateBitmap(size, None, 0, &target_props(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW))?;
+        let readback = ctx.CreateBitmap(
+            size,
+            None,
+            0,
+            &target_props(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW),
+        )?;
         readback.CopyFromBitmap(None, &target, None)?;
         let mapped = readback.Map(D2D1_MAP_OPTIONS_READ)?;
         let mut bgra = Vec::with_capacity((w * h * 4) as usize);
         for y in 0..h {
-            bgra.extend_from_slice(std::slice::from_raw_parts(mapped.bits.add((y * mapped.pitch) as usize), (w * 4) as usize));
+            bgra.extend_from_slice(std::slice::from_raw_parts(
+                mapped.bits.add((y * mapped.pitch) as usize),
+                (w * 4) as usize,
+            ));
         }
         readback.Unmap()?;
         Ok(kadr_doc::Image::new(kadr_doc::Rect::new(0, 0, w as i32, h as i32), bgra))
@@ -182,7 +189,12 @@ pub fn fade(mut c: D2D1_COLOR_F, a: f32) -> D2D1_COLOR_F {
 }
 pub fn mix(a: D2D1_COLOR_F, b: D2D1_COLOR_F, t: f32) -> D2D1_COLOR_F {
     let t = t.clamp(0.0, 1.0);
-    D2D1_COLOR_F { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t, a: a.a + (b.a - a.a) * t }
+    D2D1_COLOR_F {
+        r: a.r + (b.r - a.r) * t,
+        g: a.g + (b.g - a.g) * t,
+        b: a.b + (b.b - a.b) * t,
+        a: a.a + (b.a - a.a) * t,
+    }
 }
 pub const fn rgb(hex: u32, a: f32) -> D2D1_COLOR_F {
     D2D1_COLOR_F {
@@ -239,12 +251,8 @@ pub fn rounded_image(
     let (tw, th) = (r.right - r.left, r.bottom - r.top);
     let k = if cover { (tw / w).max(th / h) } else { (tw / w).min(th / h) };
     let (dw, dh) = (w * k, h * k);
-    let dest = rect(
-        r.left + (tw - dw) / 2.0,
-        r.top + (th - dh) / 2.0,
-        r.left + (tw + dw) / 2.0,
-        r.top + (th + dh) / 2.0,
-    );
+    let dest =
+        rect(r.left + (tw - dw) / 2.0, r.top + (th - dh) / 2.0, r.left + (tw + dw) / 2.0, r.top + (th + dh) / 2.0);
     unsafe {
         ctx.PushLayer(&params, None::<&ID2D1Layer>);
         fill(&device.gpu, kadr_render::theme::Theme::current().tile, r, 0.0);

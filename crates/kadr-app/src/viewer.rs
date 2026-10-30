@@ -2,7 +2,9 @@
 //! thumbnail into the middle of the screen over a soft dim, with a small toolbar under it to draw,
 //! blur, copy or save. Closing sends it back into the corner, where the thumbnail stays a few
 //! seconds more — with whatever was drawn.
-use crate::glass::{self, Device, Surface, client_size, fade, fill, inflate, inside, mix, rect, rgb, shadow, stroke, text};
+use crate::glass::{
+    self, Device, Surface, client_size, fade, fill, inflate, inside, mix, rect, rgb, shadow, stroke, text,
+};
 use crate::thumbnail::Shot;
 use kadr_doc::annotation::{COLORS, Tool};
 use kadr_doc::{Image, Point, Rect};
@@ -16,14 +18,14 @@ use std::time::Instant;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_LAYER_OPTIONS1_NONE, D2D1_LAYER_PARAMETERS1, D2D1_ROUNDED_RECT, ID2D1Bitmap1, ID2D1Geometry,
-    ID2D1Layer,
+    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_LAYER_OPTIONS1_NONE, D2D1_LAYER_PARAMETERS1, D2D1_ROUNDED_RECT,
+    ID2D1Bitmap1, ID2D1Geometry, ID2D1Layer,
 };
-use windows::core::Interface;
 use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_SHIFT};
 use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::core::Interface;
 use windows::core::{PCWSTR, w};
 use windows_numerics::Matrix3x2;
 
@@ -281,7 +283,12 @@ pub fn open(instance: HINSTANCE, host: HWND, message: u32, shot: Shot, from: REC
     let (mut dx, mut dy) = (96u32, 96u32);
     unsafe {
         let _ = GetMonitorInfoW(monitor, &mut mi);
-        let _ = windows::Win32::UI::HiDpi::GetDpiForMonitor(monitor, windows::Win32::UI::HiDpi::MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
+        let _ = windows::Win32::UI::HiDpi::GetDpiForMonitor(
+            monitor,
+            windows::Win32::UI::HiDpi::MDT_EFFECTIVE_DPI,
+            &mut dx,
+            &mut dy,
+        );
     }
     let m = mi.rcMonitor;
     let spring = |c: Curve| Spring::with(0.0, c).precise(0.0015);
@@ -327,7 +334,8 @@ pub fn open(instance: HINSTANCE, host: HWND, message: u32, shot: Shot, from: REC
         }
     });
     unsafe {
-        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), m.left, m.top, m.right - m.left, m.bottom - m.top, SWP_SHOWWINDOW);
+        let _ =
+            SetWindowPos(hwnd, Some(HWND_TOPMOST), m.left, m.top, m.right - m.left, m.bottom - m.top, SWP_SHOWWINDOW);
         let _ = SetForegroundWindow(hwnd);
         redraw(hwnd);
     }
@@ -335,7 +343,7 @@ pub fn open(instance: HINSTANCE, host: HWND, message: u32, shot: Shot, from: REC
 
 /// A new capture is starting: away at once, nothing to fly back.
 pub fn close_now() -> bool {
-    let mut visible=false;
+    let mut visible = false;
     if let Some(hwnd) = WINDOW.with(|w| *w.borrow()) {
         STATE.with(|s| {
             if let Ok(mut g) = s.try_borrow_mut() {
@@ -343,7 +351,7 @@ pub fn close_now() -> bool {
             }
         });
         unsafe {
-            visible=IsWindowVisible(hwnd).as_bool();
+            visible = IsWindowVisible(hwnd).as_bool();
             let _ = ShowWindow(hwnd, SW_HIDE);
         }
     }
@@ -457,7 +465,9 @@ fn paint(device: &Device, st: &State, size: (u32, u32), cache: &mut Cache) -> bo
         let origin = Point::new(st.crop().left, st.crop().top);
         // Clipped to the card's rounded shape: a blur repaints the whole picture under it.
         let rounded = D2D1_ROUNDED_RECT { rect: card, radiusX: radius, radiusY: radius };
-        let mask = unsafe { device.shared.d2d.CreateRoundedRectangleGeometry(&rounded) }.ok().and_then(|g| g.cast::<ID2D1Geometry>().ok());
+        let mask = unsafe { device.shared.d2d.CreateRoundedRectangleGeometry(&rounded) }
+            .ok()
+            .and_then(|g| g.cast::<ID2D1Geometry>().ok());
         let mut layer = D2D1_LAYER_PARAMETERS1 {
             contentBounds: card,
             geometricMask: std::mem::ManuallyDrop::new(mask),
@@ -486,10 +496,26 @@ fn paint(device: &Device, st: &State, size: (u32, u32), cache: &mut Cache) -> bo
             },
             cache,
         );
-        if let Some(bounds)=st.drawing.selected_bounds() {
-            let area=rect((bounds.left-origin.x) as f32,(bounds.top-origin.y) as f32,(bounds.right-origin.x) as f32,(bounds.bottom-origin.y) as f32);
-            let point=st.drawing.selected_control().map(|p|windows_numerics::Vector2::new((p.x-origin.x) as f32,(p.y-origin.y) as f32));
-            let _=kadr_render::scene::object_controls(gpu,&device.shared,&kadr_render::theme::Theme::current(),area,point,s/k,(now,kadr_render::theme::motion_enabled()));
+        if let Some(bounds) = st.drawing.selected_bounds() {
+            let area = rect(
+                (bounds.left - origin.x) as f32,
+                (bounds.top - origin.y) as f32,
+                (bounds.right - origin.x) as f32,
+                (bounds.bottom - origin.y) as f32,
+            );
+            let point = st
+                .drawing
+                .selected_control()
+                .map(|p| windows_numerics::Vector2::new((p.x - origin.x) as f32, (p.y - origin.y) as f32));
+            let _ = kadr_render::scene::object_controls(
+                gpu,
+                &device.shared,
+                &kadr_render::theme::Theme::current(),
+                area,
+                point,
+                s / k,
+                (now, kadr_render::theme::motion_enabled()),
+            );
         }
         unsafe {
             gpu.d2d.SetTransform(&Matrix3x2::identity());
@@ -532,10 +558,22 @@ fn paint(device: &Device, st: &State, size: (u32, u32), cache: &mut Cache) -> bo
                     let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
                     let half = (r.right - r.left) / 2.0 * 0.72 * k;
                     if on {
-                        stroke(gpu, fade(theme.text, bar_a), rect(cx - half - 4.0 * s, cy - half - 4.0 * s, cx + half + 4.0 * s, cy + half + 4.0 * s), half + 4.0 * s, 1.6 * s);
+                        stroke(
+                            gpu,
+                            fade(theme.text, bar_a),
+                            rect(cx - half - 4.0 * s, cy - half - 4.0 * s, cx + half + 4.0 * s, cy + half + 4.0 * s),
+                            half + 4.0 * s,
+                            1.6 * s,
+                        );
                     }
                     fill(gpu, fade(c, bar_a), rect(cx - half, cy - half, cx + half, cy + half), half);
-                    stroke(gpu, fade(theme.hairline, bar_a), rect(cx - half, cy - half, cx + half, cy + half), half, 1.0);
+                    stroke(
+                        gpu,
+                        fade(theme.hairline, bar_a),
+                        rect(cx - half, cy - half, cx + half, cy + half),
+                        half,
+                        1.0,
+                    );
                 }
                 Hit::Copy => {
                     let r = inflate(r, -2.0 * s);
@@ -575,7 +613,13 @@ fn paint(device: &Device, st: &State, size: (u32, u32), cache: &mut Cache) -> bo
         }
     }
     let toast = st.toast.is_some_and(|(_, at)| now - at < 2.0);
-    st.open.active(now) || st.glow.iter().any(|(_, sp)| sp.active(now)) || toast || st.drawing.typing() || (kadr_render::theme::marching_ants() && kadr_render::theme::motion_enabled() && st.drawing.selected.is_some())
+    st.open.active(now)
+        || st.glow.iter().any(|(_, sp)| sp.active(now))
+        || toast
+        || st.drawing.typing()
+        || (kadr_render::theme::marching_ants()
+            && kadr_render::theme::motion_enabled()
+            && st.drawing.selected.is_some())
 }
 
 fn modifiers() -> (bool, bool) {
@@ -704,7 +748,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let delta = ((wp.0 >> 16) as u16 as i16) as i32;
             with(&mut |st| {
                 let d = &mut st.drawing;
-                if d.tool.is_blur() || d.tool==Tool::Lens {
+                if d.tool.is_blur() || d.tool == Tool::Lens {
                     d.set_strength((d.strength as i32 + delta.signum()).clamp(0, 2) as u8);
                 } else {
                     d.set_width((d.width as i32 + delta.signum()).clamp(1, 12) as u32);
@@ -818,7 +862,8 @@ pub fn preview(image: Arc<Image>, scale: f32, e: f32) -> windows::core::Result<I
     let (w, h) = ((1600.0 * scale) as u32, (900.0 * scale) as u32);
     let mut drawing = Drawing::default();
     let r = image.rect;
-    let at = |fx: f32, fy: f32| Point::new(r.left + (r.width() as f32 * fx) as i32, r.top + (r.height() as f32 * fy) as i32);
+    let at =
+        |fx: f32, fy: f32| Point::new(r.left + (r.width() as f32 * fx) as i32, r.top + (r.height() as f32 * fy) as i32);
     for (tool, a, b) in [
         (Tool::Arrow, at(0.2, 0.75), at(0.42, 0.45)),
         (Tool::Counter, at(0.6, 0.35), at(0.68, 0.2)),
@@ -862,7 +907,15 @@ pub fn preview(image: Arc<Image>, scale: f32, e: f32) -> windows::core::Result<I
     let make = |size: f32| unsafe {
         let f = shared
             .dwrite
-            .CreateTextFormat(PCWSTR(shared.ui_family.as_ptr()), None, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size * s, w!("ru-ru"))
+            .CreateTextFormat(
+                PCWSTR(shared.ui_family.as_ptr()),
+                None,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                size * s,
+                w!("ru-ru"),
+            )
             .ok()?;
         let _ = f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         let _ = f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);

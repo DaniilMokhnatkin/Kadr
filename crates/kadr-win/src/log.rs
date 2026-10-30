@@ -30,10 +30,7 @@ pub fn path() -> Option<&'static PathBuf> {
 
 pub fn write(level: &str, args: fmt::Arguments) {
     let t = unsafe { GetLocalTime() };
-    let line = format!(
-        "{:02}:{:02}:{:02}.{:03} {level:<5} {args}\n",
-        t.wHour, t.wMinute, t.wSecond, t.wMilliseconds
-    );
+    let line = format!("{:02}:{:02}:{:02}.{:03} {level:<5} {args}\n", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
     eprint!("{line}");
     if let Some(Ok(mut file)) = FILE.get().map(Mutex::lock) {
         let _ = file.write_all(line.as_bytes());

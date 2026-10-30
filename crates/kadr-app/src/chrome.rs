@@ -52,12 +52,7 @@ pub fn button(dc: HDC, r: RECT, primary: bool, focused: bool, pressed: bool, hov
         let i = (3.0 * scale).round() as i32;
         round(
             dc,
-            RECT {
-                left: r.left + i,
-                top: r.top + i,
-                right: r.right - i,
-                bottom: r.bottom - i,
-            },
+            RECT { left: r.left + i, top: r.top + i, right: r.right - i, bottom: r.bottom - i },
             color(bg),
             color(t.on_accent),
             (7.0 * scale).round() as i32,

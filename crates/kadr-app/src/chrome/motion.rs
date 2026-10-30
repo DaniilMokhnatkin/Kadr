@@ -21,27 +21,14 @@ thread_local! {
 fn period(hwnd: HWND) -> Duration {
     unsafe {
         let mut info = MONITORINFOEXW {
-            monitorInfo: MONITORINFO {
-                cbSize: size_of::<MONITORINFOEXW>() as u32,
-                ..Default::default()
-            },
+            monitorInfo: MONITORINFO { cbSize: size_of::<MONITORINFOEXW>() as u32, ..Default::default() },
             ..Default::default()
         };
-        let mut mode = DEVMODEW {
-            dmSize: size_of::<DEVMODEW>() as u16,
-            ..Default::default()
-        };
-        if GetMonitorInfoW(
-            MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST),
-            &mut info as *mut _ as *mut MONITORINFO,
-        )
-        .as_bool()
-            && EnumDisplaySettingsW(
-                windows::core::PCWSTR(info.szDevice.as_ptr()),
-                ENUM_CURRENT_SETTINGS,
-                &mut mode,
-            )
+        let mut mode = DEVMODEW { dmSize: size_of::<DEVMODEW>() as u16, ..Default::default() };
+        if GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut info as *mut _ as *mut MONITORINFO)
             .as_bool()
+            && EnumDisplaySettingsW(windows::core::PCWSTR(info.szDevice.as_ptr()), ENUM_CURRENT_SETTINGS, &mut mode)
+                .as_bool()
             && mode.dmDisplayFrequency > 1
         {
             return Duration::from_secs_f64(1.0 / mode.dmDisplayFrequency as f64);

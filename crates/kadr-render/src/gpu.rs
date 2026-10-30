@@ -53,13 +53,7 @@ impl Shared {
                 nameTag: DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES,
                 parameter: 1,
             })?;
-            Ok(Self {
-                d2d,
-                dwrite,
-                ui_family,
-                tabular,
-                blur: Default::default(),
-            })
+            Ok(Self { d2d, dwrite, ui_family, tabular, blur: Default::default() })
         }
     }
     pub fn clear_annotation_cache(&self) {
@@ -82,12 +76,8 @@ pub struct Gpu {
 impl Gpu {
     pub fn new(shared: &Shared, adapter: &IDXGIAdapter1, name: String) -> Result<Self> {
         unsafe {
-            let levels = [
-                D3D_FEATURE_LEVEL_11_1,
-                D3D_FEATURE_LEVEL_11_0,
-                D3D_FEATURE_LEVEL_10_1,
-                D3D_FEATURE_LEVEL_10_0,
-            ];
+            let levels =
+                [D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0];
             let mut device = None;
             let mut context = None;
             D3D11CreateDevice(
@@ -113,16 +103,7 @@ impl Gpu {
             d2d.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
             let dcomp: IDCompositionDevice = DCompositionCreateDevice(&dxgi)?;
             let brush = d2d.CreateSolidColorBrush(&D2D1_COLOR_F::default(), None)?;
-            Ok(Self {
-                name,
-                device,
-                context,
-                factory,
-                d2d,
-                dcomp,
-                brush,
-                _d2d_device: d2d_device,
-            })
+            Ok(Self { name, device, context, factory, d2d, dcomp, brush, _d2d_device: d2d_device })
         }
     }
 }
@@ -130,10 +111,7 @@ impl Gpu {
 /// Свойства BGRA-битмапа в пикселях (96 DPI: одна единица D2D = один физический пиксель).
 pub fn bitmap_props(options: D2D1_BITMAP_OPTIONS) -> D2D1_BITMAP_PROPERTIES1 {
     D2D1_BITMAP_PROPERTIES1 {
-        pixelFormat: D2D1_PIXEL_FORMAT {
-            format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            alphaMode: D2D1_ALPHA_MODE_IGNORE,
-        },
+        pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_IGNORE },
         dpiX: 96.0,
         dpiY: 96.0,
         bitmapOptions: options,

@@ -11,6 +11,7 @@
 
 mod app;
 mod bubble;
+mod capture_audit;
 mod capture_mode;
 mod chrome;
 mod config_watch;
@@ -33,7 +34,6 @@ mod snapshot;
 mod thumbnail;
 mod translate;
 mod translate_local;
-mod capture_audit;
 mod viewer;
 
 use std::error::Error;
@@ -56,9 +56,10 @@ fn main() {
         }
         return;
     }
-    if let Some(i)=flag("--capture-audit") {
-        if let Err(error)=capture_audit::run(args.get(i+1).map_or("capture-audit",String::as_str)) {
-            kadr_win::log_warn!("диагностика захвата: {error}");std::process::exit(1);
+    if let Some(i) = flag("--capture-audit") {
+        if let Err(error) = capture_audit::run(args.get(i + 1).map_or("capture-audit", String::as_str)) {
+            kadr_win::log_warn!("диагностика захвата: {error}");
+            std::process::exit(1);
         }
         return;
     }
@@ -79,25 +80,15 @@ fn main() {
     }
     let result: Result<(), Box<dyn Error>> = match flag("--snapshot").or_else(|| flag("--editor-snapshot")) {
         Some(i) => {
-            let path = args
-                .get(i + 1)
-                .filter(|a| !a.starts_with("--"))
-                .map_or("kadr-snapshot.png", String::as_str);
-            let scale = flag("--scale")
-                .and_then(|i| args.get(i + 1))
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(1.0);
+            let path = args.get(i + 1).filter(|a| !a.starts_with("--")).map_or("kadr-snapshot.png", String::as_str);
+            let scale = flag("--scale").and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(1.0);
             // `--exit 0.5`: a pose of the closing motion, with the export flash.
             let exit = flag("--exit").and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok());
             snapshot::run(path, scale, flag("--editor-snapshot").is_some(), exit)
         }
         None => {
             let bench = flag("--bench").map(|i| args.get(i + 1).and_then(|n| n.parse().ok()).unwrap_or(20));
-            let warm = if flag("--cold").is_some() {
-                Some(false)
-            } else {
-                flag("--warm").map(|_| true)
-            };
+            let warm = if flag("--cold").is_some() { Some(false) } else { flag("--warm").map(|_| true) };
             app::run(warm, flag("--perf-hud").is_some(), bench).map_err(Into::into)
         }
     };

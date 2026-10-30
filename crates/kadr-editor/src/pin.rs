@@ -8,12 +8,7 @@ pub struct Pin {
 }
 impl Pin {
     pub fn new(width: u32, height: u32, available: (i32, i32)) -> Self {
-        let mut pin = Self {
-            width: width.max(1),
-            height: height.max(1),
-            zoom: 1.0,
-            opacity: 255,
-        };
+        let mut pin = Self { width: width.max(1), height: height.max(1), zoom: 1.0, opacity: 255 };
         pin.fit(available);
         pin
     }

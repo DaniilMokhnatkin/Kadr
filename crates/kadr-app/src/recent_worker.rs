@@ -21,16 +21,8 @@ pub struct Token {
     pub revision: u64,
 }
 pub enum Command {
-    Create {
-        token: Token,
-        frames: Vec<Arc<Image>>,
-        document: Document,
-    },
-    State {
-        token: Token,
-        document: Document,
-        open: bool,
-    },
+    Create { token: Token, frames: Vec<Arc<Image>>, document: Document },
+    State { token: Token, document: Document, open: bool },
     Remove(Token),
     Load(String),
     List,
@@ -60,10 +52,7 @@ pub struct Worker {
     thread: Option<JoinHandle<()>>,
 }
 pub fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
 }
 /// Контекст создаётся лениво на потоке хранилища и не пересекается с UI-контекстом D2D.
 fn update_preview(
@@ -86,10 +75,7 @@ fn update_preview(
         }
         let (shared, gpu) = renderer.as_ref().unwrap();
         let bounds = kadr_doc::pixels::bounds(frames).unwrap();
-        let area = doc
-            .selection_rect()
-            .and_then(|r| r.intersect(&bounds))
-            .unwrap_or(bounds);
+        let area = doc.selection_rect().and_then(|r| r.intersect(&bounds)).unwrap_or(bounds);
         let image = kadr_render::annotations::flatten(gpu, shared, frames, area, &doc.annotations)?;
         Ok(kadr_doc::pixels::thumbnail(&[Arc::new(image)], area, 320, 160))
     })();
@@ -122,10 +108,7 @@ impl Worker {
                 let mut store = Store::new(PathBuf::from(base).join("Kadr/recent"), Dpapi, max)?;
                 let recovered = store.recover()?;
                 store.set_max(max)?;
-                emit(Event::Ready {
-                    entries: store.list()?,
-                    recovered,
-                });
+                emit(Event::Ready { entries: store.list()?, recovered });
                 let mut frames: HashMap<String, Vec<Arc<Image>>> = HashMap::new();
                 let mut renderer = None;
                 while let Ok(command) = commands.recv() {
@@ -134,11 +117,7 @@ impl Worker {
                     }
                     let result = (|| -> io::Result<()> {
                         match command {
-                            Command::Create {
-                                token,
-                                frames: captured,
-                                document,
-                            } => {
+                            Command::Create { token, frames: captured, document } => {
                                 store.create(&token.id, now_ms(), &captured, &document)?;
                                 store.update(&token.id, &document, true, &captured)?;
                                 frames.insert(token.id.clone(), captured);
@@ -190,11 +169,7 @@ impl Worker {
                 emit(Event::Error(error.to_string()));
             }
         });
-        Self {
-            tx,
-            events,
-            thread: Some(thread),
-        }
+        Self { tx, events, thread: Some(thread) }
     }
     pub fn send(&self, command: Command) -> bool {
         self.tx.send(command).is_ok()

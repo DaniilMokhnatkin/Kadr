@@ -149,7 +149,11 @@ fn code(b: ToolbarButton) -> usize {
 fn property(b: ToolbarButton, occurrence: usize) -> bool {
     matches!(
         b,
-        ToolbarButton::TextPlain | ToolbarButton::TextFilled | ToolbarButton::TextOutline | ToolbarButton::TextCallout | ToolbarButton::Color(_)
+        ToolbarButton::TextPlain
+            | ToolbarButton::TextFilled
+            | ToolbarButton::TextOutline
+            | ToolbarButton::TextCallout
+            | ToolbarButton::Color(_)
             | ToolbarButton::Width
             | ToolbarButton::Strength
             | ToolbarButton::Tool(Tool::BlurEllipse | Tool::BlurBrush | Tool::Spotlight)
@@ -166,10 +170,10 @@ fn selected(b: ToolbarButton, property: bool, e: Option<EditorBar>) -> bool {
     match b {
         ToolbarButton::Tool(t) => e.is_some_and(|e| e.tool == t || (t == Tool::Blur && e.tool.is_blur() && !property)),
         ToolbarButton::Color(i) => e.is_some_and(|e| e.color == i),
-        ToolbarButton::TextPlain=>e.is_some_and(|e|e.text_style==kadr_doc::annotation::TextStyle::Plain),
-        ToolbarButton::TextFilled=>e.is_some_and(|e|e.text_style==kadr_doc::annotation::TextStyle::Filled),
-        ToolbarButton::TextOutline=>e.is_some_and(|e|e.text_style==kadr_doc::annotation::TextStyle::Outline),
-        ToolbarButton::TextCallout=>e.is_some_and(|e|e.callout),
+        ToolbarButton::TextPlain => e.is_some_and(|e| e.text_style == kadr_doc::annotation::TextStyle::Plain),
+        ToolbarButton::TextFilled => e.is_some_and(|e| e.text_style == kadr_doc::annotation::TextStyle::Filled),
+        ToolbarButton::TextOutline => e.is_some_and(|e| e.text_style == kadr_doc::annotation::TextStyle::Outline),
+        ToolbarButton::TextCallout => e.is_some_and(|e| e.callout),
         ToolbarButton::Smart => e.is_some_and(|e| e.smart != SmartUi::Off),
         _ => false,
     }
@@ -199,7 +203,10 @@ fn anchor(panel: D2D_RECT_F, sel: D2D_RECT_F) -> ((f32, f32), f32) {
     }
 }
 /// Slot of the first item matching `pick` in a pose.
-fn slot(buttons: &[(ToolbarButton, D2D_RECT_F, bool)], pick: impl Fn(ToolbarButton, bool) -> bool) -> Option<D2D_RECT_F> {
+fn slot(
+    buttons: &[(ToolbarButton, D2D_RECT_F, bool)],
+    pick: impl Fn(ToolbarButton, bool) -> bool,
+) -> Option<D2D_RECT_F> {
     buttons.iter().find(|(b, _, p)| pick(*b, *p)).map(|(_, r, _)| *r)
 }
 fn glide(state: &mut Option<Bounds>, goal: Option<D2D_RECT_F>, now: f64) -> Option<D2D_RECT_F> {
@@ -293,9 +300,10 @@ impl State {
         appear.target(1.0, now);
 
         // A different parameter family hands over: the old one leaves first, the new one cascades in.
-        let handover = self.controls.iter().any(|c| {
-            c.property && !ids.contains(&c.id) && (!c.exiting || c.opacity.value(now) > 0.02)
-        });
+        let handover = self
+            .controls
+            .iter()
+            .any(|c| c.property && !ids.contains(&c.id) && (!c.exiting || c.opacity.value(now) > 0.02));
         for c in &mut self.controls {
             c.live = false;
         }

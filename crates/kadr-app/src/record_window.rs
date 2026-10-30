@@ -138,7 +138,8 @@ pub fn open(instance: HINSTANCE, host: HWND, message: u32, area: Rect) {
         let below = area.bottom + m + extra <= mi.rcMonitor.bottom;
         st.above = !below;
         let (left, right) = (area.left - m, area.right + m);
-        let (top, bottom) = if below { (area.top - m, area.bottom + m + extra) } else { (area.top - m - extra, area.bottom + m) };
+        let (top, bottom) =
+            if below { (area.top - m, area.bottom + m + extra) } else { (area.top - m - extra, area.bottom + m) };
         // The panel may be wider than a narrow area.
         let panel_w = (PANEL_W * s) as i32;
         let (left, right) = if right - left < panel_w {
@@ -168,7 +169,8 @@ pub fn open(instance: HINSTANCE, host: HWND, message: u32, area: Rect) {
     let Some((hwnd, x, y, w, h, ring, hole, pane)) = placed else { return };
     unsafe {
         use windows::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, RGN_DIFF, RGN_OR, SetWindowRgn};
-        let r = |x: D2D_RECT_F| CreateRectRgn(x.left as i32, x.top as i32, x.right.ceil() as i32, x.bottom.ceil() as i32);
+        let r =
+            |x: D2D_RECT_F| CreateRectRgn(x.left as i32, x.top as i32, x.right.ceil() as i32, x.bottom.ceil() as i32);
         let (shape, hole, pane) = (r(ring), r(hole), r(pane));
         CombineRgn(Some(shape), Some(shape), Some(hole), RGN_DIFF);
         CombineRgn(Some(shape), Some(shape), Some(pane), RGN_OR);
@@ -296,7 +298,12 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
     let label_left = p.left + 16.0 * s + dot * 2.0 + 10.0 * s;
     let (label, tone) = match st.elapsed {
         Some(t) => {
-            fill(gpu, fade(red(), a * breathe), rect(p.left + 16.0 * s, cy - dot, p.left + 16.0 * s + 2.0 * dot, cy + dot), dot);
+            fill(
+                gpu,
+                fade(red(), a * breathe),
+                rect(p.left + 16.0 * s, cy - dot, p.left + 16.0 * s + 2.0 * dot, cy + dot),
+                dot,
+            );
             (clock(t), theme.text)
         }
         None => ("Готовлю запись…".to_string(), theme.text_muted),
@@ -315,12 +322,18 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
 /// «0:07», «12:45», «1:02:03».
 fn clock(t: Duration) -> String {
     let s = t.as_secs();
-    if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
+    if s >= 3600 {
+        format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+    } else {
+        format!("{}:{:02}", s / 60, s % 60)
+    }
 }
 
 fn request(r: Request) {
     REQUEST.with(|q| *q.borrow_mut() = Some(r));
-    if let Some((host, msg)) = STATE.with(|s| s.try_borrow().ok().as_deref().and_then(Option::as_ref).map(|s| (s.host, s.message))) {
+    if let Some((host, msg)) =
+        STATE.with(|s| s.try_borrow().ok().as_deref().and_then(Option::as_ref).map(|s| (s.host, s.message)))
+    {
         unsafe {
             let _ = PostMessageW(Some(host), msg, WPARAM(0), LPARAM(0));
         }
@@ -361,7 +374,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let (x, y) = point();
             STATE.with(|s| {
                 if let Ok(mut guard) = s.try_borrow_mut()
-                    && let Some(st) = guard.as_mut() {
+                    && let Some(st) = guard.as_mut()
+                {
                     let (w, h) = client_size(hwnd);
                     let (cancel, done) = buttons(panel(st, w as f32, h as f32), st.scale);
                     let now = st.epoch.elapsed().as_secs_f64();

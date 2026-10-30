@@ -4,10 +4,10 @@
 //! The same visual system as Kadr itself: Mica, Direct2D, springs.
 #![windows_subsystem = "windows"]
 
+mod art;
 #[allow(dead_code)]
 #[path = "../../kadr-app/src/glass.rs"]
 mod glass;
-mod art;
 mod install;
 
 use glass::{Device, Surface, client_size, fade, fill, inflate, inside, mix, rect, rgb, shadow, stroke, text};
@@ -26,7 +26,9 @@ use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, w};
 use windows_numerics::{Matrix3x2, Vector2};
@@ -201,7 +203,12 @@ impl App {
     }
     /// Windows' OCR was chosen and did not install: the moment to offer PaddleOCR.
     fn offering(&self) -> bool {
-        self.page == DONE && self.failed.is_none() && !self.paddle && !self.adding_paddle && !self.offer_declined && self.warned()
+        self.page == DONE
+            && self.failed.is_none()
+            && !self.paddle
+            && !self.adding_paddle
+            && !self.offer_declined
+            && self.warned()
     }
     fn primary_label(&self) -> Option<&'static str> {
         Some(match self.page {
@@ -225,7 +232,11 @@ impl App {
     }
     fn primary(&mut self) {
         match self.page {
-            READY => self.install(install::Job::Full { autostart: self.options[0], paddle: self.paddle, translation:self.options[1] }),
+            READY => self.install(install::Job::Full {
+                autostart: self.options[0],
+                paddle: self.paddle,
+                translation: self.options[1],
+            }),
             DONE if self.failed.is_some() => {
                 self.failed = None;
                 self.adding_paddle = false;
@@ -276,8 +287,10 @@ impl App {
             install::Job::Full { paddle: true, .. } => &["prepare", "cert", "copy", "autostart", "paddle", "launch"],
             install::Job::Full { .. } => &["prepare", "cert", "copy", "autostart", "ocr-en", "ocr-ru", "launch"],
         };
-        let mut ids=ids.to_vec();
-        if matches!(job,install::Job::Full {translation:true,..}) {ids.insert(ids.len()-1,"translation");}
+        let mut ids = ids.to_vec();
+        if matches!(job, install::Job::Full { translation: true, .. }) {
+            ids.insert(ids.len() - 1, "translation");
+        }
         match install::start(self.hwnd, payload, job) {
             Start::Running(task) => {
                 self.task = Some(task);
@@ -400,7 +413,8 @@ fn layout(app: &App, w: f32, h: f32) -> Layout {
             rect(x - 6.0 * s, bottom - bh / 2.0 - 8.0 * s, x + 10.0 * s, bottom - bh / 2.0 + 8.0 * s)
         })
         .collect();
-    let toggles = [rect(40.0*s,282.0*s,w-40.0*s,338.0*s),rect(40.0*s,338.0*s,w-40.0*s,394.0*s)];
+    let toggles =
+        [rect(40.0 * s, 282.0 * s, w - 40.0 * s, 338.0 * s), rect(40.0 * s, 338.0 * s, w - 40.0 * s, 394.0 * s)];
     let half = (w - 80.0 * s - 16.0 * s) / 2.0;
     let engines = [0, 1].map(|i| {
         let left = 40.0 * s + i as f32 * (half + 16.0 * s);
@@ -447,11 +461,26 @@ fn hit(app: &App, x: f32, y: f32) -> Option<Hit> {
     None
 }
 
-fn format(shared: &kadr_render::gpu::Shared, size: f32, weight: DWRITE_FONT_WEIGHT, center: bool, middle: bool, wrap: bool) -> Option<IDWriteTextFormat> {
+fn format(
+    shared: &kadr_render::gpu::Shared,
+    size: f32,
+    weight: DWRITE_FONT_WEIGHT,
+    center: bool,
+    middle: bool,
+    wrap: bool,
+) -> Option<IDWriteTextFormat> {
     unsafe {
         let f = shared
             .dwrite
-            .CreateTextFormat(PCWSTR(shared.ui_family.as_ptr()), None, weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size, w!("ru-ru"))
+            .CreateTextFormat(
+                PCWSTR(shared.ui_family.as_ptr()),
+                None,
+                weight,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                size,
+                w!("ru-ru"),
+            )
             .ok()?;
         let _ = f.SetWordWrapping(if wrap { DWRITE_WORD_WRAPPING_WRAP } else { DWRITE_WORD_WRAPPING_NO_WRAP });
         if center {
@@ -559,7 +588,10 @@ fn main() {
     let Ok(hwnd) = hwnd else { return };
     let scale = unsafe { GetDpiForWindow(hwnd) } as f32 / 96.0;
     unsafe {
-        let _ = DwmExtendFrameIntoClientArea(hwnd, &MARGINS { cxLeftWidth: -1, cxRightWidth: -1, cyTopHeight: -1, cyBottomHeight: -1 });
+        let _ = DwmExtendFrameIntoClientArea(
+            hwnd,
+            &MARGINS { cxLeftWidth: -1, cxRightWidth: -1, cyTopHeight: -1, cyBottomHeight: -1 },
+        );
         let backdrop = DWMSBT_MAINWINDOW;
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop as *const _ as *const _, 4);
         let corner = DWMWCP_ROUND;
@@ -567,7 +599,7 @@ fn main() {
         glass::match_appearance(hwnd);
     }
     let spring = |c: Curve| Spring::with(0.0, c).precise(0.001);
-    let mut knobs = [spring(Curve::POP),spring(Curve::POP)];
+    let mut knobs = [spring(Curve::POP), spring(Curve::POP)];
     knobs.iter_mut().for_each(|k| k.snap(1.0));
     APP.with(|a| {
         *a.borrow_mut() = Some(App {
@@ -607,7 +639,15 @@ fn main() {
         let _ = GetMonitorInfoW(monitor, &mut mi);
         let (w, h) = ((WIDTH * scale) as i32, (HEIGHT * scale) as i32);
         let r = mi.rcWork;
-        let _ = SetWindowPos(hwnd, None, r.left + (r.right - r.left - w) / 2, r.top + (r.bottom - r.top - h) / 2, w, h, SWP_NOZORDER | SWP_FRAMECHANGED);
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            r.left + (r.right - r.left - w) / 2,
+            r.top + (r.bottom - r.top - h) / 2,
+            w,
+            h,
+            SWP_NOZORDER | SWP_FRAMECHANGED,
+        );
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
         let mut msg = MSG::default();
@@ -654,11 +694,8 @@ fn paint_window(hwnd: HWND) {
 /// Soft colour drifting behind everything, like light through frosted glass.
 fn aurora(device: &Device, theme: &Theme, w: f32, h: f32, t: f64) {
     let gpu = &device.gpu;
-    let blobs = [
-        (theme.accent, 0.18, 0.2, 0.9),
-        (rgb(0xaf52de, 1.0), 0.82, 0.25, 0.7),
-        (rgb(0x30d5c8, 1.0), 0.55, 0.95, 0.8),
-    ];
+    let blobs =
+        [(theme.accent, 0.18, 0.2, 0.9), (rgb(0xaf52de, 1.0), 0.82, 0.25, 0.7), (rgb(0x30d5c8, 1.0), 0.55, 0.95, 0.8)];
     let strength = if theme.dark { 0.20 } else { 0.14 };
     for (i, (c, fx, fy, k)) in blobs.iter().enumerate() {
         let drift = t * 0.12 + i as f64 * 2.1;
@@ -672,7 +709,10 @@ fn aurora(device: &Device, theme: &Theme, w: f32, h: f32, t: f64) {
         unsafe {
             // The device context overloads this; the render target's simple form is the one needed.
             let target: &ID2D1RenderTarget = &gpu.d2d;
-            let Ok(collection) = target.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) else { continue };
+            let Ok(collection) = target.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP)
+            else {
+                continue;
+            };
             let Ok(brush) = gpu.d2d.CreateRadialGradientBrush(
                 &D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES {
                     center: Vector2::new(cx, cy),
@@ -730,7 +770,13 @@ fn paint(device: &Device, app: &App, size: (u32, u32)) -> bool {
         unsafe {
             gpu.brush.SetColor(&mix(theme.text_muted, theme.text, hover));
             for (p, q) in [((-k, -k), (k, k)), ((-k, k), (k, -k))] {
-                gpu.d2d.DrawLine(Vector2::new(cx + p.0, cy + p.1), Vector2::new(cx + q.0, cy + q.1), &gpu.brush, 1.6 * s, None);
+                gpu.d2d.DrawLine(
+                    Vector2::new(cx + p.0, cy + p.1),
+                    Vector2::new(cx + q.0, cy + q.1),
+                    &gpu.brush,
+                    1.6 * s,
+                    None,
+                );
             }
         }
     }
@@ -789,7 +835,10 @@ fn shield(device: &Device, (cx, cy): (f32, f32), s: f32, c: D2D1_COLOR_F) {
     unsafe {
         let Ok(g) = device.shared.d2d.CreatePathGeometry() else { return };
         let Ok(sink) = g.Open() else { return };
-        sink.BeginFigure(Vector2::new(cx + pts[0].0 * s, cy + pts[0].1 * s), windows::Win32::Graphics::Direct2D::Common::D2D1_FIGURE_BEGIN_FILLED);
+        sink.BeginFigure(
+            Vector2::new(cx + pts[0].0 * s, cy + pts[0].1 * s),
+            windows::Win32::Graphics::Direct2D::Common::D2D1_FIGURE_BEGIN_FILLED,
+        );
         let rest: Vec<Vector2> = pts[1..].iter().map(|(x, y)| Vector2::new(cx + x * s, cy + y * s)).collect();
         sink.AddLines(&rest);
         sink.EndFigure(windows::Win32::Graphics::Direct2D::Common::D2D1_FIGURE_END_CLOSED);
@@ -818,13 +867,21 @@ fn tick(device: &Device, (cx, cy): (f32, f32), size: f32, p: f32, c: D2D1_COLOR_
     unsafe {
         let Ok(g) = device.shared.d2d.CreatePathGeometry() else { return };
         let Ok(sink) = g.Open() else { return };
-        sink.BeginFigure(Vector2::new(pts[0].0, pts[0].1), windows::Win32::Graphics::Direct2D::Common::D2D1_FIGURE_BEGIN_HOLLOW);
+        sink.BeginFigure(
+            Vector2::new(pts[0].0, pts[0].1),
+            windows::Win32::Graphics::Direct2D::Common::D2D1_FIGURE_BEGIN_HOLLOW,
+        );
         let rest: Vec<Vector2> = pts[1..].iter().map(|(x, y)| Vector2::new(*x, *y)).collect();
         sink.AddLines(&rest);
         sink.EndFigure(windows::Win32::Graphics::Direct2D::Common::D2D1_FIGURE_END_OPEN);
         let _ = sink.Close();
         let style = device.shared.d2d.CreateStrokeStyle(
-            &D2D1_STROKE_STYLE_PROPERTIES1 { startCap: D2D1_CAP_STYLE_ROUND, endCap: D2D1_CAP_STYLE_ROUND, lineJoin: D2D1_LINE_JOIN_ROUND, ..Default::default() },
+            &D2D1_STROKE_STYLE_PROPERTIES1 {
+                startCap: D2D1_CAP_STYLE_ROUND,
+                endCap: D2D1_CAP_STYLE_ROUND,
+                lineJoin: D2D1_LINE_JOIN_ROUND,
+                ..Default::default()
+            },
             None,
         );
         device.gpu.brush.SetColor(&c);
@@ -851,7 +908,11 @@ fn spinner(device: &Device, (cx, cy): (f32, f32), r: f32, t: f64, c: D2D1_COLOR_
         sink.EndFigure(windows::Win32::Graphics::Direct2D::Common::D2D1_FIGURE_END_OPEN);
         let _ = sink.Close();
         let style = device.shared.d2d.CreateStrokeStyle(
-            &D2D1_STROKE_STYLE_PROPERTIES1 { startCap: D2D1_CAP_STYLE_ROUND, endCap: D2D1_CAP_STYLE_ROUND, ..Default::default() },
+            &D2D1_STROKE_STYLE_PROPERTIES1 {
+                startCap: D2D1_CAP_STYLE_ROUND,
+                endCap: D2D1_CAP_STYLE_ROUND,
+                ..Default::default()
+            },
             None,
         );
         device.gpu.brush.SetColor(&c);
@@ -860,7 +921,18 @@ fn spinner(device: &Device, (cx, cy): (f32, f32), r: f32, t: f64, c: D2D1_COLOR_
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_page(device: &Device, app: &App, f: &Fonts, theme: &Theme, l: &Layout, page: usize, w: f32, h: f32, a: f32, local: f64) {
+fn draw_page(
+    device: &Device,
+    app: &App,
+    f: &Fonts,
+    theme: &Theme,
+    l: &Layout,
+    page: usize,
+    w: f32,
+    h: f32,
+    a: f32,
+    local: f64,
+) {
     let gpu = &device.gpu;
     let s = app.scale;
     let c = |col: D2D1_COLOR_F| fade(col, a);
@@ -876,11 +948,19 @@ fn draw_page(device: &Device, app: &App, f: &Fonts, theme: &Theme, l: &Layout, p
             let size = 128.0 * s * (0.86 + 0.14 * k);
             let cx = w / 2.0;
             let top = 92.0 * s;
-            let icon = rect(cx - size / 2.0, top + (128.0 * s - size) / 2.0, cx + size / 2.0, top + (128.0 * s + size) / 2.0);
+            let icon =
+                rect(cx - size / 2.0, top + (128.0 * s - size) / 2.0, cx + size / 2.0, top + (128.0 * s + size) / 2.0);
             if let Some(logo) = &app.logo {
                 shadow(gpu, inflate(icon, -10.0 * s), 28.0 * s, s, 18.0, 10.0, 0.22 * a * k);
                 unsafe {
-                    gpu.d2d.DrawBitmap(logo, Some(&icon), a * k.min(1.0), D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, None, None);
+                    gpu.d2d.DrawBitmap(
+                        logo,
+                        Some(&icon),
+                        a * k.min(1.0),
+                        D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+                        None,
+                        None,
+                    );
                 }
             }
             let (r, alpha) = lifted(rect(60.0 * s, 248.0 * s, w - 60.0 * s, 300.0 * s), 3);
@@ -954,7 +1034,12 @@ fn draw_page(device: &Device, app: &App, f: &Fonts, theme: &Theme, l: &Layout, p
                 let ka = (a * k).clamp(0.0, 1.0);
                 fill(gpu, fade(theme.surface, ka), chip, 7.0 * s);
                 stroke(gpu, fade(theme.hairline, ka), chip, 7.0 * s, 1.0);
-                fill(gpu, fade(theme.hairline, 0.5 * ka), rect(chip.left + 4.0 * s, chip.bottom - 2.0 * s, chip.right - 4.0 * s, chip.bottom - 1.0 * s), 1.0);
+                fill(
+                    gpu,
+                    fade(theme.hairline, 0.5 * ka),
+                    rect(chip.left + 4.0 * s, chip.bottom - 2.0 * s, chip.right - 4.0 * s, chip.bottom - 1.0 * s),
+                    1.0,
+                );
                 text(gpu, &f.chip, key, chip, fade(theme.text, ka));
                 cx += kw + 8.0 * s;
             }
@@ -978,7 +1063,13 @@ fn draw_page(device: &Device, app: &App, f: &Fonts, theme: &Theme, l: &Layout, p
                 let hover = app.glow.iter().find(|(k, _)| *k == Hit::Engine(n)).map_or(0.0, |(_, sp)| sp.value(t));
                 shadow(gpu, card, 16.0 * s, s, 10.0, 5.0, (0.08 + 0.1 * on) * alpha);
                 fill(gpu, fade(mix(theme.surface, mix(theme.surface, theme.accent, 0.06), on), alpha), card, 16.0 * s);
-                stroke(gpu, fade(mix(theme.hairline, theme.accent, on), alpha), inflate(card, -s * on), 16.0 * s, 1.0 + s * on);
+                stroke(
+                    gpu,
+                    fade(mix(theme.hairline, theme.accent, on), alpha),
+                    inflate(card, -s * on),
+                    16.0 * s,
+                    1.0 + s * on,
+                );
                 if hover > 0.01 {
                     fill(gpu, fade(theme.tint, 0.35 * hover * alpha), inflate(card, -2.0 * s), 15.0 * s);
                 }
@@ -986,17 +1077,35 @@ fn draw_page(device: &Device, app: &App, f: &Fonts, theme: &Theme, l: &Layout, p
                 let (rx, ry) = (card.left + 30.0 * s, card.top + 32.0 * s);
                 unsafe {
                     gpu.brush.SetColor(&fade(mix(theme.track, theme.accent, on), alpha));
-                    gpu.d2d.DrawEllipse(&D2D1_ELLIPSE { point: Vector2::new(rx, ry), radiusX: 10.0 * s, radiusY: 10.0 * s }, &gpu.brush, 1.8 * s, None);
+                    gpu.d2d.DrawEllipse(
+                        &D2D1_ELLIPSE { point: Vector2::new(rx, ry), radiusX: 10.0 * s, radiusY: 10.0 * s },
+                        &gpu.brush,
+                        1.8 * s,
+                        None,
+                    );
                 }
                 let k = 5.5 * s * on;
                 fill(gpu, fade(theme.accent, alpha), rect(rx - k, ry - k, rx + k, ry + k), k);
-                text(gpu, &f.small_bold, name, rect(card.left + 50.0 * s, card.top + 18.0 * s, card.right - 16.0 * s, card.top + 46.0 * s), fade(theme.text, alpha));
+                text(
+                    gpu,
+                    &f.small_bold,
+                    name,
+                    rect(card.left + 50.0 * s, card.top + 18.0 * s, card.right - 16.0 * s, card.top + 46.0 * s),
+                    fade(theme.text, alpha),
+                );
                 if n == 0 {
-                    let badge = rect(card.right - 118.0 * s, card.top + 20.0 * s, card.right - 16.0 * s, card.top + 44.0 * s);
+                    let badge =
+                        rect(card.right - 118.0 * s, card.top + 20.0 * s, card.right - 16.0 * s, card.top + 44.0 * s);
                     fill(gpu, fade(theme.accent, 0.14 * alpha), badge, 12.0 * s);
                     text(gpu, &f.chip, "Рекомендуем", badge, fade(theme.accent, alpha));
                 }
-                text(gpu, &f.small, what, rect(card.left + 50.0 * s, card.top + 44.0 * s, card.right - 16.0 * s, card.top + 64.0 * s), fade(theme.text_muted, alpha));
+                text(
+                    gpu,
+                    &f.small,
+                    what,
+                    rect(card.left + 50.0 * s, card.top + 44.0 * s, card.right - 16.0 * s, card.top + 64.0 * s),
+                    fade(theme.text_muted, alpha),
+                );
                 // Pluses in green, minuses in orange, each wrapped to the card.
                 let mut y = card.top + 82.0 * s;
                 let inner = card.right - card.left - 64.0 * s;
@@ -1004,9 +1113,26 @@ fn draw_page(device: &Device, app: &App, f: &Fonts, theme: &Theme, l: &Layout, p
                     let height = text_height(device, &f.small, line, inner).max(18.0 * s);
                     let mark = if good { art::GREEN } else { rgb(0xff9f0a, 1.0) };
                     let (mx, my) = (card.left + 30.0 * s, y + 9.0 * s);
-                    fill(gpu, fade(mark, 0.16 * alpha), rect(mx - 8.0 * s, my - 8.0 * s, mx + 8.0 * s, my + 8.0 * s), 8.0 * s);
-                    text(gpu, &f.chip, if good { "+" } else { "−" }, rect(mx - 8.0 * s, my - 8.0 * s, mx + 8.0 * s, my + 8.0 * s), fade(mark, alpha));
-                    text(gpu, &f.small, line, rect(card.left + 48.0 * s, y, card.right - 16.0 * s, y + height + 2.0 * s), fade(theme.text, alpha));
+                    fill(
+                        gpu,
+                        fade(mark, 0.16 * alpha),
+                        rect(mx - 8.0 * s, my - 8.0 * s, mx + 8.0 * s, my + 8.0 * s),
+                        8.0 * s,
+                    );
+                    text(
+                        gpu,
+                        &f.chip,
+                        if good { "+" } else { "−" },
+                        rect(mx - 8.0 * s, my - 8.0 * s, mx + 8.0 * s, my + 8.0 * s),
+                        fade(mark, alpha),
+                    );
+                    text(
+                        gpu,
+                        &f.small,
+                        line,
+                        rect(card.left + 48.0 * s, y, card.right - 16.0 * s, y + height + 2.0 * s),
+                        fade(theme.text, alpha),
+                    );
                     y += height + 10.0 * s;
                 }
             }
@@ -1015,7 +1141,13 @@ fn draw_page(device: &Device, app: &App, f: &Fonts, theme: &Theme, l: &Layout, p
             let (r, alpha) = lifted(rect(40.0 * s, 64.0 * s, w - 80.0 * s, 104.0 * s), 0);
             text(gpu, &f.title, "Одно разрешение — и готово", r, fade(theme.text, alpha));
             let (r, alpha) = lifted(rect(40.0 * s, 110.0 * s, w - 80.0 * s, 136.0 * s), 1);
-            text(gpu, &f.lead, "Windows попросит разрешение администратора. Оно нужно один раз, чтобы:", r, fade(theme.text_muted, alpha));
+            text(
+                gpu,
+                &f.lead,
+                "Windows попросит разрешение администратора. Оно нужно один раз, чтобы:",
+                r,
+                fade(theme.text_muted, alpha),
+            );
             let reasons = [
                 "Kadr работал поверх любых окон — даже Диспетчера задач",
                 "подписать Kadr сертификатом, созданным прямо на этом компьютере",
@@ -1030,12 +1162,28 @@ fn draw_page(device: &Device, app: &App, f: &Fonts, theme: &Theme, l: &Layout, p
                 let (row, alpha) = lifted(rect(40.0 * s, y, w - 40.0 * s, y + 30.0 * s), 2 + n);
                 let dot = rect(row.left, row.top + 3.0 * s, row.left + 24.0 * s, row.top + 27.0 * s);
                 fill(gpu, fade(theme.accent, 0.16 * alpha), dot, 12.0 * s);
-                tick(device, ((dot.left + dot.right) / 2.0, (dot.top + dot.bottom) / 2.0), 12.0 * s, art::ease(art::phase(local, 0.3 + 0.12 * n as f64, 0.4)), fade(theme.accent, alpha), 2.0 * s);
-                text(gpu, &f.small_bold, reason, rect(row.left + 36.0 * s, row.top, row.right, row.bottom), fade(theme.text, alpha));
+                tick(
+                    device,
+                    ((dot.left + dot.right) / 2.0, (dot.top + dot.bottom) / 2.0),
+                    12.0 * s,
+                    art::ease(art::phase(local, 0.3 + 0.12 * n as f64, 0.4)),
+                    fade(theme.accent, alpha),
+                    2.0 * s,
+                );
+                text(
+                    gpu,
+                    &f.small_bold,
+                    reason,
+                    rect(row.left + 36.0 * s, row.top, row.right, row.bottom),
+                    fade(theme.text, alpha),
+                );
             }
             // Options.
-            let options = [("Запускать вместе с Windows", "Kadr будет ждать PrtSc сразу после входа"),("Офлайн-перевод EN ↔ RU", "Скачать около 440 МБ один раз; затем без интернета и ключей")];
-            let group = rect(l.toggles[0].left,l.toggles[0].top,l.toggles[1].right,l.toggles[1].bottom);
+            let options = [
+                ("Запускать вместе с Windows", "Kadr будет ждать PrtSc сразу после входа"),
+                ("Офлайн-перевод EN ↔ RU", "Скачать около 440 МБ один раз; затем без интернета и ключей"),
+            ];
+            let group = rect(l.toggles[0].left, l.toggles[0].top, l.toggles[1].right, l.toggles[1].bottom);
             let (g, alpha) = lifted(group, 5);
             fill(gpu, fade(theme.group, alpha), g, 14.0 * s);
             stroke(gpu, fade(theme.hairline, 0.7 * alpha), inflate(g, -0.5), 14.0 * s, 1.0);
@@ -1043,12 +1191,30 @@ fn draw_page(device: &Device, app: &App, f: &Fonts, theme: &Theme, l: &Layout, p
                 let r = l.toggles[n];
                 let r = rect(r.left, r.top + (g.top - group.top), r.right, r.bottom + (g.top - group.top));
                 if n > 0 {
-                    fill(gpu, fade(theme.hairline, 0.6 * alpha), rect(r.left + 16.0 * s, r.top, r.right, r.top + 1.0), 0.0);
+                    fill(
+                        gpu,
+                        fade(theme.hairline, 0.6 * alpha),
+                        rect(r.left + 16.0 * s, r.top, r.right, r.top + 1.0),
+                        0.0,
+                    );
                 }
-                let hover = app.glow.iter().find(|(k, _)| *k == Hit::Toggle(n)).map_or(0.0, |(_, sp)| sp.value(now(app)));
+                let hover =
+                    app.glow.iter().find(|(k, _)| *k == Hit::Toggle(n)).map_or(0.0, |(_, sp)| sp.value(now(app)));
                 fill(gpu, fade(theme.tint, 0.6 * hover * alpha), inflate(r, -3.0 * s), 10.0 * s);
-                text(gpu, &f.small_bold, label, rect(r.left + 18.0 * s, r.top + 6.0 * s, r.right - 80.0 * s, r.top + 30.0 * s), fade(theme.text, alpha));
-                text(gpu, &f.small, hint, rect(r.left + 18.0 * s, r.top + 30.0 * s, r.right - 80.0 * s, r.bottom), fade(theme.text_muted, alpha));
+                text(
+                    gpu,
+                    &f.small_bold,
+                    label,
+                    rect(r.left + 18.0 * s, r.top + 6.0 * s, r.right - 80.0 * s, r.top + 30.0 * s),
+                    fade(theme.text, alpha),
+                );
+                text(
+                    gpu,
+                    &f.small,
+                    hint,
+                    rect(r.left + 18.0 * s, r.top + 30.0 * s, r.right - 80.0 * s, r.bottom),
+                    fade(theme.text_muted, alpha),
+                );
                 let on = app.knobs[n].value(now(app));
                 let track = rect(r.right - 62.0 * s, r.top + 16.0 * s, r.right - 18.0 * s, r.top + 40.0 * s);
                 fill(gpu, fade(mix(theme.track, theme.accent, on.clamp(0.0, 1.0)), alpha), track, 12.0 * s);
@@ -1070,12 +1236,23 @@ fn draw_page(device: &Device, app: &App, f: &Fonts, theme: &Theme, l: &Layout, p
         }
         INSTALLING => {
             let (r, alpha) = lifted(rect(40.0 * s, 64.0 * s, w - 80.0 * s, 104.0 * s), 0);
-            text(gpu, &f.title, if app.adding_paddle { "Добавляю PaddleOCR…" } else { "Устанавливаю Kadr…" }, r, fade(theme.text, alpha));
+            text(
+                gpu,
+                &f.title,
+                if app.adding_paddle { "Добавляю PaddleOCR…" } else { "Устанавливаю Kadr…" },
+                r,
+                fade(theme.text, alpha),
+            );
             // Overall progress.
             let bar = rect(40.0 * s, 116.0 * s, w - 40.0 * s, 122.0 * s);
             fill(gpu, c(theme.track), bar, 3.0 * s);
             let p = app.progress.value(now(app)).clamp(0.0, 1.0);
-            fill(gpu, c(theme.accent), rect(bar.left, bar.top, bar.left + (bar.right - bar.left) * p.max(0.02), bar.bottom), 3.0 * s);
+            fill(
+                gpu,
+                c(theme.accent),
+                rect(bar.left, bar.top, bar.left + (bar.right - bar.left) * p.max(0.02), bar.bottom),
+                3.0 * s,
+            );
             let list = rect(40.0 * s, 138.0 * s, w - 40.0 * s, 138.0 * s + app.plan.len() as f32 * 46.0 * s);
             let (g, alpha) = lifted(list, 1);
             fill(gpu, fade(theme.group, alpha), g, 14.0 * s);
@@ -1084,7 +1261,12 @@ fn draw_page(device: &Device, app: &App, f: &Fonts, theme: &Theme, l: &Layout, p
             for (n, (_, title, note)) in app.plan.iter().map(|&i| STEPS[i]).enumerate() {
                 let row = rect(g.left, g.top + n as f32 * 46.0 * s, g.right, g.top + (n + 1) as f32 * 46.0 * s);
                 if n > 0 {
-                    fill(gpu, fade(theme.hairline, 0.5 * alpha), rect(row.left + 52.0 * s, row.top, row.right, row.top + 1.0), 0.0);
+                    fill(
+                        gpu,
+                        fade(theme.hairline, 0.5 * alpha),
+                        rect(row.left + 52.0 * s, row.top, row.right, row.top + 1.0),
+                        0.0,
+                    );
                 }
                 let center = (row.left + 28.0 * s, (row.top + row.bottom) / 2.0);
                 let step = app.steps.get(n).cloned().unwrap_or(Step::Waiting);
@@ -1092,7 +1274,16 @@ fn draw_page(device: &Device, app: &App, f: &Fonts, theme: &Theme, l: &Layout, p
                     Step::Waiting => {
                         unsafe {
                             gpu.brush.SetColor(&fade(theme.track, alpha));
-                            gpu.d2d.DrawEllipse(&D2D1_ELLIPSE { point: Vector2::new(center.0, center.1), radiusX: 9.0 * s, radiusY: 9.0 * s }, &gpu.brush, 1.6 * s, None);
+                            gpu.d2d.DrawEllipse(
+                                &D2D1_ELLIPSE {
+                                    point: Vector2::new(center.0, center.1),
+                                    radiusX: 9.0 * s,
+                                    radiusY: 9.0 * s,
+                                },
+                                &gpu.brush,
+                                1.6 * s,
+                                None,
+                            );
                         }
                         (theme.text_muted, String::new())
                     }
@@ -1103,19 +1294,47 @@ fn draw_page(device: &Device, app: &App, f: &Fonts, theme: &Theme, l: &Layout, p
                     Step::Done(since) => {
                         let k = art::pop(art::phase(t, *since, 0.45));
                         let r = 11.0 * s * (0.6 + 0.4 * k);
-                        fill(gpu, fade(art::GREEN, alpha), rect(center.0 - r, center.1 - r, center.0 + r, center.1 + r), r);
-                        tick(device, center, 13.0 * s, art::ease(art::phase(t, *since + 0.1, 0.35)), fade(rgb(0xffffff, 1.0), alpha), 2.2 * s);
+                        fill(
+                            gpu,
+                            fade(art::GREEN, alpha),
+                            rect(center.0 - r, center.1 - r, center.0 + r, center.1 + r),
+                            r,
+                        );
+                        tick(
+                            device,
+                            center,
+                            13.0 * s,
+                            art::ease(art::phase(t, *since + 0.1, 0.35)),
+                            fade(rgb(0xffffff, 1.0), alpha),
+                            2.2 * s,
+                        );
                         (theme.text, String::new())
                     }
                     Step::Skipped => {
-                        fill(gpu, fade(theme.track, alpha), rect(center.0 - 6.0 * s, center.1 - 1.0 * s, center.0 + 6.0 * s, center.1 + 1.0 * s), 1.0 * s);
+                        fill(
+                            gpu,
+                            fade(theme.track, alpha),
+                            rect(center.0 - 6.0 * s, center.1 - 1.0 * s, center.0 + 6.0 * s, center.1 + 1.0 * s),
+                            1.0 * s,
+                        );
                         (theme.text_muted, "пропущено".to_string())
                     }
                     Step::Warn(text, since) => {
                         let k = art::pop(art::phase(t, *since, 0.45));
                         let r = 11.0 * s * (0.6 + 0.4 * k);
-                        fill(gpu, fade(rgb(0xff9f0a, 1.0), alpha), rect(center.0 - r, center.1 - r, center.0 + r, center.1 + r), r);
-                        glass::text(gpu, &f.chip, "!", rect(center.0 - r, center.1 - r, center.0 + r, center.1 + r), fade(rgb(0xffffff, 1.0), alpha));
+                        fill(
+                            gpu,
+                            fade(rgb(0xff9f0a, 1.0), alpha),
+                            rect(center.0 - r, center.1 - r, center.0 + r, center.1 + r),
+                            r,
+                        );
+                        glass::text(
+                            gpu,
+                            &f.chip,
+                            "!",
+                            rect(center.0 - r, center.1 - r, center.0 + r, center.1 + r),
+                            fade(rgb(0xffffff, 1.0), alpha),
+                        );
                         (theme.text, format!("не получилось: {}", text.chars().take(90).collect::<String>()))
                     }
                 };
@@ -1123,8 +1342,20 @@ fn draw_page(device: &Device, app: &App, f: &Fonts, theme: &Theme, l: &Layout, p
                 if sub.is_empty() {
                     text(gpu, &f.small_bold, title, label, fade(ink, alpha));
                 } else {
-                    text(gpu, &f.small_bold, title, rect(label.left, label.top + 3.0 * s, label.right, label.top + 25.0 * s), fade(ink, alpha));
-                    text(gpu, &f.small, &sub, rect(label.left, label.top + 24.0 * s, label.right, label.bottom), fade(theme.text_muted, alpha));
+                    text(
+                        gpu,
+                        &f.small_bold,
+                        title,
+                        rect(label.left, label.top + 3.0 * s, label.right, label.top + 25.0 * s),
+                        fade(ink, alpha),
+                    );
+                    text(
+                        gpu,
+                        &f.small,
+                        &sub,
+                        rect(label.left, label.top + 24.0 * s, label.right, label.bottom),
+                        fade(theme.text_muted, alpha),
+                    );
                 }
             }
         }
@@ -1159,7 +1390,10 @@ fn draw_page(device: &Device, app: &App, f: &Fonts, theme: &Theme, l: &Layout, p
                 let (r1, a1) = lifted(rect(60.0 * s, 160.0 * s, w - 60.0 * s, 200.0 * s), 3);
                 text(gpu, &f.title_center, "Распознавание Windows не установилось", r1, fade(theme.text, a1));
                 let why = match reason.filter(|r| !r.is_empty()) {
-                    Some(r) => format!("Windows не смогла поставить языковые пакеты: «{}».", r.chars().take(140).collect::<String>()),
+                    Some(r) => format!(
+                        "Windows не смогла поставить языковые пакеты: «{}».",
+                        r.chars().take(140).collect::<String>()
+                    ),
                     None => "Windows не смогла поставить языковые пакеты.".into(),
                 };
                 let body = format!(
@@ -1244,7 +1478,9 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             // The top strip drags the window, except over the close button.
             let caption = APP.with(|a| {
                 a.try_borrow().is_ok_and(|g| {
-                    g.as_ref().is_some_and(|app| (p.y as f32) < 56.0 * app.scale && hit(app, p.x as f32, p.y as f32).is_none())
+                    g.as_ref().is_some_and(|app| {
+                        (p.y as f32) < 56.0 * app.scale && hit(app, p.x as f32, p.y as f32).is_none()
+                    })
                 })
             });
             return LRESULT(if caption { HTCAPTION as isize } else { HTCLIENT as isize });
@@ -1259,7 +1495,12 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     app.set_hover(h);
                 }
             });
-            let mut track = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
+            let mut track = TRACKMOUSEEVENT {
+                cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: hwnd,
+                dwHoverTime: 0,
+            };
             unsafe {
                 let _ = TrackMouseEvent(&mut track);
             }
@@ -1323,7 +1564,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_CLOSE => {
             // Closing mid-install would leave a half-done install: wait for it.
-            let installing = APP.with(|a| a.try_borrow().is_ok_and(|g| g.as_ref().is_some_and(|app| app.task.is_some())));
+            let installing =
+                APP.with(|a| a.try_borrow().is_ok_and(|g| g.as_ref().is_some_and(|app| app.task.is_some())));
             if !installing {
                 unsafe {
                     let _ = DestroyWindow(hwnd);
@@ -1346,7 +1588,15 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 }
             });
             unsafe {
-                let _ = SetWindowPos(hwnd, None, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    r.left,
+                    r.top,
+                    r.right - r.left,
+                    r.bottom - r.top,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
             }
             return LRESULT(0);
         }
@@ -1405,7 +1655,7 @@ fn snapshots(folder: &std::path::Path, scale: f32) -> windows::core::Result<()> 
             hover: None,
             glow: Vec::new(),
             options: [true, true],
-            knobs: [spring(Curve::POP),spring(Curve::POP)],
+            knobs: [spring(Curve::POP), spring(Curve::POP)],
             payload: Err(String::new()),
             task: None,
             plan: Vec::new(),
@@ -1454,10 +1704,16 @@ fn snapshots(folder: &std::path::Path, scale: f32) -> windows::core::Result<()> 
         }
         let image = glass::render_offscreen(&device, w, h, || {
             let theme = Theme::current();
-            fill(&device.gpu, if theme.dark { rgb(0x202022, 1.0) } else { rgb(0xeef0f4, 1.0) }, rect(0.0, 0.0, w as f32, h as f32), 0.0);
+            fill(
+                &device.gpu,
+                if theme.dark { rgb(0x202022, 1.0) } else { rgb(0xeef0f4, 1.0) },
+                rect(0.0, 0.0, w as f32, h as f32),
+                0.0,
+            );
             paint(&device, &app, (w, h));
         })?;
-        let png = kadr_doc::pixels::encode_png(&image).map_err(|_| windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+        let png = kadr_doc::pixels::encode_png(&image)
+            .map_err(|_| windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
         let _ = std::fs::write(folder.join(format!("{name}.png")), png);
     }
     Ok(())

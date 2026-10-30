@@ -17,11 +17,7 @@ pub(super) struct Exit {
 }
 
 impl App {
-    pub(super) fn begin_exit(
-        &mut self,
-        flash: bool,
-        save_as: Option<SaveAs>,
-    ) {
+    pub(super) fn begin_exit(&mut self, flash: bool, save_as: Option<SaveAs>) {
         if self.active.is_none() || self.exit.is_some() {
             return;
         }

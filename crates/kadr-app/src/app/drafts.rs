@@ -14,7 +14,7 @@ pub(super) struct DraftState {
 impl App {
     pub(super) fn hide_recent_before_capture(&mut self) {
         self.finish_paused();
-        let viewer=crate::viewer::close_now();
+        let viewer = crate::viewer::close_now();
         // The corner thumbnail and the text bubble are topmost: they must not end up in the capture.
         let bubble = crate::bubble::is_open();
         if bubble {
@@ -49,22 +49,11 @@ impl App {
             active.session.is_auto_selected(),
         );
         let token = new_token();
-        if !self.recent.send(Command::Create {
-            token: token.clone(),
-            frames,
-            document: document.clone(),
-        }) {
-            self.notify(
-                "Снимок не сохранён в «Недавних»",
-                "Хранилище недоступно. Сохраните снимок в файл.",
-            );
+        if !self.recent.send(Command::Create { token: token.clone(), frames, document: document.clone() }) {
+            self.notify("Снимок не сохранён в «Недавних»", "Хранилище недоступно. Сохраните снимок в файл.");
             return;
         }
-        self.active.as_mut().unwrap().draft = Some(DraftState {
-            token,
-            document,
-            view: None,
-        });
+        self.active.as_mut().unwrap().draft = Some(DraftState { token, document, view: None });
     }
     pub(super) fn schedule_draft(&self) {
         let Some(active) = &self.active else { return };
@@ -103,11 +92,7 @@ impl App {
             draft.document.annotations = annotations;
         }
         if changed || !open {
-            self.recent.send(Command::State {
-                token: draft.token.clone(),
-                document: draft.document.clone(),
-                open,
-            });
+            self.recent.send(Command::State { token: draft.token.clone(), document: draft.document.clone(), open });
         }
     }
     pub(super) fn show_recent(&mut self) {
@@ -116,13 +101,7 @@ impl App {
         }
         self.recovery_notice = false;
         if self.recent_window.is_none() {
-            match Window::new(
-                self.instance,
-                self.hwnd,
-                WM_APP_RECENT_UI,
-                self.icons.app(),
-                self.icons.small(),
-            ) {
+            match Window::new(self.instance, self.hwnd, WM_APP_RECENT_UI, self.icons.app(), self.icons.small()) {
                 Ok(window) => self.recent_window = Some(window),
                 Err(e) => {
                     self.notify("Не удалось открыть «Недавние»", &e.message());
@@ -131,10 +110,7 @@ impl App {
             }
         }
         self.pause_capture();
-        self.recent_window
-            .as_ref()
-            .unwrap()
-            .show(self.config.recent.enabled, self.paused.is_some());
+        self.recent_window.as_ref().unwrap().show(self.config.recent.enabled, self.paused.is_some());
         if !self.recent.send(Command::List) {
             self.recent_window.as_ref().unwrap().error("Хранилище недоступно");
         }
@@ -143,12 +119,7 @@ impl App {
         let request = self.recent_window.as_ref().and_then(Window::take_request);
         match request {
             Some(Request::Load(id)) => {
-                if self
-                    .paused
-                    .as_ref()
-                    .and_then(|a| a.draft.as_ref())
-                    .is_some_and(|d| d.token.id == id)
-                {
+                if self.paused.as_ref().and_then(|a| a.draft.as_ref()).is_some_and(|d| d.token.id == id) {
                     if let Some(window) = &self.recent_window {
                         window.hide();
                     }
@@ -183,10 +154,7 @@ impl App {
                         window.set_entries(entries);
                     }
                     if recovered > 0 {
-                        self.notify(
-                            "Снимок не был сохранён",
-                            "Он доступен в «Недавних». Нажмите, чтобы восстановить.",
-                        );
+                        self.notify("Снимок не был сохранён", "Он доступен в «Недавних». Нажмите, чтобы восстановить.");
                         self.recovery_notice = true;
                     }
                 }
@@ -200,15 +168,8 @@ impl App {
                 }
                 Event::Loaded { id, draft } => {
                     if !self.loading_recent {
-                        let token = Token {
-                            id,
-                            revision: draft.document.revision,
-                        };
-                        self.recent.send(Command::State {
-                            token,
-                            document: draft.document,
-                            open: false,
-                        });
+                        let token = Token { id, revision: draft.document.revision };
+                        self.recent.send(Command::State { token, document: draft.document, open: false });
                         continue;
                     }
                     self.loading_recent = false;
@@ -289,11 +250,7 @@ impl App {
             current.clone()
         } else {
             let source = pixels::bounds(&frames).unwrap();
-            let primary = current
-                .iter()
-                .find(|r| r.contains(DocPoint::new(0, 0)))
-                .copied()
-                .unwrap_or(current[0]);
+            let primary = current.iter().find(|r| r.contains(DocPoint::new(0, 0))).copied().unwrap_or(current[0]);
             let (image, mapped) = pixels::fit_to_monitor(&frames, selection, primary);
             let target = image.rect;
             selection = mapped;
@@ -304,12 +261,7 @@ impl App {
         for overlay in &mut self.overlays {
             let image = Image::compose(
                 frames.iter().map(Arc::as_ref),
-                DocRect::new(
-                    overlay.rect.left,
-                    overlay.rect.top,
-                    overlay.rect.right,
-                    overlay.rect.bottom,
-                ),
+                DocRect::new(overlay.rect.left, overlay.rect.top, overlay.rect.right, overlay.rect.bottom),
             );
             overlay.set_image(&self.gpus[self.outputs[overlay.output].gpu], &image)?;
         }
@@ -318,31 +270,19 @@ impl App {
         session.restore_selection(selection, draft.document.automatic);
         let mut drawing = Drawing::default();
         let shapes = if let Some((from, to)) = view {
-            draft
-                .document
-                .annotations
-                .iter()
-                .map(|s| s.transformed(from, to))
-                .collect()
+            draft.document.annotations.iter().map(|s| s.transformed(from, to)).collect()
         } else {
             draft.document.annotations.clone()
         };
         drawing.restore(shapes);
-        let token = Token {
-            id,
-            revision: draft.document.revision,
-        };
+        let token = Token { id, revision: draft.document.revision };
         let hud_overlay = self.overlay_at(cursor_pos()).unwrap_or(0);
         self.active = Some(Active {
             session,
             frames,
             hud_overlay,
             hovered: None,
-            draft: Some(DraftState {
-                token,
-                document: draft.document,
-                view,
-            }),
+            draft: Some(DraftState { token, document: draft.document, view }),
             drawing,
             text_surrogate: None,
         });
@@ -378,12 +318,7 @@ fn resume_active(active: &mut Option<Active>, paused: &mut Option<Active>) -> bo
 fn new_token() -> Token {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     Token {
-        id: format!(
-            "{:x}-{:x}-{:x}",
-            now_ms(),
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ),
+        id: format!("{:x}-{:x}-{:x}", now_ms(), std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)),
         revision: 1,
     }
 }
@@ -486,19 +421,12 @@ mod tests {
         let displayed = original.transformed(source, target);
         assert_eq!(displayed.width, 2);
         assert_eq!(
-            archived_shapes(
-                std::slice::from_ref(&displayed),
-                Some((source, target)),
-                std::slice::from_ref(&original)
-            ),
+            archived_shapes(std::slice::from_ref(&displayed), Some((source, target)), std::slice::from_ref(&original)),
             vec![original.clone()]
         );
         let mut moved = displayed;
         moved.points[0][0] += 10;
         moved.points[1][0] += 10;
-        assert_eq!(
-            archived_shapes(&[moved], Some((source, target)), &[original])[0].width,
-            3
-        );
+        assert_eq!(archived_shapes(&[moved], Some((source, target)), &[original])[0].width, 3);
     }
 }

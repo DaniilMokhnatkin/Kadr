@@ -23,9 +23,7 @@ impl NativeTimer {
     fn arm(&self, delay: std::time::Duration) -> Option<HANDLE> {
         let h = self.0?;
         let due = -((delay.as_nanos() / 100).max(1).min(i64::MAX as u128) as i64);
-        unsafe { windows::Win32::System::Threading::SetWaitableTimer(h, &due, 0, None, None, false) }
-            .ok()
-            .map(|()| h)
+        unsafe { windows::Win32::System::Threading::SetWaitableTimer(h, &due, 0, None, None, false) }.ok().map(|()| h)
     }
 }
 impl Drop for NativeTimer {
@@ -64,25 +62,25 @@ impl App {
     pub(super) fn overlay_needs_frames(&self, index: usize) -> bool {
         let Some(overlay) = self.overlays.get(index) else { return false };
         // The hovered window already has an animated border before the selection is committed.
-        let selected_here = self.active.as_ref().and_then(|a| a.session.highlight())
-            .is_some_and(|r| r.intersect(&DocRect::new(
-                overlay.rect.left, overlay.rect.top, overlay.rect.right, overlay.rect.bottom,
-            )).is_some());
-        effect_needs_frames(overlay.animations_pending(), self.exit.is_some(), selected_here,
+        let selected_here = self.active.as_ref().and_then(|a| a.session.highlight()).is_some_and(|r| {
+            r.intersect(&DocRect::new(overlay.rect.left, overlay.rect.top, overlay.rect.right, overlay.rect.bottom))
+                .is_some()
+        });
+        effect_needs_frames(
+            overlay.animations_pending(),
+            self.exit.is_some(),
+            selected_here,
             self.smart_needs_frames(),
-            self.config.appearance.marching_ants && kadr_render::theme::motion_enabled())
+            self.config.appearance.marching_ants && kadr_render::theme::motion_enabled(),
+        )
     }
     fn frame_waits(&self) -> (Vec<HANDLE>, bool) {
         let pending = self.frames.borrow().pending();
-        let handles = pending
+        let handles =
+            pending.iter().filter_map(|i| self.overlays.get(*i).and_then(Overlay::latency_handle)).collect::<Vec<_>>();
+        let fallback = pending
             .iter()
-            .filter_map(|i| self.overlays.get(*i).and_then(Overlay::latency_handle))
-            .collect::<Vec<_>>();
-        let fallback = pending.iter().any(|i| {
-            self.overlays
-                .get(*i)
-                .is_some_and(|o| o.latency_handle().is_none() || o.needs_retry())
-        });
+            .any(|i| self.overlays.get(*i).is_some_and(|o| o.latency_handle().is_none() || o.needs_retry()));
         (handles, fallback)
     }
 }
@@ -149,10 +147,7 @@ mod tests {
         let before = unsafe { GetForegroundWindow() };
         let timer = NativeTimer::new();
         if let Some(h) = timer.arm(std::time::Duration::from_millis(2)) {
-            assert_eq!(
-                unsafe { windows::Win32::System::Threading::WaitForSingleObject(h, 100) },
-                WAIT_OBJECT_0
-            );
+            assert_eq!(unsafe { windows::Win32::System::Threading::WaitForSingleObject(h, 100) }, WAIT_OBJECT_0);
         }
         assert_eq!(unsafe { GetForegroundWindow() }, before);
     }
