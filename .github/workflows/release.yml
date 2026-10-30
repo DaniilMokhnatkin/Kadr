@@ -3,6 +3,12 @@ name: Release Kadr
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to build/publish
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -20,10 +26,12 @@ jobs:
         shell: pwsh
     env:
       KADR_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          ref: ${{ github.event.inputs.tag || github.ref }}
       - name: Prepare Rust
         run: |
           rustup toolchain install stable --profile minimal --component clippy
@@ -38,13 +46,13 @@ jobs:
       - name: Fetch verified OCR components
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File installer/fetch-ocr.ps1
       - name: Build matching version and installer
-        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File installer/build-release.ps1 -Tag $env:GITHUB_REF_NAME
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File installer/build-release.ps1 -Tag $env:RELEASE_TAG
       - name: Publish verified installer
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $tag = $env:GITHUB_REF_NAME
+          $tag = $env:RELEASE_TAG
           $repo = $env:GITHUB_REPOSITORY
           $existing = & gh release view $tag --repo $repo --json isDraft 2>$null
           if ($LASTEXITCODE -eq 0) {
@@ -58,9 +66,12 @@ jobs:
           "$hash  Kadr-Setup.exe" | Set-Content -LiteralPath dist/SHA256SUMS.txt -Encoding ascii
           gh release upload $tag dist/Kadr-Setup.exe dist/SHA256SUMS.txt --repo $repo --clobber
           if ($LASTEXITCODE -ne 0) { throw 'Asset upload failed; release remains a draft.' }
-          $json = & gh api "repos/$repo/releases/tags/$tag"
+          # GitHub's by-tag endpoint omits draft releases. The authenticated collection includes them.
+          $json = & gh api "repos/$repo/releases?per_page=100"
           if ($LASTEXITCODE -ne 0) { throw 'Cannot verify uploaded release.' }
-          $release = $json | ConvertFrom-Json
+          $matches = @(($json | ConvertFrom-Json) | Where-Object tag_name -CEQ $tag)
+          if ($matches.Count -ne 1) { throw 'Expected exactly one matching draft release.' }
+          $release = $matches[0]
           $asset = @($release.assets | Where-Object name -eq 'Kadr-Setup.exe')
           if ($release.tag_name -cne $tag -or $asset.Count -ne 1 -or
               $asset[0].size -ne $file.Length -or $asset[0].digest -cne "sha256:$hash") {
