@@ -59,6 +59,7 @@ enum Hit {
     Tool(usize),
     Color(usize),
     Undo,
+    Crop,
     Copy,
     Save,
     Close,
@@ -89,6 +90,12 @@ struct State {
     surrogate: Option<u16>,
     toast: Option<(&'static str, f64)>,
     tracking: bool,
+    /// «Обрезать» is on: a drag frames what to keep instead of drawing.
+    cropping: bool,
+    /// The frame being dragged, in picture pixels.
+    crop_drag: Option<(Point, Point)>,
+    /// The picture before each crop, with what was drawn on it: «Назад» walks back through them.
+    uncropped: Vec<(Arc<Image>, Drawing)>,
 }
 
 thread_local! {
@@ -140,7 +147,13 @@ impl State {
         let widths: Vec<(Hit, f32)> = (0..TOOLS.len())
             .map(|i| (Hit::Tool(i), BUTTON * s))
             .chain((0..COLORS.len()).map(|i| (Hit::Color(i), SWATCH * s)))
-            .chain([(Hit::Undo, BUTTON * s), (Hit::Save, BUTTON * s), (Hit::Copy, copy_w), (Hit::Close, BUTTON * s)])
+            .chain([
+                (Hit::Undo, BUTTON * s),
+                (Hit::Crop, BUTTON * s),
+                (Hit::Save, BUTTON * s),
+                (Hit::Copy, copy_w),
+                (Hit::Close, BUTTON * s),
+            ])
             .collect();
         let gaps = 3.0 * 12.0 * s;
         let total: f32 = widths.iter().map(|(_, w)| w).sum::<f32>() + gaps + 16.0 * s;
@@ -168,6 +181,50 @@ impl State {
         let k = self.image_size().0 / (card.right - card.left);
         let r = self.crop();
         Point::new(r.left + ((x - card.left) * k).round() as i32, r.top + ((y - card.top) * k).round() as i32)
+    }
+    /// The crop frame: two corners in any order, inside the picture.
+    fn crop_frame(&self) -> Option<Rect> {
+        let (a, b) = self.crop_drag?;
+        let r = self.crop();
+        let (x0, x1) = (a.x.min(b.x).clamp(r.left, r.right), a.x.max(b.x).clamp(r.left, r.right));
+        let (y0, y1) = (a.y.min(b.y).clamp(r.top, r.bottom), a.y.max(b.y).clamp(r.top, r.bottom));
+        Some(Rect::new(x0, y0, x1, y1))
+    }
+    /// Keeps only `area`: what is drawn is baked in, and the old picture waits for «Назад».
+    fn apply_crop(&mut self, area: Rect) {
+        self.cropping = false;
+        self.crop_drag = None;
+        if area.width() < 4 || area.height() < 4 || area == self.crop() {
+            return;
+        }
+        let Some(device) = self.device.as_ref() else { return };
+        let image = match annotations::flatten(&device.gpu, &device.shared, &self.frames, area, self.drawing.shapes()) {
+            Ok(image) => Arc::new(image),
+            Err(_) => return,
+        };
+        let mut fresh = Drawing::default();
+        fresh.set_tool(self.drawing.tool);
+        fresh.set_color(self.drawing.color);
+        let drawing = std::mem::replace(&mut self.drawing, fresh);
+        let before = std::mem::replace(&mut self.shot.image, image.clone());
+        self.uncropped.push((before, drawing));
+        self.frames = vec![image];
+        self.bitmap = None;
+        self.cache = Cache::default();
+    }
+    fn can_undo(&self) -> bool {
+        self.drawing.can_undo() || !self.uncropped.is_empty()
+    }
+    fn undo(&mut self) {
+        if self.drawing.can_undo() {
+            self.drawing.undo();
+        } else if let Some((image, drawing)) = self.uncropped.pop() {
+            self.shot.image = image.clone();
+            self.frames = vec![image];
+            self.drawing = drawing;
+            self.bitmap = None;
+            self.cache = Cache::default();
+        }
     }
     fn ready(&self) -> bool {
         !self.closing && self.open.value(self.now()) > 0.97
@@ -209,9 +266,21 @@ impl State {
     }
     fn press(&mut self, h: Hit) {
         match h {
-            Hit::Tool(i) => self.drawing.set_tool(TOOLS[i]),
+            Hit::Tool(i) => {
+                self.cropping = false;
+                self.drawing.set_tool(TOOLS[i]);
+            }
             Hit::Color(i) => self.drawing.set_color(i),
-            Hit::Undo => self.drawing.undo(),
+            Hit::Undo => self.undo(),
+            Hit::Crop => {
+                self.drawing.finish_gesture();
+                self.drawing.finish_text();
+                self.cropping = !self.cropping;
+                self.crop_drag = None;
+                if self.cropping {
+                    self.toast = Some(("Обведите, что оставить", self.now()));
+                }
+            }
             Hit::Copy => {
                 self.drawing.finish_text();
                 request(self, Request::Copy(self.result()));
@@ -324,6 +393,9 @@ pub fn open(instance: HINSTANCE, host: HWND, message: u32, shot: Shot, from: REC
         surrogate: None,
         toast: None,
         tracking: false,
+        cropping: false,
+        crop_drag: None,
+        uncropped: Vec::new(),
     };
     STATE.with(|s| {
         if let Ok(mut g) = s.try_borrow_mut() {
@@ -420,7 +492,7 @@ fn finish(hwnd: HWND) {
     let done = STATE.with(|s| {
         let Ok(mut g) = s.try_borrow_mut() else { return None };
         let st = g.as_ref()?;
-        let edited = !st.drawing.shapes().is_empty();
+        let edited = !st.drawing.shapes().is_empty() || !st.uncropped.is_empty();
         let mut shot = st.shot.clone();
         if edited {
             shot.image = st.result();
@@ -525,6 +597,23 @@ fn paint(device: &Device, st: &State, size: (u32, u32), cache: &mut Cache) -> bo
         }
     }
     stroke(gpu, rgb(0xffffff, 0.35 * ec), inflate(card, -0.5), radius, 1.0);
+    // The crop frame: everything that goes away is dimmed.
+    if let Some(frame) = st.crop_frame() {
+        let k = (card.right - card.left) / st.image_size().0;
+        let r = st.crop();
+        let f = rect(
+            card.left + (frame.left - r.left) as f32 * k,
+            card.top + (frame.top - r.top) as f32 * k,
+            card.left + (frame.right - r.left) as f32 * k,
+            card.top + (frame.bottom - r.top) as f32 * k,
+        );
+        let dim = rgb(0x000000, 0.55);
+        fill(gpu, dim, rect(card.left, card.top, card.right, f.top), 0.0);
+        fill(gpu, dim, rect(card.left, f.bottom, card.right, card.bottom), 0.0);
+        fill(gpu, dim, rect(card.left, f.top, f.left, f.bottom), 0.0);
+        fill(gpu, dim, rect(f.right, f.top, card.right, f.bottom), 0.0);
+        stroke(gpu, rgb(0xffffff, 0.95), f, 0.0, 1.5 * s);
+    }
     // The toolbar rises in once the picture has arrived.
     let bar_a = ((e - 0.55) / 0.45).clamp(0.0, 1.0) * if st.closing { ec } else { 1.0 };
     if bar_a > 0.01 {
@@ -542,7 +631,7 @@ fn paint(device: &Device, st: &State, size: (u32, u32), cache: &mut Cache) -> bo
             let hover = glow(hit);
             match hit {
                 Hit::Tool(i) => {
-                    let on = st.drawing.tool == TOOLS[i];
+                    let on = !st.cropping && st.drawing.tool == TOOLS[i];
                     if on || hover > 0.01 {
                         let bg = if on { theme.selected } else { fade(theme.tint, hover) };
                         fill(gpu, fade(bg, bar_a), inflate(r, -2.0 * s), 10.0 * s);
@@ -580,8 +669,16 @@ fn paint(device: &Device, st: &State, size: (u32, u32), cache: &mut Cache) -> bo
                     fill(gpu, fade(mix(theme.accent, rgb(0xffffff, 1.0), 0.1 * hover), bar_a), r, 12.0 * s);
                     text(gpu, label_font, "Копировать", r, fade(theme.on_accent, bar_a));
                 }
+                Hit::Crop => {
+                    if st.cropping || hover > 0.01 {
+                        let bg = if st.cropping { theme.selected } else { fade(theme.tint, hover) };
+                        fill(gpu, fade(bg, bar_a), inflate(r, -2.0 * s), 10.0 * s);
+                    }
+                    let ink = if st.cropping { theme.on_selected } else { theme.text };
+                    icon(gpu, ToolbarButton::Crop, r, fade(ink, bar_a), s * 0.92);
+                }
                 Hit::Undo | Hit::Save | Hit::Close => {
-                    let enabled = hit != Hit::Undo || st.drawing.can_undo();
+                    let enabled = hit != Hit::Undo || st.can_undo();
                     if hover > 0.01 && enabled {
                         fill(gpu, fade(theme.tint, hover * bar_a), inflate(r, -2.0 * s), 10.0 * s);
                     }
@@ -668,6 +765,12 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     return;
                 }
                 let p = st.to_doc(x, y);
+                if st.cropping {
+                    st.crop_drag = Some((p, p));
+                    st.pressed = true;
+                    capture = true;
+                    return;
+                }
                 let mut seed = [0u8; 8];
                 let _ = getrandom(&mut seed);
                 if st.drawing.down(p, st.crop(), u64::from_le_bytes(seed)) {
@@ -689,7 +792,11 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             with(&mut |st| {
                 if st.pressed {
                     let p = st.to_doc(x, y);
-                    st.drawing.motion(p, st.crop(), modifiers().1);
+                    if let Some((_, end)) = &mut st.crop_drag {
+                        *end = p;
+                    } else {
+                        st.drawing.motion(p, st.crop(), modifiers().1);
+                    }
                 }
                 let h = if st.ready() { st.hit(x, y) } else { None };
                 st.set_hover(h);
@@ -726,7 +833,14 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     st.pressed = false;
                     release = true;
                     let p = st.to_doc(x, y);
-                    st.drawing.up(p, st.crop(), modifiers().1);
+                    if let Some((_, end)) = &mut st.crop_drag {
+                        *end = p;
+                        if let Some(area) = st.crop_frame() {
+                            st.apply_crop(area);
+                        }
+                    } else {
+                        st.drawing.up(p, st.crop(), modifiers().1);
+                    }
                 }
             });
             if release {
@@ -770,9 +884,13 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     return;
                 }
                 match (key, ctrl) {
+                    (0x1B, _) if st.cropping => {
+                        st.cropping = false;
+                        st.crop_drag = None;
+                    }
                     (0x1B, _) => st.close(),
                     (0x5A, true) if shift => st.drawing.redo(),
-                    (0x5A, true) => st.drawing.undo(),
+                    (0x5A, true) => st.undo(),
                     (0x59, true) => st.drawing.redo(),
                     (0x43, true) => st.press(Hit::Copy),
                     (0x53, true) => st.press(Hit::Save),
@@ -827,6 +945,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                         cursor = IDC_HAND;
                     } else if inside(st.target(w as f32, h as f32), p.x as f32, p.y as f32) {
                         cursor = match st.drawing.tool {
+                            _ if st.cropping => IDC_CROSS,
                             Tool::Select => IDC_ARROW,
                             Tool::Text => IDC_IBEAM,
                             _ => IDC_CROSS,
@@ -858,7 +977,8 @@ fn getrandom(buf: &mut [u8]) -> windows::core::Result<()> {
 
 /// Offscreen render for design review: a 1600×900 screen with the picture `e` of the way open,
 /// an arrow, a numbered marker and a blur drawn on it.
-pub fn preview(image: Arc<Image>, scale: f32, e: f32) -> windows::core::Result<Image> {
+/// With `crop`, «Обрезать» is on and a frame is being dragged.
+pub fn preview(image: Arc<Image>, scale: f32, e: f32, crop: bool) -> windows::core::Result<Image> {
     let (w, h) = ((1600.0 * scale) as u32, (900.0 * scale) as u32);
     let mut drawing = Drawing::default();
     let r = image.rect;
@@ -900,7 +1020,14 @@ pub fn preview(image: Arc<Image>, scale: f32, e: f32) -> windows::core::Result<I
         surrogate: None,
         toast: None,
         tracking: false,
+        cropping: false,
+        crop_drag: None,
+        uncropped: Vec::new(),
     };
+    if crop {
+        st.cropping = true;
+        st.crop_drag = Some((at(0.12, 0.18), at(0.74, 0.88)));
+    }
     let device = st.device.take().unwrap();
     st.bitmap = annotations::bitmap(&device.gpu, &image).ok();
     let shared = &device.shared;

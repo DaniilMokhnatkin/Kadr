@@ -144,6 +144,7 @@ fn code(b: ToolbarButton) -> usize {
         ToolbarButton::Strength => 49,
         ToolbarButton::Undo => 50,
         ToolbarButton::Redo => 51,
+        ToolbarButton::Crop => 56,
     }
 }
 fn property(b: ToolbarButton, occurrence: usize) -> bool {

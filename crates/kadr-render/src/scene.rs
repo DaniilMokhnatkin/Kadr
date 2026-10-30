@@ -177,6 +177,8 @@ pub enum ToolbarButton {
     TextCallout,
     Undo,
     Redo,
+    /// Keep only part of the picture (the viewer).
+    Crop,
 }
 
 impl ToolbarButton {
@@ -206,6 +208,7 @@ impl ToolbarButton {
             Self::TextCallout => "Выноска",
             Self::Undo => "Отменить · Ctrl+Z",
             Self::Redo => "Повторить · Ctrl+Y",
+            Self::Crop => "Обрезать",
         }
     }
 }

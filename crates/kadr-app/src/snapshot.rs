@@ -193,10 +193,10 @@ pub fn design_set(dir: &str) -> Result<(), Box<dyn Error>> {
             dir.join(format!("thumbnail-{}.png", (scale * 100.0) as i32)),
             kadr_doc::pixels::encode_png(&crate::thumbnail::preview(thumb.clone(), scale)?)?,
         )?;
-        for (name, e) in [("viewer", 1.0), ("viewer-opening", 0.45)] {
+        for (name, e, crop) in [("viewer", 1.0, false), ("viewer-opening", 0.45, false), ("viewer-crop", 1.0, true)] {
             std::fs::write(
                 dir.join(format!("{name}-{}.png", (scale * 100.0) as i32)),
-                kadr_doc::pixels::encode_png(&crate::viewer::preview(thumb.clone(), scale, e)?)?,
+                kadr_doc::pixels::encode_png(&crate::viewer::preview(thumb.clone(), scale, e, crop)?)?,
             )?;
         }
         for (name, n, loading, error) in [

@@ -257,6 +257,10 @@ pub(super) fn draw(gpu: &Gpu, button: ToolbarButton, r: D2D_RECT_F, ink: D2D1_CO
             p.line((6.5, 6.5), (17.5, 17.5));
             p.line((17.5, 6.5), (6.5, 17.5));
         }
+        ToolbarButton::Crop => {
+            p.path(&[(7.0, 3.0), (7.0, 17.0), (21.0, 17.0)]);
+            p.path(&[(3.0, 7.0), (17.0, 7.0), (17.0, 21.0)]);
+        }
         ToolbarButton::Undo => {
             p.path(&[(8.0, 4.5), (3.5, 9.0), (8.0, 13.5)]);
             let mut curve = vec![(3.5, 9.0), (14.0, 9.0)];
