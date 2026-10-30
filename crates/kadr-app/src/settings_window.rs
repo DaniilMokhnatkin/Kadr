@@ -80,6 +80,7 @@ enum Hit {
     FolderReset,
     Key(usize),
     OpenFile,
+    Report,
 }
 
 struct Layout {
@@ -91,6 +92,8 @@ struct Layout {
     folder_reset: D2D_RECT_F,
     keys: [D2D_RECT_F; 5],
     open_file: D2D_RECT_F,
+    /// «Скопировать отчёт», at the right of the footer.
+    report: D2D_RECT_F,
     groups: [D2D_RECT_F; 4],
     sections: [f32; 4],
     scale: f32,
@@ -127,6 +130,7 @@ fn layout(width: f32, s: f32) -> Layout {
     let folder = rows(1, 2, &mut y)[0];
     let keys: [D2D_RECT_F; 5] = rows(5, 3, &mut y).try_into().unwrap();
     let open_file = rect(left, y, left + 180.0 * s, y + 28.0 * s);
+    let report = rect(right - 124.0 * s, y, right, y + 28.0 * s);
     let folder_button = rect(right - 112.0 * s, folder.top + 8.0 * s, right - 12.0 * s, folder.bottom - 8.0 * s);
     let folder_reset =
         rect(folder_button.left - 92.0 * s, folder_button.top, folder_button.left - 8.0 * s, folder_button.bottom);
@@ -139,6 +143,7 @@ fn layout(width: f32, s: f32) -> Layout {
         folder_reset,
         keys,
         open_file,
+        report,
         groups,
         sections,
         height: y + 44.0 * s,
@@ -154,7 +159,7 @@ fn scrolled_layout(width: f32, scale: f32, offset: f32) -> Layout {
         .chain(l.choices.iter_mut())
         .chain(l.keys.iter_mut())
         .chain(l.groups.iter_mut())
-        .chain([&mut l.folder, &mut l.folder_button, &mut l.folder_reset, &mut l.open_file])
+        .chain([&mut l.folder, &mut l.folder_button, &mut l.folder_reset, &mut l.open_file, &mut l.report])
     {
         r.top -= offset;
         r.bottom -= offset;
@@ -191,6 +196,9 @@ fn hit(l: &Layout, x: f32, y: f32, custom_folder: bool) -> Option<Hit> {
     }
     if let Some(i) = l.keys.iter().position(|r| inside(*r, x, y)) {
         return Some(Hit::Key(i));
+    }
+    if inside(l.report, x, y) {
+        return Some(Hit::Report);
     }
     inside(l.open_file, x, y).then_some(Hit::OpenFile)
 }
@@ -319,6 +327,8 @@ struct State {
     error: Option<String>,
     tracking: bool,
     scroll: Spring,
+    /// When «Скопировать отчёт» was last pressed: the link says «Отчёт скопирован» a moment.
+    reported: Option<f64>,
 }
 impl State {
     fn layout(&self, width: f32) -> Layout {
@@ -493,6 +503,7 @@ pub fn show(instance: HINSTANCE, host: HWND, message: u32, config: &Config) {
                 error: None,
                 tracking: false,
                 scroll: Spring::with(0.0, Curve::GLIDE),
+                reported: None,
             })
         });
     }
@@ -763,6 +774,20 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
     // Footer: the file itself, and any validation error.
     let hover = glow(Hit::OpenFile);
     text(gpu, &f.hint, "Открыть config.toml", l.open_file, mix(theme.accent, theme.on_selected, hover));
+    // A report for a problem: versions, engines and the end of the log, into the clipboard.
+    let reported = st.reported.is_some_and(|t| now - t < 2.0);
+    moving |= st.reported.is_some_and(|t| now - t < 2.2);
+    let hover = glow(Hit::Report);
+    // A key being recorded or an error needs the whole footer; the report link waits.
+    let busy = st.error.is_some() || st.capturing.is_some();
+    if !busy {
+        let (label, ink) = if reported {
+            ("Отчёт скопирован", theme.text_muted)
+        } else {
+            ("Скопировать отчёт", mix(theme.accent, theme.on_selected, hover))
+        };
+        text(gpu, &f.hint, label, l.report, ink);
+    }
     let footer = rect(l.open_file.right + 12.0 * s, l.open_file.top, w - PAD * s, l.open_file.bottom);
     if let Some(e) = &st.error {
         text(gpu, &f.hint, e, footer, glass::error_ink(&theme));
@@ -902,11 +927,16 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_LBUTTONUP => {
             let (x, y) = point();
             let (mut pick, mut hide) = (false, false);
+            let mut report = None;
             STATE.with(|s| {
                 let Ok(mut state) = s.try_borrow_mut() else { return };
                 let Some(st) = state.as_mut() else { return };
                 let custom = !st.config.save.folder.trim().is_empty();
-                let h = hit(&st.layout(width()), x, y, custom);
+                let mut h = hit(&st.layout(width()), x, y, custom);
+                // The report link is hidden while a key is recorded or an error is shown.
+                if h == Some(Hit::Report) && (st.error.is_some() || st.capturing.is_some()) {
+                    h = None;
+                }
                 if !matches!(h, Some(Hit::Key(_))) {
                     st.stop_capture();
                 }
@@ -950,10 +980,19 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                         }
                     }
                     Some(Hit::OpenFile) => st.send(Request::OpenFile),
+                    Some(Hit::Report) => {
+                        report = Some(crate::report::build(&st.config));
+                        st.reported = Some(st.now());
+                    }
                     None => {}
                 }
             });
             // Hiding and the dialog make Windows call back into `proc`: no borrow may be held across them.
+            if let Some(text) = report
+                && let Err(e) = kadr_export::clipboard::put_text(hwnd, &text)
+            {
+                kadr_win::log_warn!("отчёт в буфер: {e}");
+            }
             if hide {
                 unsafe {
                     let _ = ShowWindow(hwnd, SW_HIDE);
@@ -1095,6 +1134,7 @@ pub fn preview(scale: f32) -> windows::core::Result<kadr_doc::Image> {
         error: None,
         tracking: false,
         scroll: Spring::with(0.0, Curve::GLIDE),
+        reported: None,
     };
     if !ensure_fonts(&mut st) {
         return Err(windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL));
@@ -1164,6 +1204,9 @@ mod tests {
             assert_eq!(hit(&l, (b.left + b.right) / 2.0, (b.top + b.bottom) / 2.0, false), Some(Hit::Folder));
             let r = l.folder_reset;
             assert_eq!(hit(&l, (r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0, true), Some(Hit::FolderReset));
+            let r = l.report;
+            assert_eq!(hit(&l, (r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0, false), Some(Hit::Report));
+            assert!(r.left > l.open_file.right, "the two footer links do not overlap");
             assert!(l.open_file.bottom <= l.height);
         }
         assert_eq!(pretty("Ctrl+Shift+PrintScreen"), "Ctrl + Shift + PrtSc");

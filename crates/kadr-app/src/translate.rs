@@ -51,31 +51,52 @@ fn plan_and_translate(
     if !lines.iter().any(|l| foreign(l)) {
         return translate(text, "en");
     }
-    // Runs of foreign lines go to the translator together (context helps); the rest stays as is.
-    let mut out = Vec::new();
-    let mut from = String::new();
-    let mut run: Vec<&str> = Vec::new();
-    let mut flush = |run: &mut Vec<&str>, out: &mut Vec<String>| -> Result<(), String> {
-        if !run.is_empty() {
-            let t = translate(&run.join("\n"), "ru")?;
-            if from.is_empty() {
-                from = t.from;
-            }
-            out.push(t.text);
-            run.clear();
-        }
-        Ok(())
-    };
-    for line in lines {
+    // Runs of foreign lines are translated (context helps); the rest stays as is.
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
         if foreign(line) {
-            run.push(line);
-        } else {
-            flush(&mut run, &mut out)?;
-            out.push(line.to_string());
+            match runs.last_mut() {
+                Some((_, end)) if *end == i => *end = i + 1,
+                _ => runs.push((i, i + 1)),
+            }
         }
     }
-    flush(&mut run, &mut out)?;
-    Ok(Translation { text: out.join("\n"), from, to: "ru".into() })
+    let texts: Vec<String> = runs.iter().map(|&(a, b)| lines[a..b].join("\n")).collect();
+    // All runs in one request: fewer calls, and fewer 429s from Google. When the lines do not come
+    // back one for one, each run goes on its own so nothing lands in the wrong place.
+    let all = translate(&texts.join("\n"), "ru")?;
+    let back: Vec<&str> = all.text.split('\n').collect();
+    let total: usize = runs.iter().map(|(a, b)| b - a).sum();
+    let translated: Vec<String> = if runs.len() == 1 {
+        vec![all.text.clone()]
+    } else if back.len() == total {
+        let mut at = 0;
+        runs.iter()
+            .map(|(a, b)| {
+                at += b - a;
+                back[at - (b - a)..at].join("\n")
+            })
+            .collect()
+    } else {
+        texts.iter().map(|t| translate(t, "ru").map(|t| t.text)).collect::<Result<_, _>>()?
+    };
+    let mut out = Vec::new();
+    let mut next = runs.iter().zip(&translated).peekable();
+    let mut i = 0;
+    while i < lines.len() {
+        match next.peek() {
+            Some(((a, b), text)) if *a == i => {
+                out.push((*text).clone());
+                i = *b;
+                next.next();
+            }
+            _ => {
+                out.push(lines[i].to_string());
+                i += 1;
+            }
+        }
+    }
+    Ok(Translation { text: out.join("\n"), from: all.from, to: "ru".into() })
 }
 
 /// Blocking: call from a worker thread. `to` is a language code such as "ru".
@@ -95,15 +116,22 @@ const ENDPOINTS: [(&str, &str, Reader); 3] = [
     ("translate.google.com", "/translate_a/single?client=gtx&sl=auto&dt=t&ie=UTF-8&oe=UTF-8&tl=", parse),
 ];
 
+static WORKED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn translate_google(text: &str, to: &str) -> Result<Translation, String> {
     let body = format!("q={}", encode(text));
     let mut limited = false;
     let mut last = String::new();
-    for (host, path, read) in ENDPOINTS {
+    // Start from the address that answered last time: a throttled one stays throttled for a while.
+    let first = WORKED.load(std::sync::atomic::Ordering::Relaxed);
+    for k in 0..ENDPOINTS.len() {
+        let index = (first + k) % ENDPOINTS.len();
+        let (host, path, read) = ENDPOINTS[index];
         let path = kadr_win::wide(&format!("{path}{to}"));
         match post(host, &path, body.as_bytes()) {
             Ok((200, response)) => match read(&response) {
                 Some(mut t) => {
+                    WORKED.store(index, std::sync::atomic::Ordering::Relaxed);
                     t.to = to.into();
                     return Ok(t);
                 }
@@ -405,12 +433,21 @@ mod tests {
         let calls = std::cell::RefCell::new(Vec::new());
         let text = "Заголовок на русском\nThe quick fox\njumps over\n\nЕщё строка по-русски\nSee you";
         let t = plan_and_translate(text, fake(&calls)).unwrap();
-        assert_eq!(
-            t.text,
-            "Заголовок на русском\n[ru] The quick fox\njumps over\n\nЕщё строка по-русски\n[ru] See you"
-        );
+        // The fake tags the start of each request: one request carried both runs.
+        assert_eq!(t.text, "Заголовок на русском\n[ru] The quick fox\njumps over\n\nЕщё строка по-русски\nSee you");
         assert_eq!((t.from.as_str(), t.to.as_str()), ("en", "ru"));
-        assert_eq!(calls.borrow().len(), 2, "one request per foreign run");
+        assert_eq!(calls.borrow().as_slice(), [("The quick fox\njumps over\nSee you".into(), "ru".into())]);
+    }
+    #[test]
+    fn when_lines_come_back_merged_each_run_is_translated_on_its_own() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let merging = |text: &str, to: &str| {
+            calls.borrow_mut().push(text.to_string());
+            Ok(Translation { text: format!("<{}>", text.replace('\n', " ")), from: "en".into(), to: to.into() })
+        };
+        let t = plan_and_translate("One\nДва\nThree\nfour", merging).unwrap();
+        assert_eq!(t.text, "<One>\nДва\n<Three four>");
+        assert_eq!(calls.borrow().len(), 3, "the batch, then each run");
     }
     #[test]
     fn all_russian_text_goes_to_english_and_a_mostly_russian_line_is_russian() {

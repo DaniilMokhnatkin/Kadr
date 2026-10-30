@@ -28,6 +28,14 @@ pub fn path() -> Option<&'static PathBuf> {
     PATH.get()
 }
 
+/// The last `n` lines of the log file, for a problem report.
+pub fn tail(n: usize) -> Vec<String> {
+    let Some(text) = path().and_then(|p| fs::read(p).ok()) else { return Vec::new() };
+    let text = String::from_utf8_lossy(&text);
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(n)..].iter().map(|l| l.to_string()).collect()
+}
+
 pub fn write(level: &str, args: fmt::Arguments) {
     let t = unsafe { GetLocalTime() };
     let line = format!("{:02}:{:02}:{:02}.{:03} {level:<5} {args}\n", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);

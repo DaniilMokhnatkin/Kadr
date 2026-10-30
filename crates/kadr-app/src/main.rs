@@ -29,6 +29,7 @@ mod recent_window;
 mod recent_worker;
 mod record_window;
 mod recorder;
+mod report;
 mod sensitive;
 mod settings_window;
 mod snapshot;
