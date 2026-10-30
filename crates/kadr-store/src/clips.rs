@@ -9,8 +9,18 @@ use std::path::PathBuf;
 const MAGIC: &[u8; 4] = b"KCL1";
 /// A single entry may not be larger than this on disk (a big screenshot as PNG fits easily).
 const MAX_FILE: u64 = 64 * 1024 * 1024;
-/// Pictures are heavy: of the unpinned entries, only this many keep theirs.
-const MAX_IMAGES: usize = 20;
+/// How much is kept, apart from what is pinned: text and files count on their own, pictures on
+/// theirs, so a run of screenshots never pushes out what was typed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Limits {
+    pub entries: usize,
+    pub images: usize,
+}
+impl Default for Limits {
+    fn default() -> Self {
+        Self { entries: 50, images: 20 }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Data {
@@ -37,7 +47,7 @@ pub struct Clips<C: Crypto> {
     root: PathBuf,
     crypto: C,
     /// Unpinned entries kept; pinned ones come on top of that.
-    max: usize,
+    limits: Limits,
     /// Newest first.
     items: Vec<Clip>,
     next_id: u64,
@@ -45,7 +55,7 @@ pub struct Clips<C: Crypto> {
 
 impl<C: Crypto> Clips<C> {
     /// Opens the folder and reads what is there; unreadable entries are skipped and removed.
-    pub fn open(root: PathBuf, crypto: C, max: usize) -> io::Result<Self> {
+    pub fn open(root: PathBuf, crypto: C, limits: Limits) -> io::Result<Self> {
         fs::create_dir_all(&root)?;
         let mut items = Vec::new();
         for entry in fs::read_dir(&root)?.flatten() {
@@ -68,7 +78,8 @@ impl<C: Crypto> Clips<C> {
         }
         items.sort_by(|a, b| b.created_ms.cmp(&a.created_ms).then(b.id.cmp(&a.id)));
         let next_id = items.iter().map(|c| c.id + 1).max().unwrap_or(1);
-        let mut clips = Self { root, crypto, max: max.max(1), items, next_id };
+        let limits = Limits { entries: limits.entries.max(1), images: limits.images.max(1) };
+        let mut clips = Self { root, crypto, limits, items, next_id };
         clips.prune()?;
         Ok(clips)
     }
@@ -134,8 +145,8 @@ impl<C: Crypto> Clips<C> {
         Ok(())
     }
 
-    pub fn set_max(&mut self, max: usize) -> io::Result<()> {
-        self.max = max.max(1);
+    pub fn set_limits(&mut self, limits: Limits) -> io::Result<()> {
+        self.limits = Limits { entries: limits.entries.max(1), images: limits.images.max(1) };
         self.prune()
     }
 
@@ -153,7 +164,8 @@ impl<C: Crypto> Clips<C> {
         })
     }
 
-    /// The oldest unpinned entries go once there are too many, pictures sooner than text.
+    /// The oldest unpinned entries go once there are too many: text and files by their limit,
+    /// pictures by theirs.
     fn prune(&mut self) -> io::Result<()> {
         let (mut kept, mut images) = (0, 0);
         let mut gone = Vec::new();
@@ -162,10 +174,13 @@ impl<C: Crypto> Clips<C> {
                 return true;
             }
             let image = matches!(c.data, Data::Image { .. });
-            let keep = kept < self.max && (!image || images < MAX_IMAGES);
+            let keep = if image { images < self.limits.images } else { kept < self.limits.entries };
             if keep {
-                kept += 1;
-                images += usize::from(image);
+                if image {
+                    images += 1;
+                } else {
+                    kept += 1;
+                }
             } else {
                 gone.push(c.id);
             }
@@ -250,14 +265,14 @@ mod tests {
     #[test]
     fn entries_survive_a_restart_newest_first_with_their_pins() {
         let root = root("restart");
-        let mut clips = Clips::open(root.clone(), TestCrypto, 50).unwrap();
+        let mut clips = Clips::open(root.clone(), TestCrypto, Limits::default()).unwrap();
         let a = clips.add(text("первый"), 10).unwrap();
         clips.add(Data::Image { width: 2, height: 1, png: vec![1, 2, 3] }, 20).unwrap();
         clips.add(Data::Files(vec![r"C:\a.txt".into(), r"D:\b c.png".into()]), 30).unwrap();
         clips.set_pinned(a, true).unwrap();
         let before = clips.items().to_vec();
         drop(clips);
-        let again = Clips::open(root.clone(), TestCrypto, 50).unwrap();
+        let again = Clips::open(root.clone(), TestCrypto, Limits::default()).unwrap();
         assert_eq!(again.items(), before.as_slice());
         assert!(again.get(a).unwrap().pinned);
         // On disk nothing is readable as is.
@@ -269,7 +284,7 @@ mod tests {
     #[test]
     fn the_same_text_again_moves_up_instead_of_repeating() {
         let root = root("dedupe");
-        let mut clips = Clips::open(root.clone(), TestCrypto, 50).unwrap();
+        let mut clips = Clips::open(root.clone(), TestCrypto, Limits::default()).unwrap();
         let a = clips.add(text("a"), 1).unwrap();
         clips.add(text("b"), 2).unwrap();
         assert_eq!(clips.add(text("a"), 3).unwrap(), a);
@@ -282,7 +297,7 @@ mod tests {
     #[test]
     fn old_entries_age_out_but_pinned_and_cleared_behave() {
         let root = root("prune");
-        let mut clips = Clips::open(root.clone(), TestCrypto, 3).unwrap();
+        let mut clips = Clips::open(root.clone(), TestCrypto, Limits { entries: 3, images: 2 }).unwrap();
         let first = clips.add(text("0"), 0).unwrap();
         clips.set_pinned(first, true).unwrap();
         for i in 1..=5 {
@@ -307,16 +322,31 @@ mod tests {
     }
 
     #[test]
-    fn pictures_age_out_sooner_than_text() {
+    fn pictures_and_text_have_memories_of_their_own() {
         let root = root("images");
-        let mut clips = Clips::open(root.clone(), TestCrypto, 50).unwrap();
-        for i in 0..(MAX_IMAGES as u64 + 3) {
-            clips.add(Data::Image { width: 1, height: 1, png: i.to_le_bytes().to_vec() }, i).unwrap();
+        let limits = Limits { entries: 4, images: 3 };
+        let mut clips = Clips::open(root.clone(), TestCrypto, limits).unwrap();
+        let picture = |i: u64| Data::Image { width: 1, height: 1, png: i.to_le_bytes().to_vec() };
+        for i in 0..4 {
+            clips.add(text(&format!("t{i}")), i).unwrap();
         }
-        clips.add(text("t"), 100).unwrap();
-        let images = clips.items().iter().filter(|c| matches!(c.data, Data::Image { .. })).count();
-        assert_eq!(images, MAX_IMAGES);
-        assert_eq!(clips.items().len(), MAX_IMAGES + 1);
+        // Many screenshots after the text: they push out older screenshots, never the text.
+        for i in 0..10 {
+            clips.add(picture(i), 100 + i).unwrap();
+        }
+        let count = |clips: &Clips<TestCrypto>| {
+            let images = clips.items().iter().filter(|c| matches!(c.data, Data::Image { .. })).count();
+            (clips.items().len() - images, images)
+        };
+        assert_eq!(count(&clips), (4, 3));
+        // And a lot of text does not push out pictures.
+        for i in 0..10 {
+            clips.add(text(&format!("n{i}")), 200 + i).unwrap();
+        }
+        assert_eq!(count(&clips), (4, 3));
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 7);
+        clips.set_limits(Limits { entries: 2, images: 1 }).unwrap();
+        assert_eq!(count(&clips), (2, 1));
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -325,7 +355,7 @@ mod tests {
         let root = root("broken");
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("0000000000000001.clip"), b"garbage").unwrap();
-        let clips = Clips::open(root.clone(), TestCrypto, 50).unwrap();
+        let clips = Clips::open(root.clone(), TestCrypto, Limits::default()).unwrap();
         assert!(clips.items().is_empty());
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
         let _ = fs::remove_dir_all(&root);

@@ -22,7 +22,7 @@ impl App {
         let on = self.config.clipboard.enabled && !self.bench_mode;
         match (on, self.clips.is_some()) {
             (true, false) => {
-                self.clips = Some(History::start(self.hwnd, WM_APP_CLIPS, self.config.clipboard.max));
+                self.clips = Some(History::start(self.hwnd, WM_APP_CLIPS, self.clip_limits()));
                 unsafe {
                     if let Err(e) = AddClipboardFormatListener(self.hwnd) {
                         log_warn!("история буфера: не слежу за буфером: {e}");
@@ -46,11 +46,15 @@ impl App {
             }
             (true, true) => {
                 if let Some(h) = &self.clips {
-                    h.set_max(self.config.clipboard.max);
+                    h.set_limits(self.clip_limits());
                 }
             }
             (false, false) => {}
         }
+    }
+
+    fn clip_limits(&self) -> kadr_store::clips::Limits {
+        kadr_store::clips::Limits { entries: self.config.clipboard.max, images: self.config.clipboard.images }
     }
 
     /// WM_CLIPBOARDUPDATE: something was copied somewhere.

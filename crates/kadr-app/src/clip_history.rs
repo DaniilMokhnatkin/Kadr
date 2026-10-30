@@ -4,7 +4,7 @@
 //! and the latest ones are there again after a restart. What a password manager marks as «keep out
 //! of history» is never read.
 use kadr_doc::{Image, Rect, pixels};
-use kadr_store::clips::{Clips, Data};
+use kadr_store::clips::{Clips, Data, Limits};
 use kadr_win::{log_info, log_warn};
 use std::collections::HashMap;
 use std::sync::mpsc::{Sender, channel};
@@ -58,7 +58,7 @@ enum Job {
     Remove(u64),
     Touch(u64),
     Clear,
-    Max(usize),
+    Limits(Limits),
 }
 
 pub struct History {
@@ -69,7 +69,7 @@ pub struct History {
 
 impl History {
     /// Opens the history on a worker; `message` is posted to `host` whenever the list changes.
-    pub fn start(host: HWND, message: u32, max: usize) -> Self {
+    pub fn start(host: HWND, message: u32, limits: Limits) -> Self {
         let store = Arc::new(Mutex::new(None));
         let thumbs = Arc::new(Mutex::new(HashMap::new()));
         let (tx, rx) = channel::<Job>();
@@ -83,7 +83,7 @@ impl History {
             else {
                 return;
             };
-            match Clips::open(root, crate::recent_worker::Dpapi, max) {
+            match Clips::open(root, crate::recent_worker::Dpapi, limits) {
                 Ok(clips) => {
                     let previews: Vec<(u64, Vec<u8>, u32, u32)> = clips
                         .items()
@@ -127,7 +127,7 @@ impl History {
                     Job::Remove(id) => with(&s, |c| c.remove(id)),
                     Job::Touch(id) => with(&s, |c| c.touch(id, now)),
                     Job::Clear => with(&s, |c| c.clear()),
-                    Job::Max(n) => with(&s, |c| c.set_max(n)),
+                    Job::Limits(l) => with(&s, |c| c.set_limits(l)),
                 };
                 if let Err(e) = result {
                     log_warn!("история буфера: {e}");
@@ -157,8 +157,8 @@ impl History {
     pub fn clear(&self) {
         let _ = self.tx.send(Job::Clear);
     }
-    pub fn set_max(&self, max: usize) {
-        let _ = self.tx.send(Job::Max(max));
+    pub fn set_limits(&self, limits: Limits) {
+        let _ = self.tx.send(Job::Limits(limits));
     }
 
     /// The list for the window, newest first, pinned ones included where they fall.

@@ -147,12 +147,14 @@ pub struct Save {
 #[serde(default)]
 pub struct Clipboard {
     pub enabled: bool,
-    /// Unpinned entries kept; pinned ones stay on top of that.
+    /// Text and files kept; pinned ones stay on top of that.
     pub max: usize,
+    /// Pictures kept, counted apart from text.
+    pub images: usize,
 }
 impl Default for Clipboard {
     fn default() -> Self {
-        Self { enabled: true, max: 50 }
+        Self { enabled: true, max: 50, images: 20 }
     }
 }
 
@@ -177,6 +179,9 @@ impl Config {
         }
         if !(1..=200).contains(&config.clipboard.max) {
             return Err("clipboard.max должен быть от 1 до 200".into());
+        }
+        if !(1..=100).contains(&config.clipboard.images) {
+            return Err("clipboard.images должен быть от 1 до 100".into());
         }
         // Относительный путь считался бы от текущей папки процесса, а при автозапуске она случайна.
         let folder = config.save.folder.trim();
@@ -271,7 +276,8 @@ engine = "auto"  # auto — офлайн при наличии моделей, o
 
 [clipboard]
 enabled = true  # своя история буфера по Win+V: закрепление, поиск, после перезагрузки
-max = 50        # от 1 до 200 записей; закреплённые не считаются
+max = 50        # тексты и файлы: от 1 до 200; закреплённые не считаются
+images = 20     # картинки, отдельно от текстов: от 1 до 100
 "#;
 
 /// The file as the settings window writes it: the template's layout and comments with these values.
@@ -328,9 +334,10 @@ pub fn render(c: &Config) -> String {
         "
 [clipboard]
 enabled = {:<6}# своя история буфера по Win+V: закрепление, поиск, после перезагрузки
-max = {:<10}# от 1 до 200 записей; закреплённые не считаются
+max = {:<10}# тексты и файлы: от 1 до 200; закреплённые не считаются
+images = {:<7}# картинки, отдельно от текстов: от 1 до 100
 ",
-        c.clipboard.enabled, c.clipboard.max
+        c.clipboard.enabled, c.clipboard.max, c.clipboard.images
     ));
     out
 }
