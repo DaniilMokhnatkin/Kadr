@@ -28,3 +28,24 @@ $zip = Join-Path $root 'dist\Kadr-setup.zip'
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Compress-Archive -Path $out -DestinationPath $zip
 Get-Item $zip | Select-Object FullName, Length
+
+# The friendly one-file setup: kadr-setup.exe with kadr.exe and install.ps1 carried at its end,
+# `[setup][kadr.exe][install.ps1][exe length u64][script length u64]KADRSETP`.
+$setup = Join-Path $root 'target\release\kadr-setup.exe'
+if (-not (Test-Path $setup)) {
+    throw "Нет $setup. Собери: cargo build --release -p kadr-setup"
+}
+$single = Join-Path $root 'dist\Kadr-Setup.exe'
+$script = [IO.File]::ReadAllBytes((Join-Path $PSScriptRoot 'install.ps1'))
+$program = [IO.File]::ReadAllBytes($exe)
+$file = [IO.File]::Create($single)
+try {
+    foreach ($part in @([IO.File]::ReadAllBytes($setup), $program, $script,
+            [BitConverter]::GetBytes([UInt64]$program.Length), [BitConverter]::GetBytes([UInt64]$script.Length),
+            [Text.Encoding]::ASCII.GetBytes('KADRSETP'))) {
+        $file.Write($part, 0, $part.Length)
+    }
+} finally {
+    $file.Dispose()
+}
+Get-Item $single | Select-Object FullName, Length

@@ -134,6 +134,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kadr-setup"
+version = "0.0.1"
+dependencies = [
+ "kadr-doc",
+ "kadr-render",
+ "kadr-win",
+ "png",
+ "windows",
+ "windows-numerics",
+]
+
+[[package]]
 name = "kadr-store"
 version = "0.0.1"
 dependencies = [

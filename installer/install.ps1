@@ -27,7 +27,10 @@ param(
     [string]$Exe,
     [switch]$NoAutostart,
     [switch]$Uninstall,
-    [switch]$RemoveCertificate
+    [switch]$RemoveCertificate,
+    # Graphical setup: where to report each step, and whether to skip fetching Windows OCR.
+    [string]$Progress,
+    [switch]$NoOcr
 )
 
 $ErrorActionPreference = 'Stop'
@@ -99,6 +102,17 @@ function Remove-SigningCertificate {
     }
 }
 
+# The graphical setup follows along through -Progress: one line per event, «step|ok|skip <id>»,
+# «warn <id> <text>», «error <text>», «finish».
+function Report([string]$line) {
+    if ($Progress) { Add-Content -LiteralPath $Progress -Value $line -Encoding UTF8 }
+}
+trap {
+    Report "error $($_.Exception.Message)"
+    break
+}
+
+Report 'step prepare'
 Assert-Admin
 Stop-Kadr
 
@@ -108,6 +122,7 @@ if ($Uninstall) {
     if (Test-Path $InstallDir) { Remove-Item $InstallDir -Recurse -Force }
     if ($RemoveCertificate) { Remove-SigningCertificate }
     Write-Host 'Kadr удалён.'
+    Report 'finish'
     return
 }
 
@@ -119,9 +134,13 @@ $Exe = (Resolve-Path $Exe).Path
 if (-not (Select-String -Path $Exe -Pattern "uiAccess=[`"']true[`"']" -Quiet)) {
     throw "$Exe собран без uiAccess. Собери так: cargo build --release --features uiaccess"
 }
+Report 'ok prepare'
 
+Report 'step cert'
 $cert = Get-SigningCertificate
+Report 'ok cert'
 
+Report 'step copy'
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 Copy-Item $Exe $Target -Force
 # A package carried over by a messenger or the cloud is marked «from the internet»; the mark would
@@ -132,23 +151,28 @@ if ($signature.Status -ne 'Valid') {
     throw "Подпись не удалась: $($signature.StatusMessage)"
 }
 Write-Host "Подписано: $Target"
+Report 'ok copy'
 
+Report 'step autostart'
 if (-not $NoAutostart) {
     Set-ItemProperty -Path $RunKey -Name 'Kadr' -Value "`"$Target`""
     Write-Host 'Автозапуск включён.'
 }
-
 # Start menu: after «Выход» from the tray Kadr is found and started again by name.
 $link = (New-Object -ComObject WScript.Shell).CreateShortcut($Shortcut)
 $link.TargetPath = $Target
 $link.Description = 'Kadr — скриншоты'
 $link.Save()
 Write-Host 'Ярлык в меню «Пуск»: Kadr.'
+Report 'ok autostart'
 
 # Text recognition («Текст», «Перевод», «Цензура») uses Windows OCR, which has a pack per language.
 # English and Russian are fetched from Windows Update if missing; without the Internet this step is
 # skipped and can be repeated later by running the installer again.
 foreach ($lang in 'en-US', 'ru-RU') {
+    $id = 'ocr-' + $lang.Substring(0, 2)
+    if ($NoOcr) { Report "skip $id"; continue }
+    Report "step $id"
     $name = "Language.OCR~~~$lang~0.0.1.0"
     try {
         $cap = Get-WindowsCapability -Online -Name $name
@@ -159,12 +183,17 @@ foreach ($lang in 'en-US', 'ru-RU') {
             Add-WindowsCapability -Online -Name $name | Out-Null
             Write-Host "Распознавание текста ($lang): установлено."
         }
+        Report "ok $id"
     } catch {
         Write-Warning "Распознавание текста ($lang) не установлено: $($_.Exception.Message)"
+        Report "warn $id $($_.Exception.Message)"
     }
 }
 
 # Из этой консоли Kadr стартовал бы с правами администратора. Через explorer он запускается
 # с обычными правами, и Windows выдаёт ему uiAccess.
+Report 'step launch'
 Start-Process -FilePath explorer.exe -ArgumentList "`"$Target`""
+Report 'ok launch'
 Write-Host 'Готово. В HUD должно быть «Medium · uiAccess», лог: %LOCALAPPDATA%\Kadr\logs\kadr.log'
+Report 'finish'

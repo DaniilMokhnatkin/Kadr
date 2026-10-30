@@ -1,0 +1,19 @@
+[package]
+name = "kadr-setup"
+description = "Kadr — установщик: знакомство с возможностями и установка в один клик"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "kadr-setup"
+path = "src/main.rs"
+
+[dependencies]
+windows-numerics.workspace = true
+kadr-win.workspace = true
+kadr-doc.workspace = true
+kadr-render.workspace = true
+png.workspace = true
+windows.workspace = true
