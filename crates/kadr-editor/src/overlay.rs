@@ -17,7 +17,7 @@ use windows::Win32::Graphics::Dwm::{
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{
     DXGI_ERROR_WAS_STILL_DRAWING, DXGI_PRESENT, DXGI_PRESENT_DO_NOT_WAIT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
-    DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT, DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
+    DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
     IDXGIOutput, IDXGISurface, IDXGISwapChain1, IDXGISwapChain2,
 };
 use windows::Win32::Graphics::Gdi::HMONITOR;
@@ -96,7 +96,8 @@ impl Overlay {
                 BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
                 BufferCount: 2,
                 Scaling: DXGI_SCALING_STRETCH,
-                SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+                // Desktop composition, not a fullscreen game's discard presentation path.
+                SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
                 AlphaMode: DXGI_ALPHA_MODE_IGNORE,
                 Flags: DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0 as u32,
                 ..Default::default()
@@ -178,6 +179,13 @@ impl Overlay {
             )?
         });
         Ok(())
+    }
+
+    pub fn prepare_annotations(
+        &self, gpu: &Gpu, shared: &Shared, frames: &[std::sync::Arc<kadr_doc::Image>],
+        crop: kadr_doc::Rect, shapes: &[kadr_doc::annotation::Annotation],
+    ) -> Result<()> {
+        kadr_render::annotations::prepare_display(gpu, shared, frames, crop, shapes, &mut self.annotation_cache.borrow_mut())
     }
 
     pub fn present(&self, gpu: &Gpu, shared: &Shared, theme: &Theme, marks: Marks) -> Result<()> {
@@ -323,6 +331,52 @@ fn present_result(result: windows::core::HRESULT, nonblocking: bool, retry: &Cel
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cloaked_swapchain_keeps_advancing_without_any_desktop_input() {
+        use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            DefWindowProcW, GetForegroundWindow, RegisterClassW, WNDCLASSW,
+        };
+        unsafe extern "system" fn proc(hwnd: HWND, msg: u32,
+            wp: windows::Win32::Foundation::WPARAM, lp: windows::Win32::Foundation::LPARAM,
+        ) -> windows::Win32::Foundation::LRESULT {
+            unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
+        }
+        let foreground = unsafe { GetForegroundWindow() };
+        let shared = Shared::new().unwrap();
+        let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1().unwrap() };
+        let gpu = Gpu::new(&shared, &unsafe { factory.EnumAdapters1(0).unwrap() }, "idle animation test".into()).unwrap();
+        let instance: HINSTANCE = unsafe { GetModuleHandleW(None).unwrap().into() };
+        unsafe { RegisterClassW(&WNDCLASSW {
+            lpfnWndProc: Some(proc), hInstance: instance, lpszClassName: CLASS,
+            ..Default::default()
+        }); }
+        // Always DWM-cloaked, offscreen, never activates; no capture, hooks or hotkeys.
+        let overlay = Overlay::new(&gpu, &shared, 0,
+            RECT { left: -32000, top: -32000, right: -31360, bottom: -31520 },
+            HMONITOR::default(), instance).unwrap();
+        let handle = overlay.latency_handle().expect("DXGI frame signal");
+        let mut frames = crate::pacing::Frames::default();
+        frames.request(1);
+        for i in 0..40 {
+            assert_eq!(frames.pending(), vec![0]);
+            assert_eq!(unsafe { WaitForSingleObject(handle, 500) }, WAIT_OBJECT_0,
+                "frame {i} must arrive without a mouse message");
+            let marks = Marks {
+                selection: Some(RECT { left: -31950, top: -31950, right: -31450, bottom: -31600 }),
+                ..Default::default()
+            };
+            let until = std::time::Instant::now() + std::time::Duration::from_millis(500);
+            while !overlay.try_present(&gpu, &shared, &Theme::current(), marks).unwrap() {
+                assert!(std::time::Instant::now() < until, "present must make progress");
+                std::thread::yield_now();
+            }
+            frames.presented(0, i != 39);
+        }
+        assert!(frames.pending().is_empty());
+        assert_eq!(unsafe { GetForegroundWindow() }, foreground);
+    }
     #[test]
     fn busy_present_retains_readiness_until_success() {
         let retry = Cell::new(false);

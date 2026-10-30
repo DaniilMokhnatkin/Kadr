@@ -24,5 +24,6 @@ kadr-editor.workspace = true
 kadr-export.workspace = true
 kadr-store.workspace = true
 png.workspace = true
+serde_json.workspace = true
 ort.workspace = true
 windows.workspace = true

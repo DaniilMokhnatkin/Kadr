@@ -93,19 +93,23 @@ pub struct Task {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Job {
     /// Kadr with PaddleOCR (`paddle`) or with Windows' OCR packs.
-    Full { autostart: bool, paddle: bool },
+    Full { autostart: bool, paddle: bool, translation: bool },
     /// PaddleOCR alone, into the Kadr just installed.
     PaddleOnly,
 }
 
 pub fn start(owner: HWND, payload: &Payload, job: Job) -> Start {
-    let folder = std::env::temp_dir().join(format!("KadrSetup-{}-{}", std::process::id(), matches!(job, Job::PaddleOnly) as u8));
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let folder = std::env::temp_dir().join(format!("KadrSetup-{}-{nonce}", std::process::id()));
     let (exe, script, ocr, progress) =
         (folder.join("kadr.bin"), folder.join("install.ps1"), folder.join("ocr.zip"), folder.join("progress.txt"));
-    let written = std::fs::create_dir_all(&folder)
+    let written = std::fs::create_dir(&folder)
         .and_then(|()| std::fs::write(&exe, &payload.exe))
         .and_then(|()| std::fs::write(&script, &payload.script))
         .and_then(|()| std::fs::write(&ocr, &payload.ocr))
+        .and_then(|()| std::fs::write(folder.join("translation-manifest.json"),include_bytes!("../../../installer/translation-manifest.json")))
+        .and_then(|()| std::fs::write(folder.join("translation-worker.py"),include_bytes!("../../../installer/translation-worker.py")))
+        .and_then(|()| std::fs::write(folder.join("nvidia-profile.cs"),include_bytes!("../../../installer/nvidia-profile.cs")))
         .and_then(|()| std::fs::write(&progress, b""));
     if let Err(e) = written {
         return Start::Failed(format!("Не удалось подготовить файлы во временной папке: {e}"));
@@ -118,7 +122,14 @@ pub fn start(owner: HWND, payload: &Payload, job: Job) -> Start {
         progress.display()
     );
     match job {
-        Job::Full { autostart, paddle } => {
+        Job::Full { autostart, paddle, translation } => {
+            if translation {
+                if let Ok(exe)=std::env::current_exe() && let Some(parent)=exe.parent() {
+                    let cache=parent.join("translation-downloads");
+                    if cache.is_dir() {params.push_str(&format!(" -TranslationCache \"{}\"",cache.display()));}
+                }
+                params.push_str(&format!(" -WithTranslation -TranslationManifest \"{}\" -TranslationWorker \"{}\"",folder.join("translation-manifest.json").display(),folder.join("translation-worker.py").display()));
+            }
             if !autostart {
                 params.push_str(" -NoAutostart");
             }
@@ -151,12 +162,8 @@ pub fn start(owner: HWND, payload: &Payload, job: Job) -> Start {
 impl Task {
     /// New reports since the last call, and the exit code once the script has ended.
     pub fn poll(&mut self) -> (Vec<Report>, Option<u32>) {
-        let text = std::fs::read(&self.progress).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
-        let lines: Vec<&str> = text.lines().collect();
-        // Only whole lines: the last one may still be being written.
-        let complete = if text.ends_with('\n') { lines.len() } else { lines.len().saturating_sub(1) };
-        let new: Vec<Report> = lines[self.seen.min(complete)..complete].iter().filter_map(|l| parse(l)).collect();
-        self.seen = self.seen.max(complete);
+        // Observe termination first: when it has exited, the final report is guaranteed to
+        // already be on disk. Reading before this check could miss a just-written finish.
         let exit = unsafe {
             (WaitForSingleObject(self.process, 0) == WAIT_OBJECT_0).then(|| {
                 let mut code = 0u32;
@@ -164,6 +171,12 @@ impl Task {
                 code
             })
         };
+        let text = std::fs::read(&self.progress).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        // Only whole lines: the last one may still be being written.
+        let complete = if text.ends_with('\n') { lines.len() } else { lines.len().saturating_sub(1) };
+        let new: Vec<Report> = lines[self.seen.min(complete)..complete].iter().filter_map(|l| parse(l)).collect();
+        self.seen = self.seen.max(complete);
         (new, exit)
     }
 }

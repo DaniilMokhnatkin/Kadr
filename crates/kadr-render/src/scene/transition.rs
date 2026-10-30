@@ -135,6 +135,10 @@ fn code(b: ToolbarButton) -> usize {
         ToolbarButton::Smart => 9,
         ToolbarButton::Record => 10,
         ToolbarButton::Tool(t) => 16 + t as usize,
+        ToolbarButton::TextPlain => 52,
+        ToolbarButton::TextFilled => 53,
+        ToolbarButton::TextOutline => 54,
+        ToolbarButton::TextCallout => 55,
         ToolbarButton::Color(i) => 40 + i,
         ToolbarButton::Width => 48,
         ToolbarButton::Strength => 49,
@@ -145,7 +149,7 @@ fn code(b: ToolbarButton) -> usize {
 fn property(b: ToolbarButton, occurrence: usize) -> bool {
     matches!(
         b,
-        ToolbarButton::Color(_)
+        ToolbarButton::TextPlain | ToolbarButton::TextFilled | ToolbarButton::TextOutline | ToolbarButton::TextCallout | ToolbarButton::Color(_)
             | ToolbarButton::Width
             | ToolbarButton::Strength
             | ToolbarButton::Tool(Tool::BlurEllipse | Tool::BlurBrush | Tool::Spotlight)
@@ -162,6 +166,10 @@ fn selected(b: ToolbarButton, property: bool, e: Option<EditorBar>) -> bool {
     match b {
         ToolbarButton::Tool(t) => e.is_some_and(|e| e.tool == t || (t == Tool::Blur && e.tool.is_blur() && !property)),
         ToolbarButton::Color(i) => e.is_some_and(|e| e.color == i),
+        ToolbarButton::TextPlain=>e.is_some_and(|e|e.text_style==kadr_doc::annotation::TextStyle::Plain),
+        ToolbarButton::TextFilled=>e.is_some_and(|e|e.text_style==kadr_doc::annotation::TextStyle::Filled),
+        ToolbarButton::TextOutline=>e.is_some_and(|e|e.text_style==kadr_doc::annotation::TextStyle::Outline),
+        ToolbarButton::TextCallout=>e.is_some_and(|e|e.callout),
         ToolbarButton::Smart => e.is_some_and(|e| e.smart != SmartUi::Off),
         _ => false,
     }

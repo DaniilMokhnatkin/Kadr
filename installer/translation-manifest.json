@@ -1,0 +1,53 @@
+{
+  "assets": [
+    {
+      "name": "python-3.13.17-embed-amd64.zip",
+      "url": "https://www.python.org/ftp/python/3.13.17/python-3.13.17-embed-amd64.zip",
+      "sha256": "9e35319bffedab8b36ad44d8f377cb4f1733bcec257a0b6d04d94f01486ddb38",
+      "kind": "python"
+    },
+    {
+      "name": "ctranslate2-4.8.4-cp313-cp313-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/37/ae/4fbe636b36fd4fd4266e309d050548c1ae0a23c88ef73ef89c6485db99d1/ctranslate2-4.8.4-cp313-cp313-win_amd64.whl",
+      "sha256": "d9523961651ac0f51e4e62d03307609ff93d828b32ae92dc8b14a7e55243f6f2",
+      "kind": "wheel"
+    },
+    {
+      "name": "sentencepiece-0.2.1-cp313-cp313-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/dd/e9/932b9eae6fd7019548321eee1ab8d5e3b3d1294df9d9a0c9ac517c7b636d/sentencepiece-0.2.1-cp313-cp313-win_amd64.whl",
+      "sha256": "10ed3dab2044c47f7a2e7b4969b0c430420cdd45735d78c8f853191fa0e3148b",
+      "kind": "wheel"
+    },
+    {
+      "name": "numpy-2.2.6-cp313-cp313-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/cb/3b/d58c12eafcb298d4e6d0d40216866ab15f59e55d148a5658bb3132311fcf/numpy-2.2.6-cp313-cp313-win_amd64.whl",
+      "sha256": "b0544343a702fa80c95ad5d3d608ea3599dd54d4632df855e4c8d24eb6ecfa1c",
+      "kind": "wheel"
+    },
+    {
+      "name": "PyYAML-6.0.2-cp313-cp313-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/fa/de/02b54f42487e3d3c6efb3f89428677074ca7bf43aae402517bc7cca949f3/PyYAML-6.0.2-cp313-cp313-win_amd64.whl",
+      "sha256": "8388ee1976c416731879ac16da0aff3f63b286ffdd57cdeb95f3f2e085687563",
+      "kind": "wheel"
+    },
+    {
+      "name": "translate-en_ru-1_9.argosmodel",
+      "url": "https://argos-net.com/v1/translate-en_ru-1_9.argosmodel",
+      "sha256": "591d743ae103752b88ffc38785c50421320f4eff93c8967e0d3d2e14d4e27811",
+      "kind": "model"
+    },
+    {
+      "name": "translate-ru_en-1_9.argosmodel",
+      "url": "https://argos-net.com/v1/translate-ru_en-1_9.argosmodel",
+      "sha256": "e9ba8bf722d10a4a4c39f74289d5938fd47eac08dbe4ed0afd22d89445a5c3ac",
+      "kind": "model"
+    },
+    {
+      "sha256": "843068991daaa1f73ad9f6239bce4d0f6a07a51f18c37ea2a867e9beca71295c",
+      "name": "vc_redist.x64.exe",
+      "kind": "vcredist",
+      "url": "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+    }
+  ],
+  "download_bytes": 398427072
+}

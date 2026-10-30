@@ -31,7 +31,7 @@ if (Test-Path $ocrZip) { Remove-Item $ocrZip -Force }
 Compress-Archive -Path (Join-Path $ocr '*') -DestinationPath $ocrZip -CompressionLevel Optimal
 Copy-Item $exe (Join-Path $out 'kadr.bin')
 Copy-Item $ocrZip $out
-foreach ($name in 'install.ps1', 'Установить.cmd', 'Удалить.cmd', 'ИНСТРУКЦИЯ.txt') {
+foreach ($name in 'translation-manifest.json', 'translation-worker.py', 'nvidia-profile.cs', 'install.ps1', 'Установить.cmd', 'Удалить.cmd', 'ИНСТРУКЦИЯ.txt') {
     Copy-Item (Join-Path $PSScriptRoot $name) $out
 }
 $zip = Join-Path $root 'dist\Kadr-setup.zip'

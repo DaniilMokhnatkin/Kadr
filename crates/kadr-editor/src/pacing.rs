@@ -15,9 +15,9 @@ impl Frames {
             .filter_map(|(i, dirty)| dirty.then_some(i))
             .collect()
     }
-    pub fn complete(&mut self, index: usize) {
+    pub fn presented(&mut self, index: usize, animating: bool) {
         if let Some(dirty) = self.dirty.get_mut(index) {
-            *dirty = false;
+            *dirty = animating;
         }
     }
     pub fn clear(&mut self) {
@@ -32,15 +32,32 @@ mod tests {
         let mut f = Frames::default();
         for _ in 0..1000 {
             f.request(2);
-            f.complete(0);
+            f.presented(0, false);
             assert_eq!(f.pending(), vec![1]);
         }
-        f.complete(1);
+        f.presented(1, false);
         assert!(f.pending().is_empty());
         f.request(2);
         f.request(1);
         assert_eq!(f.pending(), vec![0]);
         f.clear();
         assert!(f.pending().is_empty());
+    }
+
+    #[test]
+    fn animation_keeps_waiting_without_mouse_messages_then_sleeps_when_done() {
+        let mut frames = Frames::default();
+        frames.request(2);
+        frames.presented(1, false);
+        for _ in 0..240 {
+            assert_eq!(frames.pending(), vec![0]);
+            frames.presented(0, true);
+        }
+        frames.presented(0, false);
+        assert!(frames.pending().is_empty());
+        frames.request(2);
+        frames.presented(0, true);
+        frames.clear();
+        assert!(frames.pending().is_empty());
     }
 }

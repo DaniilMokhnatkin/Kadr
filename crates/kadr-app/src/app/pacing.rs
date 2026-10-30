@@ -1,6 +1,10 @@
 use super::*;
 use windows::Win32::Foundation::WAIT_OBJECT_0;
 struct NativeTimer(Option<HANDLE>);
+
+fn effect_needs_frames(panel: bool, leaving: bool, selected_here: bool, smart: bool, ants: bool) -> bool {
+    panel || leaving || (selected_here && (smart || ants))
+}
 impl NativeTimer {
     fn new() -> Self {
         use windows::Win32::System::Threading::*;
@@ -53,11 +57,20 @@ impl App {
                 && self.render_scene(Some(index), true)
             {
                 // An animated surface asks for its own next GPU slot; no 16 ms / 60 Hz timer.
-                if !overlay.animations_pending() {
-                    self.frames.borrow_mut().complete(index);
-                }
+                self.frames.borrow_mut().presented(index, self.overlay_needs_frames(index));
             }
         }
+    }
+    pub(super) fn overlay_needs_frames(&self, index: usize) -> bool {
+        let Some(overlay) = self.overlays.get(index) else { return false };
+        // The hovered window already has an animated border before the selection is committed.
+        let selected_here = self.active.as_ref().and_then(|a| a.session.highlight())
+            .is_some_and(|r| r.intersect(&DocRect::new(
+                overlay.rect.left, overlay.rect.top, overlay.rect.right, overlay.rect.bottom,
+            )).is_some());
+        effect_needs_frames(overlay.animations_pending(), self.exit.is_some(), selected_here,
+            self.smart_needs_frames(),
+            self.config.appearance.marching_ants && kadr_render::theme::motion_enabled())
     }
     fn frame_waits(&self) -> (Vec<HANDLE>, bool) {
         let pending = self.frames.borrow().pending();
@@ -122,6 +135,15 @@ pub(super) unsafe fn message_loop() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scene_effects_keep_their_monitor_awake_after_the_panel_settles() {
+        assert!(effect_needs_frames(false, false, true, false, true));
+        assert!(effect_needs_frames(false, false, true, true, false));
+        assert!(effect_needs_frames(false, true, false, false, false));
+        assert!(!effect_needs_frames(false, false, false, true, true));
+        assert!(!effect_needs_frames(false, false, true, false, false));
+        assert!(effect_needs_frames(true, false, false, false, false));
+    }
     #[test]
     fn native_animation_deadline_is_a_waitable_signal_without_a_global_timer_resolution_change() {
         let before = unsafe { GetForegroundWindow() };

@@ -17,6 +17,7 @@ kadr-editor = { path = "crates/kadr-editor" }
 kadr-export = { path = "crates/kadr-export" }
 kadr-store = { path = "crates/kadr-store" }
 png = "0.18.1"
+serde_json = "1.0"
 windows-numerics = "0.3.1"
 # PaddleOCR: ONNX Runtime loaded at run time from Kadr's ocr folder, so Kadr starts without it.
 ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "api-31"] }

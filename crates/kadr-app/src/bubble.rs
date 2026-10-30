@@ -295,13 +295,8 @@ pub fn is_open() -> bool {
 }
 
 pub fn close() {
-    STATE.with(|s| {
-        if let Some(st) = s.try_borrow().ok().as_deref().and_then(Option::as_ref) {
-            unsafe {
-                let _ = ShowWindow(st.hwnd, SW_HIDE);
-            }
-        }
-    });
+    let hwnd=STATE.with(|s|s.try_borrow().ok().and_then(|st|st.as_ref().map(|st|st.hwnd)));
+    if let Some(hwnd)=hwnd { unsafe { let _=ShowWindow(hwnd,SW_HIDE); } }
 }
 
 fn paint_window(hwnd: HWND) {

@@ -88,7 +88,36 @@ pub fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     text.enable_motion(true);
     let theme = Theme::current();
     let mut cache = Cache::default();
+    let censor = std::env::var_os("KADR_BENCH_CENSOR").is_some();
+    let crop = Rect::new(400, 200, 2000, 1100);
+    let shapes: Vec<_> = if censor {
+        (0..100).map(|i| {
+            let x = 420 + (i % 4) * 380;
+            let y = 220 + (i / 4) * 32;
+            let mut shape = kadr_doc::annotation::Annotation::new(i as u64 + 1, Tool::Blur, kadr_doc::Point::new(x, y));
+            shape.points[1] = [x + 320, y + 23];
+            shape.seed = i as u64 + 123;
+            shape
+        }).collect()
+    } else { Vec::new() };
+    if censor {
+        let start = Instant::now();
+        annotations::prewarm(&frames, crop, &shapes);
+        report.push(format!("100 censor regions background preparation: {:.3} ms", start.elapsed().as_secs_f64() * 1000.0));
+    }
+    let censor_areas: Vec<_> = shapes.iter().map(|shape| {
+        let r = shape.rect();
+        (RECT { left: r.left, top: r.top, right: r.right, bottom: r.bottom }, 0.5, 0.5)
+    }).collect();
+    if censor {
+        let start = Instant::now();
+        annotations::prepare_display(&gpu, &shared, &frames, crop, &shapes, &mut cache)?;
+        report.push(format!("Censor GPU upload before animation: {:.3} ms", start.elapsed().as_secs_f64() * 1000.0));
+    }
     let mut samples = Vec::new();
+    let mut recording = Vec::new();
+    let mut submission = Vec::new();
+    let mut completion = Vec::new();
     let pictures = std::path::Path::new(path).with_extension("frames");
     std::fs::create_dir_all(&pictures)?;
     for frame in 0..340 {
@@ -130,6 +159,8 @@ pub fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
                             ToolbarButton::Save
                         }),
                         editor: Some(EditorBar {
+            text_style: Default::default(),
+            callout: false,
                             tool,
                             color: 0,
                             width: 3,
@@ -139,16 +170,23 @@ pub fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
                             smart: Default::default(),
                         }),
                     }),
+                    drawing: censor.then_some(annotations::View {
+                        shapes: &shapes, preview: None, frames: &frames, crop,
+                        selected: None, control: None, text_edit: None,
+                    }),
+                    smart: censor.then_some(scene::SmartFx { scanning: true, scan_time: None, areas: &censor_areas }),
                     ..Default::default()
                 },
             },
             &mut cache,
         )?;
+        let recorded = Instant::now();
         unsafe {
             gpu.d2d.EndDraw(None, None)?;
             gpu.context.End(&query);
             gpu.context.Flush();
         }
+        let submitted = Instant::now();
         loop {
             let mut ready = BOOL(0);
             unsafe {
@@ -167,10 +205,16 @@ pub fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
             }
             std::thread::yield_now();
         }
+        if censor && frame == 0 {
+            report.push(format!("First prepared censor frame (CPU + GPU): {:.3} ms", start.elapsed().as_secs_f64() * 1000.0));
+        }
         if frame >= 10 {
             samples.push(start.elapsed().as_secs_f64() * 1000.0);
+            recording.push(recorded.duration_since(start).as_secs_f64() * 1000.0);
+            submission.push(submitted.duration_since(recorded).as_secs_f64() * 1000.0);
+            completion.push(submitted.elapsed().as_secs_f64() * 1000.0);
         }
-        if [0, 6, 16, 34, 40, 46, 56, 102, 108, 114, 120, 132, 238, 241, 244, 248, 254, 270, 339].contains(&frame) {
+        if !censor && [0, 6, 16, 34, 40, 46, 56, 102, 108, 114, 120, 132, 238, 241, 244, 248, 254, 270, 339].contains(&frame) {
             let image = read(&gpu, &target)?;
             std::fs::write(
                 pictures.join(format!("frame-{frame:03}.png")),
@@ -179,6 +223,10 @@ pub fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     samples.sort_by(f64::total_cmp);
+    for (name, mut values) in [("D2D recording", recording), ("EndDraw + Flush", submission), ("GPU completion wait", completion)] {
+        values.sort_by(f64::total_cmp);
+        report.push(format!("{name}: p50 {:.3} ms, p95 {:.3} ms", values[values.len()/2], values[values.len()*95/100]));
+    }
     let budget = 1000.0 / 170.0;
     report.push(format!(
         "2560x1440 UI animation, CPU + GPU completion: p50 {:.3} ms, p95 {:.3} ms, max {:.3} ms",

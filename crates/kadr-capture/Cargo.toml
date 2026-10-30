@@ -10,3 +10,6 @@ publish.workspace = true
 kadr-doc.workspace = true
 kadr-win.workspace = true
 windows.workspace = true
+
+[dev-dependencies]
+kadr-render.workspace = true

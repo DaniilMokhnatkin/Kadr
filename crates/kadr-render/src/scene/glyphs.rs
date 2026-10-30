@@ -95,17 +95,6 @@ fn arc(c: (f32, f32), r: f32, from: f32, to: f32) -> Vec<(f32, f32)> {
         .collect()
 }
 
-/// A round marker with a pointed tail: the outline of a numbered step.
-pub(super) fn teardrop(c: (f32, f32), r: f32, tip: (f32, f32)) -> Vec<(f32, f32)> {
-    let (dx, dy) = (tip.0 - c.0, tip.1 - c.1);
-    let d = dx.hypot(dy).max(r + 0.01);
-    let toward = dy.atan2(dx).to_degrees();
-    let half = (r / d).acos().to_degrees();
-    let mut points = vec![tip];
-    points.extend(arc(c, r, toward + half, toward + 360.0 - half));
-    points
-}
-
 pub(super) fn draw(gpu: &Gpu, button: ToolbarButton, r: D2D_RECT_F, ink: D2D1_COLOR_F, scale: f32) {
     let Ok(factory) = (unsafe { gpu.d2d.GetFactory() }) else { return };
     let style = unsafe {
@@ -149,12 +138,16 @@ pub(super) fn draw(gpu: &Gpu, button: ToolbarButton, r: D2D_RECT_F, ink: D2D1_CO
             }
             Tool::Line => p.line((5.5, 18.5), (18.5, 5.5)),
             Tool::Rectangle => p.rounded(4.5, 6.0, 19.5, 18.0, 2.0),
-            Tool::Ellipse => p.ellipse((12.0, 12.0), 8.5, 6.5),
+            Tool::Ellipse => p.ellipse((12.0, 12.0), 8.0, 8.0),
+            Tool::Lens => {
+                p.ellipse((10.0,10.0),6.5,6.5);p.line((15.0,15.0),(20.0,20.0));
+                p.line((7.0,10.0),(13.0,10.0));p.line((10.0,7.0),(10.0,13.0));
+            }
             Tool::Pen => {
                 p.shape(&[(4.5, 19.5), (5.6, 14.6), (15.6, 4.6), (19.4, 8.4), (9.4, 18.4)]);
                 p.line((13.6, 6.6), (17.4, 10.4));
             }
-            Tool::Marker => {
+            Tool::Eraser | Tool::Marker => {
                 p.shape(&[(5.0, 16.5), (14.0, 5.0), (19.5, 9.5), (10.0, 20.0)]);
                 p.line((7.0, 14.0), (12.5, 18.0));
                 p.line((4.0, 21.5), (12.0, 21.5));
@@ -166,7 +159,8 @@ pub(super) fn draw(gpu: &Gpu, button: ToolbarButton, r: D2D_RECT_F, ink: D2D1_CO
             }
             // A numbered marker pointing at its spot, with an optically centred «1».
             Tool::Counter => {
-                p.shape(&teardrop((13.5, 10.0), 6.8, (4.5, 20.0)));
+                p.ellipse((12.0, 11.0), 7.5, 7.5);
+                p.dot((12.0, 21.0), 1.2);
                 p.path(&[(12.3, 8.8), (14.0, 7.6), (14.0, 12.6)]);
             }
             Tool::Blur => {

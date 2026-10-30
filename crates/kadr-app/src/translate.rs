@@ -4,6 +4,11 @@ use std::ffi::c_void;
 use windows::Win32::Networking::WinHttp::*;
 use windows::core::{PCWSTR, w};
 
+static CHOSEN: std::sync::atomic::AtomicU8=std::sync::atomic::AtomicU8::new(0);
+pub fn choose(engine:kadr_store::config::TranslationEngine) {
+    CHOSEN.store(match engine {kadr_store::config::TranslationEngine::Auto=>0,kadr_store::config::TranslationEngine::Offline=>1,kadr_store::config::TranslationEngine::Google=>2},std::sync::atomic::Ordering::Relaxed);
+}
+
 pub struct Translation {
     pub text: String,
     /// Detected source language, e.g. "en".
@@ -68,12 +73,44 @@ fn plan_and_translate(
 
 /// Blocking: call from a worker thread. `to` is a language code such as "ru".
 pub fn translate(text: &str, to: &str) -> Result<Translation, String> {
+    let chosen=CHOSEN.load(std::sync::atomic::Ordering::Relaxed);
+    if chosen==1 || (chosen==0 && crate::translate_local::available()) {return crate::translate_local::translate(text,to);}
+    translate_google(text,to)
+}
+/// Google's keyless endpoints, tried in order. They are limited separately, so when one answers
+/// 429 (seen on Windows 10, whose WinHTTP looks less like a browser) the next one usually works.
+type Reader = fn(&str) -> Option<Translation>;
+const ENDPOINTS: [(&str, &str, Reader); 3] = [
+    ("translate.googleapis.com", "/translate_a/single?client=gtx&sl=auto&dt=t&ie=UTF-8&oe=UTF-8&tl=", parse),
+    ("clients5.google.com", "/translate_a/t?client=dict-chrome-ex&sl=auto&tl=", parse_short),
+    ("translate.google.com", "/translate_a/single?client=gtx&sl=auto&dt=t&ie=UTF-8&oe=UTF-8&tl=", parse),
+];
+
+fn translate_google(text: &str, to: &str) -> Result<Translation, String> {
     let body = format!("q={}", encode(text));
-    let path = kadr_win::wide(&format!("/translate_a/single?client=gtx&sl=auto&tl={to}&dt=t&ie=UTF-8&oe=UTF-8"));
-    let response = post("translate.googleapis.com", &path, body.as_bytes())?;
-    let mut t = parse(&response).ok_or_else(|| "Переводчик вернул непонятный ответ".to_string())?;
-    t.to = to.into();
-    Ok(t)
+    let mut limited = false;
+    let mut last = String::new();
+    for (host, path, read) in ENDPOINTS {
+        let path = kadr_win::wide(&format!("{path}{to}"));
+        match post(host, &path, body.as_bytes()) {
+            Ok((200, response)) => match read(&response) {
+                Some(mut t) => {
+                    t.to = to.into();
+                    return Ok(t);
+                }
+                None => last = "Переводчик вернул непонятный ответ".into(),
+            },
+            Ok((status, _)) => {
+                limited |= status == 429;
+                last = format!("Переводчик ответил кодом {status}");
+            }
+            Err(e) => last = e,
+        }
+    }
+    if limited {
+        return Err("Google временно ограничил запросы с этого компьютера (429). Включите офлайн-перевод в настройках или повторите позже.".into());
+    }
+    Err(last)
 }
 
 struct Handle(*mut c_void);
@@ -87,11 +124,12 @@ impl Drop for Handle {
     }
 }
 
-fn post(host: &str, path: &[u16], body: &[u8]) -> Result<String, String> {
+/// The status code and the body.
+fn post(host: &str, path: &[u16], body: &[u8]) -> Result<(u32, String), String> {
     let fail = |what: &str| format!("Нет связи с переводчиком ({what}): {}", windows::core::Error::from_thread().message());
     unsafe {
         let session = Handle(WinHttpOpen(
-            w!("Kadr/1.0"),
+            w!("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"),
             WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
             PCWSTR::null(),
             PCWSTR::null(),
@@ -101,6 +139,15 @@ fn post(host: &str, path: &[u16], body: &[u8]) -> Result<String, String> {
             return Err(fail("сеанс"));
         }
         let _ = WinHttpSetTimeouts(session.0, 5000, 5000, 5000, 8000);
+        // Windows 10 offers old TLS and HTTP/1.1 unless asked; Google throttles such clients first.
+        // TLS 1.3 is unknown to older builds, so fall back to 1.2 alone when it is refused.
+        let option = |id: u32, value: u32| {
+            WinHttpSetOption(Some(session.0 as *const c_void), id, Some(&value.to_ne_bytes())).is_ok()
+        };
+        if !option(WINHTTP_OPTION_SECURE_PROTOCOLS, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3) {
+            option(WINHTTP_OPTION_SECURE_PROTOCOLS, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2);
+        }
+        option(WINHTTP_OPTION_ENABLE_HTTP_PROTOCOL, WINHTTP_PROTOCOL_FLAG_HTTP2);
         let host = kadr_win::wide(host);
         let connect = Handle(WinHttpConnect(session.0, PCWSTR(host.as_ptr()), INTERNET_DEFAULT_HTTPS_PORT, 0));
         if connect.0.is_null() {
@@ -152,10 +199,7 @@ fn post(host: &str, path: &[u16], body: &[u8]) -> Result<String, String> {
                 .map_err(|_| fail("чтение"))?;
             out.extend_from_slice(&chunk[..read as usize]);
         }
-        if status != 200 {
-            return Err(format!("Переводчик ответил кодом {status}"));
-        }
-        String::from_utf8(out).map_err(|_| "Переводчик вернул не UTF-8".to_string())
+        Ok((status, String::from_utf8_lossy(&out).into_owned()))
     }
 }
 
@@ -181,6 +225,22 @@ enum Json {
     Str(String),
     List(Vec<Json>),
     Object,
+}
+
+/// The dict-chrome-ex answer: `[["перевод","en"]]`.
+fn parse_short(body: &str) -> Option<Translation> {
+    let mut chars = body.chars().peekable();
+    let Json::List(top) = value(&mut chars)? else { return None };
+    let (text, from) = match top.first()? {
+        Json::List(pair) => match (pair.first(), pair.get(1)) {
+            (Some(Json::Str(text)), Some(Json::Str(from))) => (text.clone(), from.clone()),
+            (Some(Json::Str(text)), _) => (text.clone(), String::new()),
+            _ => return None,
+        },
+        Json::Str(text) => (text.clone(), String::new()),
+        _ => return None,
+    };
+    (!text.is_empty()).then_some(Translation { text, from, to: String::new() })
 }
 
 fn parse(body: &str) -> Option<Translation> {
@@ -303,6 +363,14 @@ mod tests {
         assert!(parse("<html>blocked</html>").is_none());
         assert!(parse("[]").is_none());
     }
+    #[test]
+    fn reads_the_short_answer_of_the_spare_endpoint() {
+        let t = parse_short(r#"[["Привет, мир.\nВторая линия","en"]]"#).unwrap();
+        assert_eq!((t.text.as_str(), t.from.as_str()), ("Привет, мир.\nВторая линия", "en"));
+        assert_eq!(parse_short(r#"["Привет"]"#).unwrap().text, "Привет");
+        assert!(parse_short("<html>429</html>").is_none());
+        assert!(parse_short("[]").is_none());
+    }
     /// Stand-in translator: tags what it got, records calls.
     fn fake(calls: &std::cell::RefCell<Vec<(String, String)>>) -> impl Fn(&str, &str) -> Result<Translation, String> + '_ {
         move |text, to| {
@@ -335,8 +403,20 @@ mod tests {
     }
     #[test]
     #[ignore = "network: run with --ignored"]
+    fn live_every_spare_endpoint_translates_on_its_own() {
+        let body = format!("q={}", encode("The weather is nice today.\nSecond line"));
+        for (host, path, read) in ENDPOINTS {
+            let (status, response) = post(host, &kadr_win::wide(&format!("{path}ru")), body.as_bytes()).unwrap();
+            assert_eq!(status, 200, "{host}");
+            let t = read(&response).unwrap_or_else(|| panic!("{host}: {response}"));
+            assert_eq!(t.from, "en", "{host}");
+            assert!(t.text.contains('\n') && t.text.chars().any(|c| ('а'..='я').contains(&c)), "{host}: {}", t.text);
+        }
+    }
+    #[test]
+    #[ignore = "network: run with --ignored"]
     fn live_google_translates_to_russian() {
-        let t = translate("The weather is nice today.", "ru").unwrap();
+        let t = translate_google("The weather is nice today.", "ru").unwrap();
         assert_eq!(t.from, "en");
         assert!(t.text.chars().any(|c| ('а'..='я').contains(&c)), "{}", t.text);
         println!("{}", t.text);

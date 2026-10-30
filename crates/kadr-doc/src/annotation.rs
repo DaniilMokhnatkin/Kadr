@@ -11,6 +11,8 @@ pub enum Tool {
     Ellipse,
     Pen,
     Marker,
+    Eraser,
+    Lens,
     Text,
     Counter,
     Blur,
@@ -24,7 +26,7 @@ impl Tool {
         matches!(self, Self::Blur | Self::BlurEllipse | Self::BlurBrush | Self::Spotlight)
     }
     pub fn is_path(self) -> bool {
-        matches!(self, Self::Pen | Self::Marker | Self::BlurBrush)
+        matches!(self, Self::Pen | Self::Marker | Self::BlurBrush | Self::Eraser)
     }
     pub fn label(self) -> &'static str {
         match self {
@@ -32,9 +34,11 @@ impl Tool {
             Self::Arrow => "Стрелка · A",
             Self::Line => "Линия · L",
             Self::Rectangle => "Рамка · R",
-            Self::Ellipse => "Овал · O",
+            Self::Ellipse => "Круг / овал · O",
             Self::Pen => "Перо · P",
-            Self::Marker => "Маркер · M",
+            Self::Marker => "Маркер (архив)",
+            Self::Eraser => "Ластик · M",
+            Self::Lens => "Увеличение · G",
             Self::Text => "Текст · T",
             Self::Counter => "Нумерация · N",
             Self::Blur => "Размытие · B",
@@ -44,14 +48,15 @@ impl Tool {
             Self::Redact => "Скрыть · X",
         }
     }
-    pub const ALL: [Tool; 14] = [
+    pub const ALL: [Tool; 15] = [
         Self::Select,
         Self::Arrow,
         Self::Line,
         Self::Rectangle,
         Self::Ellipse,
         Self::Pen,
-        Self::Marker,
+        Self::Eraser,
+        Self::Lens,
         Self::Text,
         Self::Counter,
         Self::Blur,
@@ -69,6 +74,9 @@ pub const COLORS: [[u8; 3]; 6] = [
     [255, 255, 255],
     [17, 17, 17],
 ];
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TextStyle { #[default] Plain, Filled, Outline }
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Annotation {
     pub id: u64,
@@ -78,6 +86,10 @@ pub struct Annotation {
     pub width: u32,
     #[serde(default)]
     pub text: String,
+    #[serde(default = "legacy_text_style")]
+    pub text_style: TextStyle,
+    #[serde(default)]
+    pub callout: bool,
     #[serde(default)]
     pub number: u32,
     #[serde(default = "normal")]
@@ -85,6 +97,7 @@ pub struct Annotation {
     #[serde(default)]
     pub seed: u64,
 }
+fn legacy_text_style() -> TextStyle { TextStyle::Filled }
 fn normal() -> u8 {
     1
 }
@@ -97,6 +110,8 @@ impl Annotation {
             color: COLORS[0],
             width: 3,
             text: String::new(),
+            text_style: TextStyle::Plain,
+            callout: false,
             number: 1,
             strength: 1,
             seed: 0,
@@ -104,7 +119,7 @@ impl Annotation {
     }
     pub fn validate(&self) -> bool {
         self.id > 0
-            && self.tool != Tool::Select
+            && !matches!(self.tool, Tool::Select | Tool::Eraser)
             && (2..=8192).contains(&self.points.len())
             && (1..=64).contains(&self.width)
             && self.strength <= 2
@@ -126,12 +141,14 @@ impl Annotation {
         }
         match self.tool {
             Tool::Text => {
+                l=self.points[0][0]; t=self.points[0][1];
                 let size = self.font_size();
                 let lines = self.text.lines().count().max(1) as i32;
                 r = l
                     + (self.text.lines().map(|s| s.chars().count()).max().unwrap_or(0).max(3) as i32 * size * 3 / 5)
                         .max(size);
                 b = t + lines * size * 3 / 2;
+                if self.callout && let Some([x,y])=self.points.get(2) {l=l.min(*x);t=t.min(*y);r=r.max(*x);b=b.max(*y);}
             }
             Tool::Counter => {
                 let radius = self.font_size() * 3 / 4;

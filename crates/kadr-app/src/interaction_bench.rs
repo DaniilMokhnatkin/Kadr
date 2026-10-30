@@ -64,7 +64,7 @@ pub fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 preview: d.preview(),
                 frames: &frames,
                 crop,
-                selected: None,
+                selected: None, control: None,
                 text_edit: None,
             };
             scene::draw(
@@ -105,6 +105,8 @@ pub fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
         ));
     }
     let editor = Some(EditorBar {
+            text_style: Default::default(),
+            callout: false,
         tool: Tool::Select,
         color: 0,
         width: 3,

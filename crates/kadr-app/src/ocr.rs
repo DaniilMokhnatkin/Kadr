@@ -58,6 +58,18 @@ pub fn recognize(image: &Image) -> Result<Vec<Line>> {
     recognize_windows(image)
 }
 
+/// All text bounds, even when the recognizer cannot decode the letters.
+pub fn text_regions(image: &Image) -> Result<Vec<Rect>> {
+    if crate::ocr_paddle::available() {
+        match crate::ocr_paddle::regions(image) {
+            Ok(regions) if !regions.is_empty()=>return Ok(regions),
+            Ok(_)=>{},
+            Err(e)=>kadr_win::log_warn!("поиск текстовых областей: {e}"),
+        }
+    }
+    Ok(crate::sensitive::find_all(&recognize_windows(image)?).into_iter().map(|(_,rect)|rect).collect())
+}
+
 /// Windows' OCR alone.
 pub fn recognize_windows(image: &Image) -> Result<Vec<Line>> {
     Ok(merge(readings(image)?))
@@ -346,6 +358,18 @@ mod tests {
         assert_eq!(rect, Rect::new(10, 80, 420, 124));
         assert_eq!(paragraph_at(&lines, Point::new(600, 600)), None);
         assert_eq!(text_of(&lines), "Title\n\nThe quick brown fox\njumps over the lazy dog.\n\nAnother paragraph");
+    }
+    #[test]
+    fn full_censor_detector_finds_small_russian_and_english_lines_without_decoding_words() {
+        assert!(crate::ocr_paddle::available(),"test requires the bundled PaddleOCR models");
+        for dark in [false,true] {
+            let image=render_with("Логин Raptor\nThis is private text\nПароль test-123",16,dark);
+            let started=std::time::Instant::now();
+            let regions=crate::ocr_paddle::regions(&image).unwrap();
+            assert!(regions.len()>=3,"{dark}: {regions:?}");
+            assert!(regions.iter().all(|r|image.rect.intersect(r)==Some(*r)));
+            eprintln!("full detector dark={dark}: {} regions, {:?}",regions.len(),started.elapsed());
+        }
     }
     fn text_of(lines: &[Line]) -> String {
         text(lines)

@@ -45,25 +45,28 @@ const ROW: f32 = 46.0;
 const SECTION: f32 = 34.0;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
-const TOGGLES: [&str; 5] = [
+const TOGGLES: [&str; 6] = [
     "Запускать вместе с Windows",
     "Миниатюра после снимка",
-    "Уведомление о сохранении",
+    "Лупа у курсора",
+    "Бегущий пунктир",
     "Помнить несохранённые снимки",
     "Мгновенный захват",
 ];
-const TOGGLE_HINTS: [&str; 5] = [
+const TOGGLE_HINTS: [&str; 6] = [
     "",
     "Перетащите её в чат или нажмите, чтобы открыть",
-    "",
+    "Увеличение и цвет пикселя, пока выбираете область",
+    "Рамка выделения и выбранные объекты",
     "До 10 снимков, зашифрованно",
     "≈8 мс вместо ≈23 мс, чуть больше памяти",
 ];
 const KEYS: [&str; 5] = ["Выделить область", "Монитор под курсором", "Активное окно", "Последняя область", "Недавние"];
 /// Segmented rows: label, hint, choices.
-const CHOICES: [(&str, &str, &[&str]); 2] = [
+const CHOICES: [(&str, &str, &[&str]); 3] = [
     ("Тема", "", &["Авто", "Светлая", "Тёмная"]),
     ("Распознавание текста", "Авто — как при установке", &["Авто", "Windows", "PaddleOCR"]),
+    ("Переводчик", "Авто предпочитает локальную модель", &["Авто", "Офлайн", "Google"]),
 ];
 const SEGMENT_W: f32 = 84.0;
 
@@ -81,8 +84,8 @@ enum Hit {
 
 struct Layout {
     close: D2D_RECT_F,
-    toggles: [D2D_RECT_F; 5],
-    choices: [D2D_RECT_F; 2],
+    toggles: [D2D_RECT_F; 6],
+    choices: [D2D_RECT_F; 3],
     folder: D2D_RECT_F,
     folder_button: D2D_RECT_F,
     folder_reset: D2D_RECT_F,
@@ -118,8 +121,8 @@ fn layout(width: f32, s: f32) -> Layout {
         *y += 18.0 * s;
         out
     };
-    let toggles: [D2D_RECT_F; 5] = rows(5, 0, &mut y).try_into().unwrap();
-    let choices: [D2D_RECT_F; 2] = rows(2, 1, &mut y).try_into().unwrap();
+    let toggles: [D2D_RECT_F; 6] = rows(6, 0, &mut y).try_into().unwrap();
+    let choices: [D2D_RECT_F; 3] = rows(3, 1, &mut y).try_into().unwrap();
     let folder = rows(1, 2, &mut y)[0];
     let keys: [D2D_RECT_F; 5] = rows(5, 3, &mut y).try_into().unwrap();
     let open_file = rect(left, y, left + 180.0 * s, y + 28.0 * s);
@@ -141,7 +144,17 @@ fn layout(width: f32, s: f32) -> Layout {
     }
 }
 
+fn scrolled_layout(width:f32, scale:f32, offset:f32) -> Layout {
+    let mut l=layout(width,scale);
+    for r in l.toggles.iter_mut().chain(l.choices.iter_mut()).chain(l.keys.iter_mut()).chain(l.groups.iter_mut())
+        .chain([&mut l.folder,&mut l.folder_button,&mut l.folder_reset,&mut l.open_file]) {r.top-=offset;r.bottom-=offset;}
+    for top in &mut l.sections {*top-=offset;}
+    l
+}
+
 fn hit(l: &Layout, x: f32, y: f32, custom_folder: bool) -> Option<Hit> {
+    if y<76.0*l.scale {return inside(l.close,x,y).then_some(Hit::Close);}
+
     if inside(l.close, x, y) {
         return Some(Hit::Close);
     }
@@ -196,8 +209,9 @@ fn toggle_value(c: &Config, i: usize, auto: bool) -> bool {
     match i {
         0 => auto,
         1 => c.save.thumbnail,
-        2 => c.save.notify,
-        3 => c.recent.enabled,
+        2 => c.capture.magnifier,
+        3 => c.appearance.marching_ants,
+        4 => c.recent.enabled,
         _ => c.capture.warm,
     }
 }
@@ -212,12 +226,14 @@ const ENGINES: [kadr_store::config::OcrEngine; 3] =
 fn choice_value(c: &Config, row: usize) -> usize {
     match row {
         0 => THEMES.iter().position(|t| *t == c.appearance.theme).unwrap_or(0),
+        2 => match c.translation.engine {kadr_store::config::TranslationEngine::Auto=>0,kadr_store::config::TranslationEngine::Offline=>1,kadr_store::config::TranslationEngine::Google=>2},
         _ => ENGINES.iter().position(|e| *e == c.recognition.engine).unwrap_or(0),
     }
 }
 fn set_choice(c: &mut Config, row: usize, i: usize) {
     match row {
         0 => c.appearance.theme = THEMES[i.min(THEMES.len() - 1)],
+        2 => c.translation.engine=[kadr_store::config::TranslationEngine::Auto,kadr_store::config::TranslationEngine::Offline,kadr_store::config::TranslationEngine::Google][i.min(2)],
         _ => c.recognition.engine = ENGINES[i.min(ENGINES.len() - 1)],
     }
 }
@@ -263,16 +279,18 @@ struct State {
     auto: bool,
     scale: f32,
     epoch: Instant,
-    knobs: [Spring; 5],
+    knobs: [Spring; 6],
     /// Where each segmented control's highlight sits (choice index, gliding).
-    slides: [Spring; 2],
+    slides: [Spring; 3],
     hover: Option<Hit>,
     glow: Vec<(Hit, Spring)>,
     capturing: Option<usize>,
     error: Option<String>,
     tracking: bool,
+    scroll: Spring,
 }
 impl State {
+    fn layout(&self,width:f32)->Layout {scrolled_layout(width,self.scale,self.scroll.value(self.now()))}
     fn now(&self) -> f64 {
         self.epoch.elapsed().as_secs_f64()
     }
@@ -298,7 +316,7 @@ impl State {
     }
     fn sync_knobs(&mut self, snap: bool) {
         let now = self.now();
-        for i in 0..5 {
+        for i in 0..TOGGLES.len() {
             let v = f32::from(toggle_value(&self.config, i, self.auto));
             if snap {
                 self.knobs[i].snap(v);
@@ -426,13 +444,14 @@ pub fn show(instance: HINSTANCE, host: HWND, message: u32, config: &Config) {
                 auto: false,
                 scale: 1.0,
                 epoch: Instant::now(),
-                knobs: [knob(), knob(), knob(), knob(), knob()],
-                slides: [knob(), knob()],
+                knobs: [knob(), knob(), knob(), knob(), knob(), knob()],
+                slides: [knob(), knob(), knob()],
                 hover: None,
                 glow: Vec::new(),
                 capturing: None,
                 error: None,
                 tracking: false,
+                scroll: Spring::with(0.0,Curve::GLIDE),
             })
         });
     }
@@ -458,6 +477,7 @@ pub fn show(instance: HINSTANCE, host: HWND, message: u32, config: &Config) {
             let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
         }
         st.scale = dx as f32 / 96.0;
+        st.scroll.snap(0.0);
         st.fonts = None;
         let w = (WIDTH * st.scale) as i32;
         let h = (layout(w as f32, st.scale).height as i32).min(mi.rcWork.bottom - mi.rcWork.top - 32);
@@ -546,8 +566,8 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
     let now = st.now();
     let s = st.scale;
     let (w, h) = (size.0 as f32, size.1 as f32);
-    let l = layout(w, s);
-    let mut moving = st.glow.iter().any(|(_, sp)| sp.active(now));
+    let l = st.layout(w);
+    let mut moving = st.glow.iter().any(|(_, sp)| sp.active(now)) || st.scroll.active(now);
     let glow = |hit: Hit| st.glow.iter().find(|(k, _)| *k == hit).map_or(0.0, |(_, sp)| sp.value(now));
     fill(gpu, theme.wash, rect(0.0, 0.0, w, h), 0.0);
     text(gpu, &f.title, "Настройки", rect(PAD * s, 22.0 * s, w / 2.0, 56.0 * s), theme.text);
@@ -568,6 +588,7 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
             );
         }
     }
+    unsafe {gpu.d2d.PushAxisAlignedClip(&rect(0.0,76.0*s,w,h),windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_ALIASED);}
     // Groups: white cards with hairlines between rows.
     for (i, title) in ["ОСНОВНЫЕ", "ВИД И ТЕКСТ", "СОХРАНЕНИЕ", "СОЧЕТАНИЯ КЛАВИШ"].iter().enumerate() {
         let y = l.sections[i];
@@ -680,6 +701,14 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
     } else if st.capturing.is_some() {
         text(gpu, &f.hint, "Esc — отмена · Backspace — выключить", footer, theme.text_muted);
     }
+    unsafe {gpu.d2d.PopAxisAlignedClip();}
+    let overflow=(l.height-h).max(0.0);
+    if overflow>0.0 {
+        let track=rect(w-8.0*s,80.0*s,w-4.0*s,h-8.0*s);
+        let height=(track.bottom-track.top)*(h/l.height);
+        let top=track.top+(track.bottom-track.top-height)*(st.scroll.value(now)/overflow).clamp(0.0,1.0);
+        fill(gpu,theme.text_muted,rect(track.left,top,track.right,top+height),2.0*s);
+    }
     moving
 }
 
@@ -733,7 +762,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 s.try_borrow().is_ok_and(|g| {
                     g.as_ref().is_some_and(|st| {
                         (p.y as f32) < 72.0 * st.scale
-                            && hit(&layout(width(), st.scale), p.x as f32, p.y as f32, true).is_none()
+                            && hit(&st.layout(width()), p.x as f32, p.y as f32, true).is_none()
                     })
                 })
             });
@@ -758,12 +787,23 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                         st.tracking = true;
                     }
                     let custom = !st.config.save.folder.trim().is_empty();
-                    let h = hit(&layout(width(), st.scale), x, y, custom);
+                    let h = hit(&st.layout(width()), x, y, custom);
                     st.set_hover(h);
                 }
             });
             redraw();
             return LRESULT(0);
+        }
+        WM_MOUSEWHEEL => {
+            let delta=((wp.0>>16) as u16 as i16) as f32/120.0;
+            STATE.with(|state| {
+                if let Ok(mut state)=state.try_borrow_mut() && let Some(st)=state.as_mut() {
+                    let height=client_size(hwnd).1 as f32;
+                    let max=(layout(width(),st.scale).height-height).max(0.0);
+                    let goal=(st.scroll.goal()-delta*72.0*st.scale).clamp(0.0,max);
+                    st.scroll.target_with(goal,Curve::GLIDE,st.now());st.set_hover(None);
+                }
+            });redraw();return LRESULT(0);
         }
         WM_MOUSELEAVE => {
             STATE.with(|s| {
@@ -791,7 +831,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 let Ok(mut state) = s.try_borrow_mut() else { return };
                 let Some(st) = state.as_mut() else { return };
                 let custom = !st.config.save.folder.trim().is_empty();
-                let h = hit(&layout(width(), st.scale), x, y, custom);
+                let h = hit(&st.layout(width()), x, y, custom);
                 if !matches!(h, Some(Hit::Key(_))) {
                     st.stop_capture();
                 }
@@ -806,8 +846,9 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     Some(Hit::Toggle(i)) => {
                         match i {
                             1 => st.config.save.thumbnail ^= true,
-                            2 => st.config.save.notify ^= true,
-                            3 => st.config.recent.enabled ^= true,
+                            2 => st.config.capture.magnifier ^= true,
+                            3 => st.config.appearance.marching_ants ^= true,
+                            4 => st.config.recent.enabled ^= true,
                             _ => st.config.capture.warm ^= true,
                         }
                         st.sync_knobs(false);
@@ -966,8 +1007,8 @@ pub fn preview(scale: f32) -> windows::core::Result<kadr_doc::Image> {
         device: Device::new("settings-preview").ok(),
         surface: None,
         fonts: None,
-        knobs: [knob(true), knob(true), knob(true), knob(true), knob(false)],
-        slides: [Spring::with(0.0, Curve::GLIDE), Spring::with(2.0, Curve::GLIDE)],
+        knobs: [knob(true), knob(true), knob(true), knob(false), knob(true), knob(false)],
+        slides: [Spring::with(0.0, Curve::GLIDE), Spring::with(2.0, Curve::GLIDE), Spring::with(0.0, Curve::GLIDE)],
         config,
         auto: true,
         scale,
@@ -977,6 +1018,7 @@ pub fn preview(scale: f32) -> windows::core::Result<kadr_doc::Image> {
         capturing: Some(4),
         error: None,
         tracking: false,
+        scroll: Spring::with(0.0,Curve::GLIDE),
     };
     if !ensure_fonts(&mut st) {
         return Err(windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL));
@@ -993,6 +1035,14 @@ pub fn preview(scale: f32) -> windows::core::Result<kadr_doc::Image> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scrolling_exposes_the_footer_on_a_short_high_dpi_screen_and_keeps_close_fixed() {
+        let scale=1.5;let width=WIDTH*scale;let height=900.0;
+        let original=layout(width,scale);let scrolled=scrolled_layout(width,scale,original.height-height);
+        assert_eq!(scrolled.close,original.close);
+        assert!(scrolled.open_file.bottom<=height);
+        assert_eq!(hit(&scrolled,(scrolled.open_file.left+scrolled.open_file.right)/2.0,(scrolled.open_file.top+scrolled.open_file.bottom)/2.0,true),Some(Hit::OpenFile));
+    }
     #[test]
     fn rows_do_not_overlap_and_every_control_is_reachable_at_each_dpi() {
         for s in [1.0f32, 1.5, 2.0] {

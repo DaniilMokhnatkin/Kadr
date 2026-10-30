@@ -52,7 +52,7 @@ const FEATURES: [(&str, &str, &[&str]); TOUR] = [
     ),
     (
         "Рисуйте поверх",
-        "Стрелки, рамки, текст, маркер и размытие. Нумерация как в ShareX: потяните — и у номера появится хвостик к нужному месту.",
+        "Стрелки, круги, текст, ластик и размытие. Добавьте круг с номером и потяните за точку, чтобы указать нужное место.",
         &["Стрелка · A", "Нумерация · N", "Ctrl + Z"],
     ),
     (
@@ -78,7 +78,7 @@ const FEATURES: [(&str, &str, &[&str]); TOUR] = [
 ];
 
 /// Install steps as the script reports them: id, title, what is happening while it runs.
-const STEPS: [(&str, &str, &str); 8] = [
+const STEPS: [(&str, &str, &str); 9] = [
     ("prepare", "Подготовка", ""),
     ("cert", "Сертификат подписи", "создаётся на этом компьютере, ключ никуда не уходит"),
     ("copy", "Копирование и подпись", "C:\\Program Files\\Kadr"),
@@ -86,6 +86,7 @@ const STEPS: [(&str, &str, &str); 8] = [
     ("paddle", "PaddleOCR в Kadr", "модели распознавания и ONNX Runtime → Program Files\\Kadr\\ocr"),
     ("ocr-en", "Распознавание текста Windows · английский", "скачивается из Центра обновления Windows — до пары минут"),
     ("ocr-ru", "Распознавание текста Windows · русский", "скачивается из Центра обновления Windows — до пары минут"),
+    ("translation", "Офлайн-перевод EN ↔ RU", "загрузка языковых моделей, примерно 440 МБ; проверка SHA-256"),
     ("launch", "Запуск Kadr", ""),
 ];
 
@@ -159,8 +160,8 @@ struct App {
     hover: Option<Hit>,
     glow: Vec<(Hit, Spring)>,
     /// Autostart.
-    options: [bool; 1],
-    knobs: [Spring; 1],
+    options: [bool; 2],
+    knobs: [Spring; 2],
     /// PaddleOCR chosen (else Windows' OCR).
     paddle: bool,
     /// The chosen card's highlight, gliding between the two.
@@ -224,7 +225,7 @@ impl App {
     }
     fn primary(&mut self) {
         match self.page {
-            READY => self.install(install::Job::Full { autostart: self.options[0], paddle: self.paddle }),
+            READY => self.install(install::Job::Full { autostart: self.options[0], paddle: self.paddle, translation:self.options[1] }),
             DONE if self.failed.is_some() => {
                 self.failed = None;
                 self.adding_paddle = false;
@@ -275,6 +276,8 @@ impl App {
             install::Job::Full { paddle: true, .. } => &["prepare", "cert", "copy", "autostart", "paddle", "launch"],
             install::Job::Full { .. } => &["prepare", "cert", "copy", "autostart", "ocr-en", "ocr-ru", "launch"],
         };
+        let mut ids=ids.to_vec();
+        if matches!(job,install::Job::Full {translation:true,..}) {ids.insert(ids.len()-1,"translation");}
         match install::start(self.hwnd, payload, job) {
             Start::Running(task) => {
                 self.task = Some(task);
@@ -376,7 +379,7 @@ struct Layout {
     primary: D2D_RECT_F,
     secondary: D2D_RECT_F,
     dots: Vec<D2D_RECT_F>,
-    toggles: [D2D_RECT_F; 1],
+    toggles: [D2D_RECT_F; 2],
     art: D2D_RECT_F,
     /// The engine cards, PaddleOCR then Windows.
     engines: [D2D_RECT_F; 2],
@@ -397,7 +400,7 @@ fn layout(app: &App, w: f32, h: f32) -> Layout {
             rect(x - 6.0 * s, bottom - bh / 2.0 - 8.0 * s, x + 10.0 * s, bottom - bh / 2.0 + 8.0 * s)
         })
         .collect();
-    let toggles = [rect(40.0 * s, 282.0 * s, w - 40.0 * s, 338.0 * s)];
+    let toggles = [rect(40.0*s,282.0*s,w-40.0*s,338.0*s),rect(40.0*s,338.0*s,w-40.0*s,394.0*s)];
     let half = (w - 80.0 * s - 16.0 * s) / 2.0;
     let engines = [0, 1].map(|i| {
         let left = 40.0 * s + i as f32 * (half + 16.0 * s);
@@ -564,7 +567,7 @@ fn main() {
         glass::match_appearance(hwnd);
     }
     let spring = |c: Curve| Spring::with(0.0, c).precise(0.001);
-    let mut knobs = [spring(Curve::POP)];
+    let mut knobs = [spring(Curve::POP),spring(Curve::POP)];
     knobs.iter_mut().for_each(|k| k.snap(1.0));
     APP.with(|a| {
         *a.borrow_mut() = Some(App {
@@ -580,7 +583,7 @@ fn main() {
             entered: [0.0; PAGES],
             hover: None,
             glow: Vec::new(),
-            options: [true],
+            options: [true, true],
             knobs,
             payload: install::payload(),
             task: None,
@@ -1031,8 +1034,8 @@ fn draw_page(device: &Device, app: &App, f: &Fonts, theme: &Theme, l: &Layout, p
                 text(gpu, &f.small_bold, reason, rect(row.left + 36.0 * s, row.top, row.right, row.bottom), fade(theme.text, alpha));
             }
             // Options.
-            let options = [("Запускать вместе с Windows", "Kadr будет ждать PrtSc сразу после входа")];
-            let group = l.toggles[0];
+            let options = [("Запускать вместе с Windows", "Kadr будет ждать PrtSc сразу после входа"),("Офлайн-перевод EN ↔ RU", "Скачать около 440 МБ один раз; затем без интернета и ключей")];
+            let group = rect(l.toggles[0].left,l.toggles[0].top,l.toggles[1].right,l.toggles[1].bottom);
             let (g, alpha) = lifted(group, 5);
             fill(gpu, fade(theme.group, alpha), g, 14.0 * s);
             stroke(gpu, fade(theme.hairline, 0.7 * alpha), inflate(g, -0.5), 14.0 * s, 1.0);
@@ -1401,8 +1404,8 @@ fn snapshots(folder: &std::path::Path, scale: f32) -> windows::core::Result<()> 
             entered: [-at; PAGES],
             hover: None,
             glow: Vec::new(),
-            options: [true],
-            knobs: [spring(Curve::POP)],
+            options: [true, true],
+            knobs: [spring(Curve::POP),spring(Curve::POP)],
             payload: Err(String::new()),
             task: None,
             plan: Vec::new(),
@@ -1424,9 +1427,9 @@ fn snapshots(folder: &std::path::Path, scale: f32) -> windows::core::Result<()> 
             app.choice.snap(1.0);
         }
         let ids: &[&str] = if windows {
-            &["prepare", "cert", "copy", "autostart", "ocr-en", "ocr-ru", "launch"]
+            &["prepare", "cert", "copy", "autostart", "ocr-en", "ocr-ru", "translation", "launch"]
         } else {
-            &["prepare", "cert", "copy", "autostart", "paddle", "launch"]
+            &["prepare", "cert", "copy", "autostart", "paddle", "translation", "launch"]
         };
         app.plan = ids.iter().filter_map(|id| STEPS.iter().position(|(s, _, _)| s == id)).collect();
         app.steps = vec![Step::Waiting; app.plan.len()];

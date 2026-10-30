@@ -175,7 +175,8 @@ impl App {
                 0x52 => Some(Tool::Rectangle),
                 0x4F => Some(Tool::Ellipse),
                 0x50 => Some(Tool::Pen),
-                0x4D => Some(Tool::Marker),
+                0x4D => Some(Tool::Eraser),
+                0x47 => Some(Tool::Lens),
                 0x54 => Some(Tool::Text),
                 0x4E => Some(Tool::Counter),
                 0x42 => Some(Tool::Blur),
@@ -232,7 +233,7 @@ impl App {
             return;
         };
         let d = &mut active.drawing;
-        if d.tool.is_blur() {
+        if d.tool.is_blur() || d.tool==Tool::Lens {
             let strength = (d.strength as i32 + delta.signum()).clamp(0, 2);
             d.set_strength(strength as u8);
         } else {
@@ -250,6 +251,10 @@ impl App {
             ToolbarButton::Tool(tool) => d.set_tool(tool),
             ToolbarButton::Color(index) => d.set_color(index),
             ToolbarButton::Width => d.set_width(if d.width >= 8 { 1 } else { d.width + 1 }),
+            ToolbarButton::TextPlain=>d.set_text_style(kadr_doc::annotation::TextStyle::Plain),
+            ToolbarButton::TextFilled=>d.set_text_style(kadr_doc::annotation::TextStyle::Filled),
+            ToolbarButton::TextOutline=>d.set_text_style(kadr_doc::annotation::TextStyle::Outline),
+            ToolbarButton::TextCallout=>d.toggle_callout(),
             ToolbarButton::Strength => d.set_strength((d.strength + 1) % 3),
             ToolbarButton::Undo => d.undo(),
             ToolbarButton::Redo => d.redo(),

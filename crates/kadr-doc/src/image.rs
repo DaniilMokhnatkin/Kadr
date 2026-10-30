@@ -21,6 +21,20 @@ impl Image {
         self.rect.height() as u32
     }
 
+    /// Clockwise quarter turns, preserving the desktop origin and exact BGRA pixels.
+    pub fn rotated(&self, quarters: u8) -> Self {
+        let q=quarters%4;
+        if q==0 { return self.clone(); }
+        let (w,h)=(self.width() as usize,self.height() as usize);
+        let (dw,dh)=if q%2==1 {(h,w)} else {(w,h)};
+        let mut pixels=vec![0;self.bgra.len()];
+        for y in 0..h { for x in 0..w {
+            let (dx,dy)=match q {1=>(h-1-y,x),2=>(w-1-x,h-1-y),_=>(y,w-1-x)};
+            pixels[(dy*dw+dx)*4..(dy*dw+dx+1)*4].copy_from_slice(&self.bgra[(y*w+x)*4..(y*w+x+1)*4]);
+        }}
+        Image::new(Rect::new(self.rect.left,self.rect.top,self.rect.left+dw as i32,self.rect.top+dh as i32),pixels)
+    }
+
     /// BGRA пикселя в координатах рабочего стола.
     pub fn pixel(&self, p: Point) -> Option<[u8; 4]> {
         if !self.rect.contains(p) {
@@ -81,5 +95,23 @@ mod tests {
         let img = solid(Rect::new(10, 10, 12, 12), [1, 2, 3, 4]);
         assert_eq!(img.pixel(Point::new(9, 10)), None);
         assert_eq!(hex(img.pixel(Point::new(11, 11)).unwrap()), "#030201");
+    }
+}
+
+#[cfg(test)]
+mod rotation_tests {
+    use super::*;
+    #[test]
+    fn quarter_turns_map_asymmetric_pixels_and_preserve_negative_origin() {
+        let src=Image::new(Rect::new(-3,20,0,22),(1u8..=6).flat_map(|n|[n,0,0,255]).collect());
+        for (q,expected) in [(1,vec![4,1,5,2,6,3]),(2,vec![6,5,4,3,2,1]),(3,vec![3,6,2,5,1,4])] {
+            let out=src.rotated(q); assert_eq!((out.rect.left,out.rect.top),(-3,20));
+            assert_eq!(out.bgra.as_chunks::<4>().0.iter().map(|p|p[0]).collect::<Vec<_>>(),expected);
+            assert_eq!(out.rotated(4-q),src);
+        }
+        let portrait=src.rotated(1);
+        let main=Image::new(Rect::new(0,20,3,22),[200,0,0,255].repeat(6));
+        let selected=Image::compose([&main,&portrait],main.rect);
+        assert_eq!(selected,main,"portrait monitor must not spill onto main monitor coordinates");
     }
 }

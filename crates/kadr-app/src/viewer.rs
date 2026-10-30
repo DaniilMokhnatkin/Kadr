@@ -34,13 +34,14 @@ pub enum Request {
     Closed(Shot, bool),
 }
 
-const TOOLS: [Tool; 9] = [
+const TOOLS: [Tool; 10] = [
     Tool::Select,
     Tool::Arrow,
     Tool::Rectangle,
     Tool::Ellipse,
     Tool::Pen,
-    Tool::Marker,
+    Tool::Eraser,
+    Tool::Lens,
     Tool::Text,
     Tool::Counter,
     Tool::Blur,
@@ -333,7 +334,8 @@ pub fn open(instance: HINSTANCE, host: HWND, message: u32, shot: Shot, from: REC
 }
 
 /// A new capture is starting: away at once, nothing to fly back.
-pub fn close_now() {
+pub fn close_now() -> bool {
+    let mut visible=false;
     if let Some(hwnd) = WINDOW.with(|w| *w.borrow()) {
         STATE.with(|s| {
             if let Ok(mut g) = s.try_borrow_mut() {
@@ -341,9 +343,11 @@ pub fn close_now() {
             }
         });
         unsafe {
+            visible=IsWindowVisible(hwnd).as_bool();
             let _ = ShowWindow(hwnd, SW_HIDE);
         }
     }
+    visible
 }
 
 fn paint_window(hwnd: HWND) {
@@ -477,10 +481,16 @@ fn paint(device: &Device, st: &State, size: (u32, u32), cache: &mut Cache) -> bo
                 frames: &st.frames,
                 crop: st.crop(),
                 selected: st.drawing.selected_bounds(),
+                control: st.drawing.selected_control(),
                 text_edit: st.drawing.text_selection(),
             },
             cache,
         );
+        if let Some(bounds)=st.drawing.selected_bounds() {
+            let area=rect((bounds.left-origin.x) as f32,(bounds.top-origin.y) as f32,(bounds.right-origin.x) as f32,(bounds.bottom-origin.y) as f32);
+            let point=st.drawing.selected_control().map(|p|windows_numerics::Vector2::new((p.x-origin.x) as f32,(p.y-origin.y) as f32));
+            let _=kadr_render::scene::object_controls(gpu,&device.shared,&kadr_render::theme::Theme::current(),area,point,s/k,(now,kadr_render::theme::motion_enabled()));
+        }
         unsafe {
             gpu.d2d.SetTransform(&Matrix3x2::identity());
             gpu.d2d.PopLayer();
@@ -565,7 +575,7 @@ fn paint(device: &Device, st: &State, size: (u32, u32), cache: &mut Cache) -> bo
         }
     }
     let toast = st.toast.is_some_and(|(_, at)| now - at < 2.0);
-    st.open.active(now) || st.glow.iter().any(|(_, sp)| sp.active(now)) || toast || st.drawing.typing()
+    st.open.active(now) || st.glow.iter().any(|(_, sp)| sp.active(now)) || toast || st.drawing.typing() || (kadr_render::theme::marching_ants() && kadr_render::theme::motion_enabled() && st.drawing.selected.is_some())
 }
 
 fn modifiers() -> (bool, bool) {
@@ -694,7 +704,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let delta = ((wp.0 >> 16) as u16 as i16) as i32;
             with(&mut |st| {
                 let d = &mut st.drawing;
-                if d.tool.is_blur() {
+                if d.tool.is_blur() || d.tool==Tool::Lens {
                     d.set_strength((d.strength as i32 + delta.signum()).clamp(0, 2) as u8);
                 } else {
                     d.set_width((d.width as i32 + delta.signum()).clamp(1, 12) as u32);

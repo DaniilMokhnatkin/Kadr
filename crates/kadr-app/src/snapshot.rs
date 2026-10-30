@@ -17,7 +17,9 @@ use windows::Win32::Graphics::Direct2D::{
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
 
 use kadr_render::gpu::{Gpu, Shared, bitmap_props};
-use kadr_render::scene::{self, Hud, HudRow, Magnifier, Marks, Scene, TextStyles, Toolbar, ToolbarButton};
+use kadr_render::scene::{
+    self, Hud, HudRow, Magnifier, Marks, Scene, TextStyles, Toolbar, ToolbarButton,
+};
 use kadr_render::theme::Theme;
 
 const BANDS: [u32; 5] = [0xffffff, 0xd4d4d8, 0x777777, 0x5e6ad2, 0x000000];
@@ -41,7 +43,10 @@ fn run_tool(
     let gpu = Gpu::new(&shared, &adapter, "snapshot".into())?;
 
     let (w, h) = ((1600.0 * scale) as u32, (900.0 * scale) as u32);
-    let size = D2D_SIZE_U { width: w, height: h };
+    let size = D2D_SIZE_U {
+        width: w,
+        height: h,
+    };
     let pixels = background(w, h);
     let at = |v: f32| (v * scale) as i32;
     // Выделение пересекает светлую, серую и акцентную полосы и радугу; правый край — на цвете акцента.
@@ -51,15 +56,29 @@ fn run_tool(
         right: at(1270.0),
         bottom: at(700.0),
     };
-    let crop = kadr_doc::Rect::new(selection.left, selection.top, selection.right, selection.bottom);
+    let crop = kadr_doc::Rect::new(
+        selection.left,
+        selection.top,
+        selection.right,
+        selection.bottom,
+    );
     let frames = vec![std::sync::Arc::new(kadr_doc::Image::new(
         kadr_doc::Rect::new(0, 0, w as i32, h as i32),
         pixels.clone(),
     ))];
-    let shapes = if editor { sample_shapes(scale) } else { Vec::new() };
+    let shapes = if editor {
+        sample_shapes(scale)
+    } else {
+        Vec::new()
+    };
     // Smart blur mid-way: the blurred sample area is still dissolving in, with its outline.
     let smart_areas = [(
-        RECT { left: at(840.0), top: at(550.0), right: at(1161.0), bottom: at(651.0) },
+        RECT {
+            left: at(840.0),
+            top: at(550.0),
+            right: at(1161.0),
+            bottom: at(651.0),
+        },
         0.35f32,
         0.7f32,
     )];
@@ -93,6 +112,8 @@ fn run_tool(
                 toolbar: Some(Toolbar {
                     hovered: Some(ToolbarButton::Save),
                     editor: editor.then_some(scene::EditorBar {
+            text_style: Default::default(),
+            callout: false,
                         tool,
                         color: 0,
                         width: 3,
@@ -108,22 +129,32 @@ fn run_tool(
                     preview: None,
                     frames: &frames,
                     crop,
-                    selected: None,
+                    selected: None, control: None,
                     text_edit: None,
                 }),
                 glide: false,
                 exit: exit.unwrap_or(0.0),
                 flash: exit.is_some(),
                 hint: (!editor).then_some(scene::HintKind::Translate),
-                smart: editor.then_some(scene::SmartFx { scanning: false, areas: &smart_areas }),
+                // The blur set also shows the censor scanning.
+                smart: editor.then_some(scene::SmartFx {
+                    scanning: tool == kadr_doc::annotation::Tool::BlurBrush,
+                    scan_time: None,
+                    areas: &smart_areas,
+                }),
             },
         };
         ctx.SetTarget(&target);
         ctx.BeginDraw();
+        let styles = TextStyles::new(&shared, scale)?;
+        if tool == kadr_doc::annotation::Tool::BlurBrush {
+            // Mid-pass, so the scanner's line shows.
+            styles.set_animation_time(Some(0.75));
+        }
         let drawn = scene::draw(
             &gpu,
             &shared,
-            &TextStyles::new(&shared, scale)?,
+            &styles,
             &Theme::current(),
             &scene,
             &mut Default::default(),
@@ -141,7 +172,10 @@ fn run_tool(
         let mapped = readback.Map(D2D1_MAP_OPTIONS_READ)?;
         let mut rgba = Vec::with_capacity((w * h * 4) as usize);
         for y in 0..h {
-            let row = std::slice::from_raw_parts(mapped.bits.add((y * mapped.pitch) as usize), (w * 4) as usize);
+            let row = std::slice::from_raw_parts(
+                mapped.bits.add((y * mapped.pitch) as usize),
+                (w * 4) as usize,
+            );
             for [b, g, r, _] in row.as_chunks::<4>().0 {
                 rgba.extend_from_slice(&[*r, *g, *b, 255]);
             }
@@ -158,13 +192,19 @@ fn run_tool(
         let image = kadr_render::annotations::flatten(&gpu, &shared, &frames, crop, &shapes)?;
         let export = std::path::Path::new(path).with_file_name(format!(
             "{}-export.png",
-            std::path::Path::new(path).file_stem().unwrap().to_string_lossy()
+            std::path::Path::new(path)
+                .file_stem()
+                .unwrap()
+                .to_string_lossy()
         ));
         std::fs::write(export, kadr_doc::pixels::encode_png(&image)?)?;
         let pin = crate::pin_window::preview(&image, scale)?;
         let pin_path = std::path::Path::new(path).with_file_name(format!(
             "{}-pin.png",
-            std::path::Path::new(path).file_stem().unwrap().to_string_lossy()
+            std::path::Path::new(path)
+                .file_stem()
+                .unwrap()
+                .to_string_lossy()
         ));
         std::fs::write(pin_path, kadr_doc::pixels::encode_png(&pin)?)?;
     }
@@ -262,7 +302,11 @@ fn sample_shapes(scale: f32) -> Vec<kadr_doc::annotation::Annotation> {
         s.points[1] = b;
         s.text = "Здесь важная деталь".into();
         s.seed = 42;
-        s.number = 1 + shapes.iter().filter(|x: &&Annotation| x.tool == Tool::Counter).count() as u32 * u32::from(tool == Tool::Counter);
+        s.number = 1 + shapes
+            .iter()
+            .filter(|x: &&Annotation| x.tool == Tool::Counter)
+            .count() as u32
+            * u32::from(tool == Tool::Counter);
         shapes.push(s.transformed(
             Rect::new(0, 0, 1600, 900),
             Rect::new(0, 0, (1600.0 * scale) as i32, (900.0 * scale) as i32),
@@ -310,7 +354,12 @@ fn background(w: u32, h: u32) -> Vec<u8> {
             } else {
                 BANDS[(x * 5 / w) as usize]
             };
-            pixels.extend_from_slice(&[(c & 0xff) as u8, ((c >> 8) & 0xff) as u8, ((c >> 16) & 0xff) as u8, 255]);
+            pixels.extend_from_slice(&[
+                (c & 0xff) as u8,
+                ((c >> 8) & 0xff) as u8,
+                ((c >> 16) & 0xff) as u8,
+                255,
+            ]);
         }
     }
     pixels

@@ -32,6 +32,8 @@ mod settings_window;
 mod snapshot;
 mod thumbnail;
 mod translate;
+mod translate_local;
+mod capture_audit;
 mod viewer;
 
 use std::error::Error;
@@ -51,6 +53,12 @@ fn main() {
         if let Err(e) = motion_bench::run(args.get(i + 1).map_or("motion-bench.txt", String::as_str)) {
             kadr_win::log_warn!("motion benchmark: {e}");
             std::process::exit(1);
+        }
+        return;
+    }
+    if let Some(i)=flag("--capture-audit") {
+        if let Err(error)=capture_audit::run(args.get(i+1).map_or("capture-audit",String::as_str)) {
+            kadr_win::log_warn!("диагностика захвата: {error}");std::process::exit(1);
         }
         return;
     }

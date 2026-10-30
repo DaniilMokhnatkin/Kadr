@@ -12,6 +12,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SPI_GETHIGHCONTRAST, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
 };
 
+static MARCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn set_marching_ants(enabled: bool) { MARCHING.store(enabled, std::sync::atomic::Ordering::Relaxed); }
+pub fn marching_ants() -> bool { MARCHING.load(std::sync::atomic::Ordering::Relaxed) }
+
 #[derive(Clone, Copy)]
 pub struct Theme {
     /// Затемнение замороженного экрана вне выделения.

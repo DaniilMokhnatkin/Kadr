@@ -33,10 +33,16 @@ struct Engine {
 pub fn folder() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let near = exe.parent()?.join("ocr");
-    let dev = exe.ancestors().skip(2).take(3).map(|a| a.join("third_party").join("ocr"));
-    std::iter::once(near)
-        .chain(dev)
-        .find(|d| ["det.onnx", "rec.onnx", "dict.txt", "onnxruntime.dll"].iter().all(|f| d.join(f).is_file()))
+    let dev = exe
+        .ancestors()
+        .skip(2)
+        .take(3)
+        .map(|a| a.join("third_party").join("ocr"));
+    std::iter::once(near).chain(dev).find(|d| {
+        ["det.onnx", "rec.onnx", "dict.txt", "onnxruntime.dll"]
+            .iter()
+            .all(|f| d.join(f).is_file())
+    })
 }
 
 pub fn available() -> bool {
@@ -45,7 +51,10 @@ pub fn available() -> bool {
 
 fn engine() -> Result<&'static Mutex<Engine>, String> {
     static ENGINE: OnceLock<Result<Mutex<Engine>, String>> = OnceLock::new();
-    ENGINE.get_or_init(|| load().map(Mutex::new)).as_ref().map_err(Clone::clone)
+    ENGINE
+        .get_or_init(|| load().map(Mutex::new))
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
 fn load() -> Result<Engine, String> {
@@ -55,12 +64,21 @@ fn load() -> Result<Engine, String> {
         .with_name("kadr-ocr")
         .build()
         .map_err(|e| format!("ONNX Runtime: {e}"))?;
-    let threads = std::thread::available_parallelism().map_or(2, |n| n.get().clamp(1, 4));
+    // Run inference on the low-priority caller. Dedicated pools in both sessions otherwise
+    // compete with animation, including spin-waiting while the other session is active.
+    let threads = 1;
     let session = |file: &str| -> Result<Session, String> {
         let builder = Session::builder(&env).map_err(|e| e.to_string())?;
-        let builder = builder.with_optimization_level(GraphOptimizationLevel::Level3).map_err(|e| e.to_string())?;
-        let mut builder = builder.with_intra_threads(threads).map_err(|e| e.to_string())?;
-        builder.commit_from_file(dir.join(file)).map_err(|e| format!("{file}: {e}"))
+        let builder = builder
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| e.to_string())?;
+        let builder = builder.with_intra_threads(threads).map_err(|e| e.to_string())?;
+        let builder = builder.with_inter_threads(1).map_err(|e| e.to_string())?;
+        let builder = builder.with_intra_op_spinning(false).map_err(|e| e.to_string())?;
+        let mut builder = builder.with_inter_op_spinning(false).map_err(|e| e.to_string())?;
+        builder
+            .commit_from_file(dir.join(file))
+            .map_err(|e| format!("{file}: {e}"))
     };
     let det = session("det.onnx")?;
     let rec = session("rec.onnx")?;
@@ -90,6 +108,32 @@ pub fn recognize(image: &Image) -> Result<Vec<Line>, String> {
     Ok(lines)
 }
 
+/// Detect text bounds without reading every character. Full censor does not need recognition.
+pub fn regions(image: &Image) -> Result<Vec<Rect>, String> {
+    let mut engine=engine()?.lock().map_err(|_| "PaddleOCR занят".to_string())?;
+    if image.width()<4 || image.height()<4 {return Ok(Vec::new());}
+    let mut result=Vec::new();
+    // Native-size overlapping tiles keep small text legible to the detector on large displays.
+    let tile=1600i32; let step=tile-128;
+    let mut top=image.rect.top;
+    while top<image.rect.bottom {
+        let mut left=image.rect.left;
+        while left<image.rect.right {
+            let area=Rect::new(left,top,(left+tile).min(image.rect.right),(top+tile).min(image.rect.bottom));
+            let patch=Image::compose([image],area);
+            for (l,t,r,b) in detect(&mut engine,&patch)? {
+                let pad=((b-t)*0.15).ceil().max(3.0) as i32;
+                let rect=Rect::new(area.left+l.floor() as i32-pad,area.top+t.floor() as i32-pad,area.left+r.ceil() as i32+pad,area.top+b.ceil() as i32+pad);
+                if let Some(rect)=rect.intersect(&image.rect) { result.push(rect); }
+            }
+            if area.right==image.rect.right {break;} left+=step;
+        }
+        if top+tile>=image.rect.bottom {break;} top+=step;
+    }
+    result.sort_by_key(|r|(r.top/8,r.left)); result.dedup();
+    Ok(result)
+}
+
 /// The pixel at (x, y) as B, G, R in 0..=255.
 fn bgr(image: &Image, x: usize, y: usize) -> [f32; 3] {
     let i = (y * image.width() as usize + x) * 4;
@@ -105,7 +149,12 @@ fn sample(image: &Image, x: f32, y: f32) -> [f32; 3] {
     let (x0, y0) = (x.floor() as usize, y.floor() as usize);
     let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
     let (fx, fy) = (x - x0 as f32, y - y0 as f32);
-    let (a, b, c, d) = (bgr(image, x0, y0), bgr(image, x1, y0), bgr(image, x0, y1), bgr(image, x1, y1));
+    let (a, b, c, d) = (
+        bgr(image, x0, y0),
+        bgr(image, x1, y0),
+        bgr(image, x0, y1),
+        bgr(image, x1, y1),
+    );
     let mut out = [0.0; 3];
     for k in 0..3 {
         let top = a[k] + (b[k] - a[k]) * fx;
@@ -129,22 +178,41 @@ fn detect(engine: &mut Engine, image: &Image) -> Result<Vec<PixelBox>, String> {
     let mut input = vec![0f32; 3 * dw * dh];
     for y in 0..dh {
         for x in 0..dw {
-            let p = sample(image, (x as f32 + 0.5) * sx - 0.5, (y as f32 + 0.5) * sy - 0.5);
+            let p = sample(
+                image,
+                (x as f32 + 0.5) * sx - 0.5,
+                (y as f32 + 0.5) * sy - 0.5,
+            );
             for c in 0..3 {
                 input[c * dw * dh + y * dw + x] = (p[c] / 255.0 - mean[c]) / std[c];
             }
         }
     }
     let tensor = Tensor::from_array(([1usize, 3, dh, dw], input)).map_err(|e| e.to_string())?;
-    let outputs = engine.det.run(ort::inputs![tensor]).map_err(|e| format!("поиск строк: {e}"))?;
-    let (shape, prob) = outputs[0].try_extract_tensor::<f32>().map_err(|e| e.to_string())?;
-    let (mh, mw) = (shape[shape.len() - 2] as usize, shape[shape.len() - 1] as usize);
+    let outputs = engine
+        .det
+        .run(ort::inputs![tensor])
+        .map_err(|e| format!("поиск строк: {e}"))?;
+    let (shape, prob) = outputs[0]
+        .try_extract_tensor::<f32>()
+        .map_err(|e| e.to_string())?;
+    let (mh, mw) = (
+        shape[shape.len() - 2] as usize,
+        shape[shape.len() - 1] as usize,
+    );
     let boxes = boxes_from_map(prob, mw, mh);
     // Back to image pixels.
     let (bx, by) = (w / mw as f32, h / mh as f32);
     Ok(boxes
         .into_iter()
-        .map(|(l, t, r, b)| ((l * bx).max(0.0), (t * by).max(0.0), (r * bx).min(w), (b * by).min(h)))
+        .map(|(l, t, r, b)| {
+            (
+                (l * bx).max(0.0),
+                (t * by).max(0.0),
+                (r * bx).min(w),
+                (b * by).min(h),
+            )
+        })
         .collect())
 }
 
@@ -200,12 +268,21 @@ pub fn boxes_from_map(prob: &[f32], w: usize, h: usize) -> Vec<PixelBox> {
             continue;
         }
         let d = bw * bh * UNCLIP / (2.0 * (bw + bh));
-        out.push((l as f32 - d, t as f32 - d, r as f32 + 1.0 + d, b as f32 + 1.0 + d));
+        out.push((
+            l as f32 - d,
+            t as f32 - d,
+            r as f32 + 1.0 + d,
+            b as f32 + 1.0 + d,
+        ));
     }
     out
 }
 
-fn read(engine: &mut Engine, image: &Image, (l, t, r, b): PixelBox) -> Result<Option<Line>, String> {
+fn read(
+    engine: &mut Engine,
+    image: &Image,
+    (l, t, r, b): PixelBox,
+) -> Result<Option<Line>, String> {
     let (cw, ch) = (r - l, b - t);
     if cw < 2.0 || ch < 2.0 {
         return Ok(None);
@@ -217,15 +294,25 @@ fn read(engine: &mut Engine, image: &Image, (l, t, r, b): PixelBox) -> Result<Op
     let (sx, sy) = (cw / resized as f32, ch / REC_HEIGHT as f32);
     for y in 0..REC_HEIGHT {
         for x in 0..resized {
-            let p = sample(image, l + (x as f32 + 0.5) * sx - 0.5, t + (y as f32 + 0.5) * sy - 0.5);
+            let p = sample(
+                image,
+                l + (x as f32 + 0.5) * sx - 0.5,
+                t + (y as f32 + 0.5) * sy - 0.5,
+            );
             for c in 0..3 {
                 input[c * REC_HEIGHT * width + y * width + x] = (p[c] / 255.0 - 0.5) / 0.5;
             }
         }
     }
-    let tensor = Tensor::from_array(([1usize, 3, REC_HEIGHT, width], input)).map_err(|e| e.to_string())?;
-    let outputs = engine.rec.run(ort::inputs![tensor]).map_err(|e| format!("чтение строки: {e}"))?;
-    let (shape, probs) = outputs[0].try_extract_tensor::<f32>().map_err(|e| e.to_string())?;
+    let tensor =
+        Tensor::from_array(([1usize, 3, REC_HEIGHT, width], input)).map_err(|e| e.to_string())?;
+    let outputs = engine
+        .rec
+        .run(ort::inputs![tensor])
+        .map_err(|e| format!("чтение строки: {e}"))?;
+    let (shape, probs) = outputs[0]
+        .try_extract_tensor::<f32>()
+        .map_err(|e| e.to_string())?;
     let (steps, classes) = (shape[1] as usize, shape[2] as usize);
     let decoded = decode(probs, steps, classes, &engine.chars);
     if decoded.text.trim().is_empty() || decoded.confidence < 0.5 {
@@ -244,10 +331,23 @@ fn read(engine: &mut Engine, image: &Image, (l, t, r, b): PixelBox) -> Result<Op
     };
     let words = words(&decoded)
         .into_iter()
-        .map(|(word, first, last)| (one_script(&word), to_rect(first as f32 * step_w, ((last + 1) as f32 * step_w).min(cw))))
+        .map(|(word, first, last)| {
+            (
+                one_script(&word),
+                to_rect(first as f32 * step_w, ((last + 1) as f32 * step_w).min(cw)),
+            )
+        })
         .collect::<Vec<_>>();
-    let text = words.iter().map(|(w, _)| w.as_str()).collect::<Vec<_>>().join(" ");
-    Ok(Some(Line { text, rect: to_rect(0.0, cw), words }))
+    let text = words
+        .iter()
+        .map(|(w, _)| w.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    Ok(Some(Line {
+        text,
+        rect: to_rect(0.0, cw),
+        words,
+    }))
 }
 
 pub struct Decoded {
@@ -264,7 +364,11 @@ pub fn decode(probs: &[f32], steps: usize, classes: usize, chars: &[String]) -> 
     let mut previous = 0usize;
     for s in 0..steps {
         let row = &probs[s * classes..(s + 1) * classes];
-        let (best, p) = row.iter().enumerate().fold((0, f32::MIN), |acc, (i, &v)| if v > acc.1 { (i, v) } else { acc });
+        let (best, p) =
+            row.iter().enumerate().fold(
+                (0, f32::MIN),
+                |acc, (i, &v)| if v > acc.1 { (i, v) } else { acc },
+            );
         if best != 0
             && best != previous
             && let Some(c) = chars.get(best).and_then(|c| c.chars().next())
@@ -274,15 +378,47 @@ pub fn decode(probs: &[f32], steps: usize, classes: usize, chars: &[String]) -> 
         }
         previous = best;
     }
-    let confidence = if scores.is_empty() { 0.0 } else { scores.iter().sum::<f32>() / scores.len() as f32 };
-    Decoded { text: out.iter().map(|(c, _)| c).collect(), chars: out, confidence }
+    let confidence = if scores.is_empty() {
+        0.0
+    } else {
+        scores.iter().sum::<f32>() / scores.len() as f32
+    };
+    Decoded {
+        text: out.iter().map(|(c, _)| c).collect(),
+        chars: out,
+        confidence,
+    }
 }
 
 /// Latin and Cyrillic letters that look alike, the pairs the recogniser confuses.
 const TWINS: [(char, char); 27] = [
-    ('a', 'а'), ('b', 'Ь'), ('c', 'с'), ('e', 'е'), ('i', 'і'), ('j', 'ј'), ('k', 'к'), ('m', 'м'), ('o', 'о'), ('p', 'р'),
-    ('r', 'г'), ('s', 'ѕ'), ('t', 'т'), ('x', 'х'), ('y', 'у'), ('A', 'А'), ('B', 'В'), ('C', 'С'), ('E', 'Е'), ('H', 'Н'),
-    ('K', 'К'), ('M', 'М'), ('O', 'О'), ('P', 'Р'), ('T', 'Т'), ('X', 'Х'), ('Y', 'У'),
+    ('a', 'а'),
+    ('b', 'Ь'),
+    ('c', 'с'),
+    ('e', 'е'),
+    ('i', 'і'),
+    ('j', 'ј'),
+    ('k', 'к'),
+    ('m', 'м'),
+    ('o', 'о'),
+    ('p', 'р'),
+    ('r', 'г'),
+    ('s', 'ѕ'),
+    ('t', 'т'),
+    ('x', 'х'),
+    ('y', 'у'),
+    ('A', 'А'),
+    ('B', 'В'),
+    ('C', 'С'),
+    ('E', 'Е'),
+    ('H', 'Н'),
+    ('K', 'К'),
+    ('M', 'М'),
+    ('O', 'О'),
+    ('P', 'Р'),
+    ('T', 'Т'),
+    ('X', 'Х'),
+    ('Y', 'У'),
 ];
 
 fn cyrillic(c: char) -> bool {
@@ -298,8 +434,17 @@ pub fn one_script(word: &str) -> String {
         return word.to_string();
     }
     let digits = word.chars().any(|c| c.is_ascii_digit());
-    let technical = word.contains('@') || word.contains('_') || word.contains("://") || (digits && (latin + cyr) >= 2);
-    let to_latin = if technical { true } else if latin == 0 || cyr == 0 { return word.to_string() } else { latin >= cyr };
+    let technical = word.contains('@')
+        || word.contains('_')
+        || word.contains("://")
+        || (digits && (latin + cyr) >= 2);
+    let to_latin = if technical {
+        true
+    } else if latin == 0 || cyr == 0 {
+        return word.to_string();
+    } else {
+        latin >= cyr
+    };
     word.chars()
         .map(|c| {
             TWINS
@@ -346,7 +491,10 @@ mod tests {
         }
         let d = decode(&probs, pick.len(), classes, &chars);
         assert_eq!(d.text, "ab a");
-        assert_eq!(words(&d), [("ab".to_string(), 0, 3), ("a".to_string(), 6, 6)]);
+        assert_eq!(
+            words(&d),
+            [("ab".to_string(), 0, 3), ("a".to_string(), 6, 6)]
+        );
         assert!((d.confidence - 0.9).abs() < 1e-5);
     }
     #[test]
@@ -367,7 +515,10 @@ mod tests {
     #[test]
     fn a_word_keeps_one_script() {
         assert_eq!(one_script("gmail.cоm"), "gmail.com");
-        assert_eq!(one_script("daniil.petrov@gmail.cоm"), "daniil.petrov@gmail.com");
+        assert_eq!(
+            one_script("daniil.petrov@gmail.cоm"),
+            "daniil.petrov@gmail.com"
+        );
         assert_eq!(one_script("гартог_92"), "raptor_92");
         assert_eq!(one_script("Тeлефон"), "Телефон");
         assert_eq!(one_script("Тeлeфон"), "Телефон");

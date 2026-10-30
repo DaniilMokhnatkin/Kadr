@@ -73,6 +73,11 @@ fn taps(len: usize, cells: usize, k: usize, offset: usize) -> Vec<([usize; 4], [
 }
 
 pub fn blur_patch(source: &Image, shape: &Annotation) -> Image {
+    blur_patch_masked(source, shape).0
+}
+
+/// Result plus its outward feather mask, so overlapping patches never restore source pixels.
+pub fn blur_patch_masked(source: &Image, shape: &Annotation) -> (Image, Vec<f32>) {
     let k = block(shape);
     let w = source.width() as usize;
     let h = source.height() as usize;
@@ -143,29 +148,33 @@ pub fn blur_patch(source: &Image, shape: &Annotation) -> Image {
         }
     };
 
+    let spotlight = shape.tool == Tool::Spotlight;
+    let mask: Vec<f32> = (0..h).flat_map(|y| {
+        let outside=&outside;
+        (0..w).map(move |x| {
+            let t=(outside(x,y)/f).clamp(0.0,1.0);
+            let alpha=1.0-t*t*(3.0-2.0*t);
+            if spotlight {1.0-alpha} else {alpha}
+        })
+    }).collect();
+
     // 4. Blend with saturation lift and grain. Rows are independent, so they spread over all cores;
     //    the grain is a hash of the pixel position, identical however the rows are split.
     let mut out = source.clone();
     let row_bytes = w * 4;
     // Small patches stay on one thread: starting workers costs more than they save.
-    let threads = if w * h < 250_000 { 1 } else { std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 8) };
+    let threads = if w * h < 250_000 { 1 } else { std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 2) };
     let band = h.div_ceil(threads).max(16);
-    let spotlight = shape.tool == Tool::Spotlight;
     std::thread::scope(|scope| {
         for (n, chunk) in out.bgra.chunks_mut(row_bytes * band).enumerate() {
-            let (rows, ys, outside) = (&rows, &ys, &outside);
+            let (rows, ys, mask) = (&rows, &ys, &mask);
             scope.spawn(move || {
                 for (dy, line) in chunk.chunks_mut(row_bytes).enumerate() {
                     let y = n * band + dy;
                     let (i, wt) = &ys[y];
                     let taps = i.map(|k| &rows[k * w..k * w + w]);
                     for x in 0..w {
-                        let t = (outside(x, y) / f).clamp(0.0, 1.0);
-                        let mut alpha = 1.0 - t * t * (3.0 - 2.0 * t);
-                        if spotlight {
-                            // Everything except the rectangle is blurred; its own edge stays crisp inside.
-                            alpha = 1.0 - alpha;
-                        }
+                        let alpha=mask[y*w+x];
                         if alpha <= 0.0 {
                             continue;
                         }
@@ -188,7 +197,7 @@ pub fn blur_patch(source: &Image, shape: &Annotation) -> Image {
             });
         }
     });
-    out
+    (out, mask)
 }
 
 /// Triangular grain in [-1, 1] from the pixel index: SplitMix64 of the seed and position.

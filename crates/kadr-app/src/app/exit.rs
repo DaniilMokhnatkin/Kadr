@@ -60,8 +60,6 @@ impl App {
         let Some(exit) = &self.exit else { return };
         if exit.started.elapsed().as_secs_f64() >= DURATION {
             self.finish_exit();
-        } else {
-            self.request_redraw();
         }
     }
 

@@ -14,7 +14,16 @@ pub struct Config {
     pub recent: Recent,
     pub appearance: Appearance,
     pub recognition: Recognition,
+    pub translation: Translation,
 }
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all="lowercase")]
+pub enum TranslationEngine { #[default] Auto, Offline, Google }
+impl TranslationEngine {pub fn name(self)->&'static str {match self {Self::Auto=>"auto",Self::Offline=>"offline",Self::Google=>"google"}}}
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Translation {pub engine:TranslationEngine}
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -64,6 +73,7 @@ impl Theme {
 #[serde(default)]
 pub struct Appearance {
     pub theme: Theme,
+    pub marching_ants: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -80,6 +90,8 @@ pub struct Hotkeys {
 #[serde(default)]
 pub struct Capture {
     pub warm: bool,
+    /// The zoomed patch with the pixel's colour beside the cursor while aiming.
+    pub magnifier: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -146,7 +158,7 @@ impl Default for Hotkeys {
 
 impl Default for Capture {
     fn default() -> Self {
-        Self { warm: true }
+        Self { warm: true, magnifier: true }
     }
 }
 
@@ -169,6 +181,7 @@ recent      = "Ctrl+Alt+PrintScreen"    # вернуть несохранённ�
 
 [capture]
 warm = true   # держать захват наготове: ~8 мс вместо ~23 мс
+magnifier = true  # лупа с цветом пикселя у курсора, пока выбираете область
 
 [save]
 folder = ""     # пусто — «Изображения\Screenshots»
@@ -181,9 +194,13 @@ max = 10        # от 1 до 10; старые записи вытесняютс
 
 [appearance]
 theme = "auto"  # auto — как в Windows, light — светлая, dark — тёмная
+marching_ants = false # бегущий пунктир рамки и выбранных объектов
 
 [recognition]
 engine = "auto"  # auto — как выбрано при установке, windows — встроенное в Windows, paddle — PaddleOCR
+
+[translation]
+engine = "auto"  # auto — офлайн при наличии моделей, offline — только локально, google — онлайн
 "#;
 
 /// The file as the settings window writes it: the template's layout and comments with these values.
@@ -209,8 +226,8 @@ pub fn render(c: &Config) -> String {
     out.push_str(&key("last_region", &h.last_region, "та же область, что в прошлый раз"));
     out.push_str(&key("recent", &h.recent, "вернуть несохранённый снимок"));
     out.push_str(&format!(
-        "\n[capture]\nwarm = {:<7}# держать захват наготове: ~8 мс вместо ~23 мс\n",
-        c.capture.warm
+        "\n[capture]\nwarm = {:<7}# держать захват наготове: ~8 мс вместо ~23 мс\nmagnifier = {:<6}# лупа с цветом пикселя у курсора, пока выбираете область\n",
+        c.capture.warm, c.capture.magnifier
     ));
     out.push_str(&format!(
         "\n[save]\nfolder = {:<7}# пусто — «Изображения\\Screenshots»\nnotify = {:<7}# уведомление после сохранения\nthumbnail = {:<6}# миниатюра в углу: перетащите в чат, клик — открыть\n",
@@ -226,10 +243,12 @@ pub fn render(c: &Config) -> String {
         "\n[appearance]\ntheme = {:<8}# auto — как в Windows, light — светлая, dark — тёмная\n",
         basic(c.appearance.theme.name())
     ));
+    out.push_str(&format!("marching_ants = {} # бегущий пунктир рамки и выбранных объектов\n", c.appearance.marching_ants));
     out.push_str(&format!(
         "\n[recognition]\nengine = {:<8}# auto — как выбрано при установке, windows — встроенное в Windows, paddle — PaddleOCR\n",
         basic(c.recognition.engine.name())
     ));
+    out.push_str(&format!("\n[translation]\nengine = {:<8}# auto — офлайн при наличии моделей, offline — только локально, google — онлайн\n",basic(c.translation.engine.name())));
     out
 }
 
