@@ -137,6 +137,8 @@ pub struct Save {
     pub notify: bool,
     /// Floating thumbnail in the corner after a capture.
     pub thumbnail: bool,
+    /// The thumbnail after «Копировать» too; off — only after saving.
+    pub thumbnail_on_copy: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -208,7 +210,7 @@ impl Default for Capture {
 
 impl Default for Save {
     fn default() -> Self {
-        Self { folder: String::new(), notify: true, thumbnail: true }
+        Self { folder: String::new(), notify: true, thumbnail: true, thumbnail_on_copy: true }
     }
 }
 
@@ -233,6 +235,7 @@ video = "mp4"   # запись экрана: mp4 — со звуком, gif — 
 folder = ""     # пусто — «Изображения\Screenshots»
 notify = true   # уведомление после сохранения
 thumbnail = true  # миниатюра в углу: перетащите в чат, клик — открыть
+thumbnail_on_copy = true # миниатюра и после копирования в буфер; false — только после сохранения
 
 [recent]
 enabled = true  # сохранять несохранённые снимки зашифрованно
@@ -276,10 +279,11 @@ pub fn render(c: &Config) -> String {
         c.capture.warm, c.capture.magnifier, c.capture.auto_censor, basic(c.capture.video.name())
     ));
     out.push_str(&format!(
-        "\n[save]\nfolder = {:<7}# пусто — «Изображения\\Screenshots»\nnotify = {:<7}# уведомление после сохранения\nthumbnail = {:<6}# миниатюра в углу: перетащите в чат, клик — открыть\n",
+        "\n[save]\nfolder = {:<7}# пусто — «Изображения\\Screenshots»\nnotify = {:<7}# уведомление после сохранения\nthumbnail = {:<6}# миниатюра в углу: перетащите в чат, клик — открыть\nthumbnail_on_copy = {:<5}# миниатюра и после копирования в буфер; false — только после сохранения\n",
         quoted(&c.save.folder),
         c.save.notify,
-        c.save.thumbnail
+        c.save.thumbnail,
+        c.save.thumbnail_on_copy
     ));
     out.push_str(&format!(
         "\n[recent]\nenabled = {:<6}# сохранять несохранённые снимки зашифрованно\nmax = {:<10}# от 1 до 25; старые записи вытесняются\n",

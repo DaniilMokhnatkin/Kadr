@@ -1121,8 +1121,9 @@ impl App {
     }
 
     /// Shows the corner thumbnail now, or once the overlay has finished leaving.
+    /// No `path`: only copied — shown then unless «Миниатюра и после копирования» is off.
     fn offer_thumbnail(&mut self, image: Arc<Image>, path: Option<PathBuf>, anchor: (i32, i32)) {
-        if !self.config.save.thumbnail || self.bench_mode {
+        if !self.config.save.thumbnail || self.bench_mode || (path.is_none() && !self.config.save.thumbnail_on_copy) {
             return;
         }
         let shot = crate::thumbnail::Shot { image, path, anchor };

@@ -45,18 +45,20 @@ const ROW: f32 = 46.0;
 const SECTION: f32 = 34.0;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
-const TOGGLES: [&str; 7] = [
+const TOGGLES: [&str; 8] = [
     "Запускать вместе с Windows",
     "Миниатюра после снимка",
+    "Миниатюра и после копирования",
     "Лупа у курсора",
     "Скрывать данные при копировании",
     "Бегущий пунктир",
     "Помнить несохранённые снимки",
     "Мгновенный захват",
 ];
-const TOGGLE_HINTS: [&str; 7] = [
+const TOGGLE_HINTS: [&str; 8] = [
     "",
     "Перетащите её в чат или нажмите, чтобы открыть",
+    "Выключите — появится только после «Сохранить»",
     "Увеличение и цвет пикселя, пока выбираете область",
     "Почты, телефоны и карты размываются сами",
     "Рамка выделения и выбранные объекты",
@@ -90,7 +92,7 @@ enum Hit {
 
 struct Layout {
     close: D2D_RECT_F,
-    toggles: [D2D_RECT_F; 7],
+    toggles: [D2D_RECT_F; 8],
     choices: [D2D_RECT_F; 4],
     folder: D2D_RECT_F,
     folder_button: D2D_RECT_F,
@@ -137,7 +139,7 @@ fn layout(width: f32, s: f32) -> Layout {
         *y += 18.0 * s;
         out
     };
-    let toggles: [D2D_RECT_F; 7] = rows(7, 0, &mut y).try_into().unwrap();
+    let toggles: [D2D_RECT_F; 8] = rows(8, 0, &mut y).try_into().unwrap();
     let choices: [D2D_RECT_F; 4] = rows(4, 1, &mut y).try_into().unwrap();
     let folder = rows(1, 2, &mut y)[0];
     let keys: [D2D_RECT_F; 5] = rows(5, 3, &mut y).try_into().unwrap();
@@ -244,10 +246,11 @@ fn toggle_value(c: &Config, i: usize, auto: bool) -> bool {
     match i {
         0 => auto,
         1 => c.save.thumbnail,
-        2 => c.capture.magnifier,
-        3 => c.capture.auto_censor,
-        4 => c.appearance.marching_ants,
-        5 => c.recent.enabled,
+        2 => c.save.thumbnail_on_copy,
+        3 => c.capture.magnifier,
+        4 => c.capture.auto_censor,
+        5 => c.appearance.marching_ants,
+        6 => c.recent.enabled,
         _ => c.capture.warm,
     }
 }
@@ -336,7 +339,7 @@ struct State {
     auto: bool,
     scale: f32,
     epoch: Instant,
-    knobs: [Spring; 7],
+    knobs: [Spring; 8],
     /// Where each segmented control's highlight sits (choice index, gliding).
     slides: [Spring; 4],
     hover: Option<Hit>,
@@ -553,7 +556,7 @@ pub fn show(instance: HINSTANCE, host: HWND, message: u32, config: &Config) {
                 auto: false,
                 scale: 1.0,
                 epoch: Instant::now(),
-                knobs: [knob(), knob(), knob(), knob(), knob(), knob(), knob()],
+                knobs: [knob(), knob(), knob(), knob(), knob(), knob(), knob(), knob()],
                 slides: [knob(), knob(), knob(), knob()],
                 hover: None,
                 glow: Vec::new(),
@@ -1023,10 +1026,11 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     Some(Hit::Toggle(i)) => {
                         match i {
                             1 => st.config.save.thumbnail ^= true,
-                            2 => st.config.capture.magnifier ^= true,
-                            3 => st.config.capture.auto_censor ^= true,
-                            4 => st.config.appearance.marching_ants ^= true,
-                            5 => st.config.recent.enabled ^= true,
+                            2 => st.config.save.thumbnail_on_copy ^= true,
+                            3 => st.config.capture.magnifier ^= true,
+                            4 => st.config.capture.auto_censor ^= true,
+                            5 => st.config.appearance.marching_ants ^= true,
+                            6 => st.config.recent.enabled ^= true,
                             _ => st.config.capture.warm ^= true,
                         }
                         st.sync_knobs(false);
@@ -1213,7 +1217,7 @@ pub fn preview(scale: f32) -> windows::core::Result<kadr_doc::Image> {
         device: Device::new("settings-preview").ok(),
         surface: None,
         fonts: None,
-        knobs: [knob(true), knob(true), knob(true), knob(false), knob(false), knob(true), knob(false)],
+        knobs: [knob(true), knob(true), knob(true), knob(true), knob(false), knob(false), knob(true), knob(false)],
         slides: [
             Spring::with(0.0, Curve::GLIDE),
             Spring::with(2.0, Curve::GLIDE),
