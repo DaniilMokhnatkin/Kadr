@@ -201,7 +201,7 @@ pub fn design_set(dir: &str) -> Result<(), Box<dyn Error>> {
         }
         for (name, n, loading, error) in [
             ("recent", 6, false, None),
-            ("recent-full", 10, false, None),
+            ("recent-full", 25, false, None),
             ("recent-empty", 0, false, None),
             ("recent-loading", 0, true, None),
             ("recent-error", 0, false, Some("Не удалось прочитать снимки. Откройте «Недавние» ещё раз.".into())),

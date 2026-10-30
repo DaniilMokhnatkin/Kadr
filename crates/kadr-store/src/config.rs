@@ -147,7 +147,7 @@ pub struct Recent {
 }
 impl Default for Recent {
     fn default() -> Self {
-        Self { enabled: true, max: 10 }
+        Self { enabled: true, max: 25 }
     }
 }
 
@@ -155,8 +155,8 @@ impl Config {
     /// Проверяем весь набор до замены действующих настроек и регистрации клавиш.
     pub fn parse(text: &str) -> Result<Self, String> {
         let config: Self = toml::from_str(text).map_err(|e| e.to_string())?;
-        if !(1..=10).contains(&config.recent.max) {
-            return Err("recent.max должен быть от 1 до 10".into());
+        if !(1..=25).contains(&config.recent.max) {
+            return Err("recent.max должен быть от 1 до 25".into());
         }
         // Относительный путь считался бы от текущей папки процесса, а при автозапуске она случайна.
         let folder = config.save.folder.trim();
@@ -236,7 +236,7 @@ thumbnail = true  # миниатюра в углу: перетащите в ча
 
 [recent]
 enabled = true  # сохранять несохранённые снимки зашифрованно
-max = 10        # от 1 до 10; старые записи вытесняются
+max = 25        # от 1 до 25; старые записи вытесняются
 
 [appearance]
 theme = "auto"  # auto — как в Windows, light — светлая, dark — тёмная
@@ -282,7 +282,7 @@ pub fn render(c: &Config) -> String {
         c.save.thumbnail
     ));
     out.push_str(&format!(
-        "\n[recent]\nenabled = {:<6}# сохранять несохранённые снимки зашифрованно\nmax = {:<10}# от 1 до 10; старые записи вытесняются\n",
+        "\n[recent]\nenabled = {:<6}# сохранять несохранённые снимки зашифрованно\nmax = {:<10}# от 1 до 25; старые записи вытесняются\n",
         c.recent.enabled, c.recent.max
     ));
     out.push_str(&format!(
@@ -321,7 +321,14 @@ pub fn path() -> PathBuf {
 pub fn load(path: &Path) -> (Config, Option<String>) {
     match std::fs::read_to_string(path) {
         Ok(text) => match Config::parse(&text) {
-            Ok(config) => (config, None),
+            Ok(mut config) => {
+                // Written when 10 was both the default and the limit: that 10 was never a choice.
+                if config.recent.max == 10 && text.contains("от 1 до 10;") {
+                    config.recent.max = 25;
+                    let _ = save(path, &config);
+                }
+                (config, None)
+            }
             Err(e) => (Config::default(), Some(e.to_string())),
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -344,6 +351,20 @@ mod tests {
     #[test]
     fn template_matches_defaults() {
         assert_eq!(toml::from_str::<Config>(TEMPLATE).unwrap(), Config::default());
+    }
+
+    #[test]
+    fn the_old_default_of_ten_recent_becomes_twenty_five_and_a_chosen_number_stays() {
+        let dir = std::env::temp_dir().join(format!("kadr-config-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let old = TEMPLATE.replace("max = 25        # от 1 до 25;", "max = 10        # от 1 до 10;");
+        std::fs::write(&path, &old).unwrap();
+        assert_eq!(load(&path).0.recent.max, 25);
+        assert!(std::fs::read_to_string(&path).unwrap().contains("max = 25"), "written back");
+        std::fs::write(&path, old.replace("max = 10 ", "max = 7  ")).unwrap();
+        assert_eq!(load(&path).0.recent.max, 7);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

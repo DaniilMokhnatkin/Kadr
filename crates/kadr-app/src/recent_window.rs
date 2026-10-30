@@ -64,8 +64,13 @@ struct Layout {
     cards: Vec<D2D_RECT_F>,
 }
 
-fn columns(width: f32, s: f32) -> usize {
-    if width / s >= 760.0 { 4 } else { 3 }
+/// Five across once there are more than three rows of four: 25 snapshots stay on one screen.
+fn columns(width: f32, s: f32, count: usize) -> usize {
+    match width / s {
+        w if w >= 900.0 && count > 12 => 5,
+        w if w >= 760.0 => 4,
+        _ => 3,
+    }
 }
 
 /// Everything in physical pixels; `s` is the DPI scale.
@@ -76,7 +81,7 @@ fn layout(width: f32, s: f32, count: usize, returning: bool) -> Layout {
     let back = returning.then(|| rect(right - 116.0 * s, y, right, y + h));
     let clear_right = back.map_or(right, |b| b.left - 8.0 * s);
     let clear = rect(clear_right - 112.0 * s, y, clear_right, y + h);
-    let cols = columns(width, s);
+    let cols = columns(width, s, count);
     let tile_w = (width - 2.0 * PAD * s - (cols - 1) as f32 * GAP * s) / cols as f32;
     let tile_h = (tile_w * 0.625).round();
     let cards = (0..count)
@@ -91,7 +96,7 @@ fn layout(width: f32, s: f32, count: usize, returning: bool) -> Layout {
 }
 
 fn desired_height(width: f32, s: f32, count: usize) -> f32 {
-    let cols = columns(width, s);
+    let cols = columns(width, s, count);
     let rows = count.div_ceil(cols).max(1) as f32;
     let tile_w = (width - 2.0 * PAD * s - (cols - 1) as f32 * GAP * s) / cols as f32;
     let tile_h = (tile_w * 0.625).round();
@@ -235,6 +240,8 @@ struct State {
     buttons: [(Spring, Spring); 3],
     confirming: bool,
     danger: Spring,
+    /// How far the grid is scrolled, in pixels, when it is taller than the window.
+    scroll: f32,
 }
 impl State {
     fn now(&self) -> f64 {
@@ -248,7 +255,17 @@ impl State {
         }]
     }
     fn layout(&self, width: f32) -> Layout {
-        layout(width, self.scale, self.cards.len(), self.returning)
+        let mut l = layout(width, self.scale, self.cards.len(), self.returning);
+        for c in &mut l.cards {
+            c.top -= self.scroll;
+            c.bottom -= self.scroll;
+        }
+        l
+    }
+    /// Scrolls by `dy` pixels within what the grid overflows the window by.
+    fn scroll_by(&mut self, dy: f32, (w, h): (f32, f32)) {
+        let over = (desired_height(w, self.scale, self.cards.len()) - h).max(0.0);
+        self.scroll = (self.scroll + dy).clamp(0.0, over);
     }
     fn set_hover(&mut self, h: Option<Hit>) {
         if self.hover == h {
@@ -329,6 +346,7 @@ fn new_state(hwnd: HWND, host: HWND, message: u32, scale: f32) -> State {
         buttons: [(spring(), spring()), (spring(), spring()), (spring(), spring())],
         confirming: false,
         danger: Spring::with(0.0, Curve::FADE).precise(0.002),
+        scroll: 0.0,
     }
 }
 
@@ -681,6 +699,10 @@ fn paint(ui: &Ui, st: &State, size: (f32, f32), now: f64, opaque: bool) -> bool 
         text(gpu, &ui.fonts.body, "Здесь появятся снимки, которые вы не сохранили", r, theme.text_muted);
     }
     let radius = 12.0 * s;
+    // Scrolled cards slide under the header, not over it.
+    unsafe {
+        ctx.PushAxisAlignedClip(&rect(0.0, TOP * s - 10.0 * s, size.0, size.1), D2D1_ANTIALIAS_MODE_ALIASED);
+    }
     for (i, (card, r)) in st.cards.iter().zip(&l.cards).enumerate() {
         let enter = sample(&card.enter);
         let hover = sample(&card.hover);
@@ -726,10 +748,23 @@ fn paint(ui: &Ui, st: &State, size: (f32, f32), now: f64, opaque: bool) -> bool 
         let [a, b, c, d] = ring.each_ref().map(&mut sample);
         stroke(gpu, theme.accent, rect(a, b, c, d), radius + 4.0 * s, 2.0 * s);
     }
+    unsafe {
+        ctx.PopAxisAlignedClip();
+    }
     moving
 }
 
 fn focus_ring_target(st: &mut State, width: f32) {
+    // The keyboard may walk past the window's edge: bring that card into view first.
+    let height = client_size(st.hwnd).1 as f32;
+    if let Some(r) = st.layout(width).cards.get(st.focus).copied() {
+        let s = st.scale;
+        if r.top < TOP * s {
+            st.scroll_by(r.top - TOP * s, (width, height));
+        } else if r.bottom + LABEL * s > height {
+            st.scroll_by(r.bottom + LABEL * s - height, (width, height));
+        }
+    }
     let l = st.layout(width);
     let Some(r) = l.cards.get(st.focus).map(|r| inflate(*r, 4.0 * st.scale)) else { return };
     let now = st.now();
@@ -886,6 +921,21 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             redraw();
             return LRESULT(0);
         }
+        WM_MOUSEWHEEL => {
+            let notches = ((wp.0 >> 16) as u16 as i16) as f32 / 120.0;
+            let size = client_size(hwnd);
+            DATA.with(|d| {
+                if let Ok(mut guard) = d.try_borrow_mut()
+                    && let Some(st) = guard.as_mut()
+                {
+                    let step = 90.0 * st.scale;
+                    st.scroll_by(-notches * step, (size.0 as f32, size.1 as f32));
+                    st.set_hover(None);
+                }
+            });
+            redraw();
+            return LRESULT(0);
+        }
         WM_TIMER if wp.0 == TIMER_CONFIRM => {
             DATA.with(|d| {
                 if let Ok(mut guard) = d.try_borrow_mut()
@@ -910,7 +960,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 if n == 0 {
                     return None;
                 }
-                let cols = columns(width(), st.scale);
+                let cols = columns(width(), st.scale, st.cards.len());
                 let f = st.focus;
                 if key == VK_RETURN.0 || key == VK_SPACE.0 {
                     return st.cards.get(f).map(|c| c.id.clone());
@@ -1024,6 +1074,11 @@ mod tests {
         assert_eq!(count_label(1), "1 снимок");
         assert_eq!(count_label(3), "3 снимка");
         assert_eq!(count_label(10), "10 снимков");
+        assert_eq!(count_label(25), "25 снимков");
+        // 25 snapshots: five across, five rows.
+        assert_eq!(columns(WIDTH, 1.0, 25), 5);
+        assert_eq!(columns(WIDTH, 1.0, 10), 4);
+        assert!(desired_height(WIDTH, 1.0, 25) < 1000.0);
     }
     #[test]
     fn clear_is_not_clickable_without_snapshots() {
