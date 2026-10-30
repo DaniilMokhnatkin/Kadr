@@ -1,8 +1,8 @@
 //! Recording in progress: a red frame around the area and a small panel under it with a pulsing
 //! dot, the time so far and «Отмена / Стоп». The area itself is a hole in the window, so clicks
 //! and the wheel reach whatever is being recorded; only the panel takes clicks. Nothing is drawn
-//! inside the area, so the frame never ends up in the video.
-use crate::glass::{self, Device, Surface, client_size, fade, fill, inside, mix, rect, shadow, stroke, text};
+//! inside the area for small selections. The control window is excluded from capture.
+use crate::glass::{self, Device, Surface, fade, fill, inside, mix, rect, shadow, stroke, text};
 use kadr_doc::Rect;
 use kadr_render::motion::{Curve, Spring};
 use kadr_render::theme::Theme;
@@ -43,6 +43,7 @@ struct State {
     /// Area in window coordinates, and whether the panel sits above it.
     area: D2D_RECT_F,
     above: bool,
+    panel: D2D_RECT_F,
     /// Time recorded so far; none while the encoder is still starting.
     elapsed: Option<Duration>,
     epoch: Instant,
@@ -59,12 +60,29 @@ pub fn take_request() -> Option<Request> {
     REQUEST.with(|r| r.borrow_mut().take())
 }
 
-fn panel(st: &State, w: f32, h: f32) -> D2D_RECT_F {
-    let s = st.scale;
-    let pw = (PANEL_W * s).min(w);
-    let x = ((st.area.left + st.area.right - pw) / 2.0).clamp(0.0, (w - pw).max(0.0));
-    let y = if st.above { 0.0 } else { h - PANEL_H * s };
-    rect(x, y, x + pw, y + PANEL_H * s)
+/// Screen-space window and panel. If neither outside edge fits, keep the panel inside
+/// the monitor's bottom edge. The recording window is excluded from capture separately.
+fn placement(area: Rect, work: Rect, scale: f32) -> (Rect, Rect, bool) {
+    let edge = (18.0 * scale).ceil() as i32;
+    let gap = ((GAP + MARGIN) * scale).ceil() as i32;
+    let width = ((PANEL_W * scale).ceil() as i32).min((work.width() - 2 * edge).max(1));
+    let height = (PANEL_H * scale).ceil() as i32;
+    let x = (area.left + (area.width() - width) / 2)
+        .clamp(work.left + edge, (work.right - edge - width).max(work.left + edge));
+    let below = area.bottom + gap;
+    let above = area.top - gap - height;
+    let (y, on_top) = if below + height + edge <= work.bottom {
+        (below, false)
+    } else if above - edge >= work.top {
+        (above, true)
+    } else {
+        ((work.bottom - edge - height).max(work.top), false)
+    };
+    let panel = Rect::new(x, y, x + width, y + height);
+    let margin = (MARGIN * scale).ceil() as i32;
+    let window = Rect::new(area.left - margin, area.top - margin, area.right + margin, area.bottom + margin)
+        .union(&Rect::new(panel.left - edge, panel.top - edge, panel.right + edge, panel.bottom + edge));
+    (window, panel, on_top)
 }
 fn buttons(p: D2D_RECT_F, s: f32) -> (D2D_RECT_F, D2D_RECT_F) {
     let done = rect(p.right - 96.0 * s, p.top + 8.0 * s, p.right - 8.0 * s, p.bottom - 8.0 * s);
@@ -112,6 +130,7 @@ pub fn open(instance: HINSTANCE, host: HWND, message: u32, area: Rect) {
                 scale: 1.0,
                 area: rect(0.0, 0.0, 1.0, 1.0),
                 above: false,
+                panel: rect(0.0, 0.0, 1.0, 1.0),
                 elapsed: None,
                 epoch: Instant::now(),
                 appear: spring(Curve::POP),
@@ -123,7 +142,7 @@ pub fn open(instance: HINSTANCE, host: HWND, message: u32, area: Rect) {
     let placed = STATE.with(|s| {
         let Ok(mut state) = s.try_borrow_mut() else { return None };
         let st = state.as_mut()?;
-        let monitor = unsafe { MonitorFromPoint(POINT { x: area.left, y: area.top }, MONITOR_DEFAULTTONEAREST) };
+        let monitor = unsafe { MonitorFromPoint(POINT { x: area.left + area.width()/2, y: area.top + area.height()/2 }, MONITOR_DEFAULTTONEAREST) };
         let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
         let (mut dx, mut dy) = (96u32, 96u32);
         unsafe {
@@ -133,21 +152,14 @@ pub fn open(instance: HINSTANCE, host: HWND, message: u32, area: Rect) {
         st.scale = dx as f32 / 96.0;
         st.fonts = None;
         let s = st.scale;
-        let m = (MARGIN * s) as i32;
-        let extra = ((PANEL_H + GAP) * s) as i32;
-        let below = area.bottom + m + extra <= mi.rcMonitor.bottom;
-        st.above = !below;
-        let (left, right) = (area.left - m, area.right + m);
-        let (top, bottom) =
-            if below { (area.top - m, area.bottom + m + extra) } else { (area.top - m - extra, area.bottom + m) };
-        // The panel may be wider than a narrow area.
-        let panel_w = (PANEL_W * s) as i32;
-        let (left, right) = if right - left < panel_w {
-            let c = (left + right) / 2;
-            (c - panel_w / 2, c + panel_w / 2)
-        } else {
-            (left, right)
-        };
+        let work = if mi.rcWork.right > mi.rcWork.left && mi.rcWork.bottom > mi.rcWork.top {
+            Rect::new(mi.rcWork.left, mi.rcWork.top, mi.rcWork.right, mi.rcWork.bottom)
+        } else { area };
+        let (window, panel, above) = placement(area, work, s);
+        let (left, top, right, bottom) = (window.left, window.top, window.right, window.bottom);
+        st.above = above;
+        st.panel = rect((panel.left-left) as f32, (panel.top-top) as f32,
+            (panel.right-left) as f32, (panel.bottom-top) as f32);
         st.area = rect(
             (area.left - left) as f32,
             (area.top - top) as f32,
@@ -161,9 +173,8 @@ pub fn open(instance: HINSTANCE, host: HWND, message: u32, area: Rect) {
         // Window shape = the frame ring + the panel. HTTRANSPARENT only passes the mouse to windows
         // of this same thread, so the area itself must be a real hole for the wheel to reach the
         // page underneath.
-        let (w, h) = ((right - left) as f32, (bottom - top) as f32);
         let ring = glass::inflate(st.area, MARGIN * s);
-        let pane = glass::inflate(panel(st, w, h), 18.0 * s);
+        let pane = glass::inflate(st.panel, 18.0 * s);
         Some((st.hwnd, left, top, right - left, bottom - top, ring, st.area, pane))
     });
     let Some((hwnd, x, y, w, h, ring, hole, pane)) = placed else { return };
@@ -176,6 +187,10 @@ pub fn open(instance: HINSTANCE, host: HWND, message: u32, area: Rect) {
         CombineRgn(Some(shape), Some(shape), Some(pane), RGN_OR);
         let _ = DeleteObject(hole.into());
         let _ = DeleteObject(pane.into());
+        // Keep controls visible over fullscreen recordings without including them in the video.
+        if let Err(error) = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) {
+            kadr_win::log_warn!("recording controls capture exclusion: {error}");
+        }
         let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
         // The window owns the region from here on.
         SetWindowRgn(hwnd, Some(shape), true);
@@ -246,8 +261,7 @@ fn paint_window(hwnd: HWND) {
         }
         let st = &*st;
         let device = st.device.as_ref().unwrap();
-        let size = client_size(hwnd);
-        let moving = glass::frame(device, st.surface.as_ref().unwrap(), || paint(device, st, size));
+        let moving = glass::frame(device, st.surface.as_ref().unwrap(), || paint(device, st));
         if moving {
             unsafe {
                 let _ = InvalidateRect(Some(hwnd), None, false);
@@ -261,13 +275,12 @@ fn red() -> windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F {
     glass::rgb(0xff3b30, 1.0)
 }
 
-fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
+fn paint(device: &Device, st: &State) -> bool {
     let gpu = &device.gpu;
     let theme = Theme::current();
     let (label_font, button_font) = st.fonts.as_ref().unwrap();
     let now = st.epoch.elapsed().as_secs_f64();
     let s = st.scale;
-    let (w, h) = (size.0 as f32, size.1 as f32);
     let appear = st.appear.value(now);
     // The frame and the dot breathe slowly: the recording is live.
     let breathe = 0.7 + 0.3 * (now as f32 * 2.2).sin();
@@ -286,7 +299,7 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
         fill(gpu, ink, band, 0.0);
     }
     // Panel.
-    let p = panel(st, w, h);
+    let p = st.panel;
     let lift = (1.0 - appear) * 8.0 * s * if st.above { -1.0 } else { 1.0 };
     let p = rect(p.left, p.top + lift, p.right, p.bottom + lift);
     shadow(gpu, p, 14.0 * s, s, 10.0, 4.0, 0.25 * a);
@@ -364,8 +377,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             }
             let on = STATE.with(|s| {
                 s.try_borrow().ok().as_deref().and_then(Option::as_ref).is_some_and(|st| {
-                    let (w, h) = client_size(hwnd);
-                    inside(panel(st, w as f32, h as f32), p.x as f32, p.y as f32)
+                    inside(st.panel, p.x as f32, p.y as f32)
                 })
             });
             return LRESULT(if on { HTCLIENT as isize } else { HTTRANSPARENT as isize });
@@ -376,8 +388,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 if let Ok(mut guard) = s.try_borrow_mut()
                     && let Some(st) = guard.as_mut()
                 {
-                    let (w, h) = client_size(hwnd);
-                    let (cancel, done) = buttons(panel(st, w as f32, h as f32), st.scale);
+                    let (cancel, done) = buttons(st.panel, st.scale);
                     let now = st.epoch.elapsed().as_secs_f64();
                     for (spring, on) in st.hover.iter_mut().zip([inside(cancel, x, y), inside(done, x, y)]) {
                         let curve = if on { Curve::HOVER_IN } else { Curve::HOVER_OUT };
@@ -395,8 +406,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let r = STATE.with(|s| {
                 let Ok(state) = s.try_borrow() else { return Default::default() };
                 let st = state.as_ref()?;
-                let (w, h) = client_size(hwnd);
-                let (cancel, done) = buttons(panel(st, w as f32, h as f32), st.scale);
+                let (cancel, done) = buttons(st.panel, st.scale);
                 if inside(done, x, y) {
                     Some(Request::Stop)
                 } else if inside(cancel, x, y) {
@@ -419,6 +429,25 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
 mod tests {
     use super::*;
     #[test]
+    fn full_and_nearly_full_recording_keep_both_buttons_on_the_bottom_of_the_monitor() {
+        for monitor in [Rect::new(0, 0, 2560, 1400), Rect::new(-1920, 156, 0, 1196), Rect::new(0, 0, 800, 600)] {
+            for scale in [1.0, 1.5, 2.0] {
+                for area in [monitor, Rect::new(monitor.left+3, monitor.top+3, monitor.right-3, monitor.bottom-3)] {
+                    let (_, pane, above) = placement(area, monitor, scale);
+                    assert!(!above);
+                    assert!(pane.top >= monitor.top && pane.bottom <= monitor.bottom);
+                    assert!(pane.left >= monitor.left && pane.right <= monitor.right);
+                    assert!(pane.top >= monitor.top + monitor.height()/2);
+                    let (cancel, stop) = buttons(rect(pane.left as f32, pane.top as f32, pane.right as f32, pane.bottom as f32),scale);
+                    for button in [cancel,stop] {
+                        assert!(button.left >= monitor.left as f32 && button.right <= monitor.right as f32);
+                        assert!(button.top >= monitor.top as f32 && button.bottom <= monitor.bottom as f32);
+                    }
+                }
+            }
+        }
+    }
+    #[test]
     fn the_clock_reads_like_a_stopwatch() {
         assert_eq!(clock(Duration::from_millis(7400)), "0:07");
         assert_eq!(clock(Duration::from_secs(765)), "12:45");
@@ -434,6 +463,9 @@ mod tests {
         let area = Rect::new(300, 200, 900, 700);
         open(instance, HWND::default(), 0, area);
         let hwnd = STATE.with(|s| s.borrow().as_ref().map(|st| st.hwnd)).unwrap();
+        let mut affinity = 0;
+        unsafe { GetWindowDisplayAffinity(hwnd, &mut affinity) }.unwrap();
+        assert_eq!(affinity, WDA_EXCLUDEFROMCAPTURE.0);
         let mut origin = windows::Win32::Foundation::RECT::default();
         unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut origin);
