@@ -141,6 +141,8 @@ pub struct App {
     stats: Stats,
     /// Картинка в буфере обмена: из неё по запросу кодируется PNG (отложенный рендеринг).
     clipboard: Option<Arc<Image>>,
+    /// When `C` last copied the colour under the cursor: the magnifier says «Скопировано» a moment.
+    copied_color: Option<std::time::Instant>,
     saved_tx: Sender<Saved>,
     saved_rx: Receiver<Saved>,
     last_saved: Option<PathBuf>,
@@ -249,6 +251,7 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
             last: None,
             stats: Stats::default(),
             clipboard: None,
+            copied_color: None,
             saved_tx,
             saved_rx,
             last_saved: None,
@@ -868,7 +871,7 @@ impl App {
         .then(|| {
             let at = session.cursor();
             let rgb = active.frames.iter().find_map(|f| f.pixel(at)).map(|[b, g, r, _]| [r, g, b]);
-            Magnifier { at: (at.x, at.y), rgb }
+            Magnifier { at: (at.x, at.y), rgb, copied: self.color_flash() }
         });
         let exit_pose = self.exit_pose();
         let smart_fx = self.smart_fx();
@@ -1248,9 +1251,15 @@ impl App {
             Ok(()) => {
                 log_info!("цвет в буфере: {hex}");
                 self.clipboard = None;
+                self.copied_color = Some(std::time::Instant::now());
+                self.request_redraw();
             }
             Err(e) => log_warn!("цвет в буфер: {e}"),
         }
+    }
+
+    pub(super) fn color_flash(&self) -> bool {
+        self.copied_color.is_some_and(|t| t.elapsed().as_secs_f32() < 1.2)
     }
 
     /// Resident Kadr uses its own thumbnail and bubbles, never Windows notification balloons.

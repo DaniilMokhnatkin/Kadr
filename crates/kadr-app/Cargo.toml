@@ -27,3 +27,7 @@ png.workspace = true
 serde_json.workspace = true
 ort.workspace = true
 windows.workspace = true
+rqrr = { version = "0.11.0", default-features = false }
+
+[dev-dependencies]
+qrcode = { version = "0.14.1", default-features = false }

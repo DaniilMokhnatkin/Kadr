@@ -70,7 +70,8 @@ impl App {
             overlay.animations_pending(),
             self.exit.is_some(),
             selected_here,
-            self.smart_needs_frames(),
+            // A little past the label, so the frame without «Скопировано» is drawn too.
+            self.smart_needs_frames() || self.copied_color.is_some_and(|t| t.elapsed().as_secs_f32() < 1.4),
             self.config.appearance.marching_ants && kadr_render::theme::motion_enabled(),
         )
     }

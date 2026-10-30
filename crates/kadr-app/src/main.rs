@@ -24,6 +24,7 @@ mod motion_bench;
 mod ocr;
 mod ocr_paddle;
 mod pin_window;
+mod qr;
 mod recent_window;
 mod recent_worker;
 mod record_window;

@@ -24,8 +24,14 @@ use windows::core::{PCWSTR, w};
 #[derive(Clone)]
 pub enum Content {
     Working(&'static str),
-    Translated { text: String, from: String, to: String },
+    Translated {
+        text: String,
+        from: String,
+        to: String,
+    },
     Copied(String),
+    /// A QR code's contents, already in the clipboard; a web link gets «Открыть».
+    Qr(String),
     Failed(String),
 }
 
@@ -85,6 +91,7 @@ fn header(content: &Content) -> String {
         Content::Working(what) => (*what).into(),
         Content::Translated { from, to, .. } => format!("{} → {}", language(from), language(to)),
         Content::Copied(_) => "Текст скопирован".into(),
+        Content::Qr(_) => "QR-код скопирован".into(),
         Content::Failed(_) => "Не получилось".into(),
     }
 }
@@ -92,7 +99,7 @@ fn header(content: &Content) -> String {
 fn body(content: &Content) -> &str {
     match content {
         Content::Working(_) => "",
-        Content::Translated { text, .. } | Content::Copied(text) | Content::Failed(text) => text,
+        Content::Translated { text, .. } | Content::Copied(text) | Content::Qr(text) | Content::Failed(text) => text,
     }
 }
 
@@ -405,10 +412,17 @@ fn paint(device: &Device, st: &State) -> bool {
         }
     }
     // Copy: only when there is something to copy; turns into a confirmation for a moment.
-    if matches!(st.content, Content::Translated { .. } | Content::Copied(_)) {
+    if matches!(st.content, Content::Translated { .. } | Content::Copied(_) | Content::Qr(_)) {
         let hover = sample(&st.hover_copy);
         fill(gpu, fade(mix(theme.tint, theme.tint_strong, hover), a), copy, 8.0 * s);
-        let label = if st.copied { "Скопировано" } else { "Копировать" };
+        let opens = matches!(&st.content, Content::Qr(t) if crate::qr::link(t).is_some());
+        let label = if opens {
+            "Открыть"
+        } else if st.copied {
+            "Скопировано"
+        } else {
+            "Копировать"
+        };
         let ink = if st.copied { theme.on_selected } else { theme.text };
         text(gpu, &f.button, label, copy, fade(ink, a));
     }
@@ -432,7 +446,7 @@ fn paint(device: &Device, st: &State) -> bool {
 
 fn copy_text(st: &mut State) {
     let value = match &st.content {
-        Content::Translated { text, .. } | Content::Copied(text) => text.clone(),
+        Content::Translated { text, .. } | Content::Copied(text) | Content::Qr(text) => text.clone(),
         _ => return,
     };
     if kadr_export::clipboard::put_text(st.hwnd, &value).is_ok() {
@@ -518,7 +532,24 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     if inside(close, x, y) {
                         hide = true;
                     } else if inside(copy, x, y) {
-                        copy_text(st);
+                        if let Content::Qr(code) = &st.content
+                            && let Some(url) = crate::qr::link(code)
+                        {
+                            let url = kadr_win::wide(url);
+                            unsafe {
+                                windows::Win32::UI::Shell::ShellExecuteW(
+                                    None,
+                                    w!("open"),
+                                    PCWSTR(url.as_ptr()),
+                                    PCWSTR::null(),
+                                    PCWSTR::null(),
+                                    SW_SHOWNORMAL,
+                                );
+                            }
+                            hide = true;
+                        } else {
+                            copy_text(st);
+                        }
                     }
                 }
             });

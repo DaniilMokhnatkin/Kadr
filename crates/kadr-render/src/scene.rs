@@ -144,6 +144,8 @@ pub struct Magnifier {
     pub at: (i32, i32),
     /// Цвет пикселя под курсором (RGB); `None`, пока копия кадра в памяти не готова.
     pub rgb: Option<[u8; 3]>,
+    /// `C` just copied this colour.
+    pub copied: bool,
 }
 
 /// Кнопки панели у выделения. Основное действие — первое и единственное с заливкой.
@@ -1201,7 +1203,13 @@ fn draw_magnifier(
     let pad = dip::SPACE_2 * s;
     let gap = (dip::SPACE_4 + dip::SPACE_2) * s;
 
-    let coords = measure(shared, &text.figure, &format!("{}, {}", magnifier.at.0, magnifier.at.1))?;
+    // Right after `C`, the coordinates make way for the confirmation.
+    let label = if magnifier.copied {
+        "Скопировано".to_string()
+    } else {
+        format!("{}, {}", magnifier.at.0, magnifier.at.1)
+    };
+    let coords = measure(shared, &text.figure, &label)?;
     let hex_text = magnifier.rgb.map_or("—".to_string(), |c| format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]));
     let hex = measure(shared, &text.figure, &hex_text)?;
     let info_h = (coords.h + pad * 2.0).ceil();
@@ -1251,7 +1259,7 @@ fn draw_magnifier(
 
     fill(gpu, theme.border, rect(inner.left, zoom_rect.bottom, inner.right, zoom_rect.bottom + border));
     let text_y = zoom_rect.bottom + border + pad;
-    draw_text(gpu, &coords, inner.left + pad, text_y, theme.text_muted);
+    draw_text(gpu, &coords, inner.left + pad, text_y, if magnifier.copied { theme.accent } else { theme.text_muted });
     let hex_x = inner.right - pad - hex.w;
     draw_text(gpu, &hex, hex_x, text_y, theme.text);
     if let Some([r, g, b]) = magnifier.rgb {

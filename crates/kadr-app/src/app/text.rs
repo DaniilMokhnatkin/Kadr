@@ -6,6 +6,8 @@ use crate::bubble::{self, Content};
 
 pub(super) enum TextResult {
     Copied(String),
+    /// A QR code in the selection, read instead of the text.
+    Qr(String),
     Translated {
         text: String,
         from: String,
@@ -77,7 +79,7 @@ impl App {
 
     fn run_text_job(&mut self, image: Image, job: Job, click: Option<DocPoint>, anchor: DocRect) {
         let working = match job {
-            Job::Copy => "Распознаю текст…",
+            Job::Copy => "Читаю выделение…",
             Job::Translate => "Перевожу…",
         };
         self.bubble_pending = Some((anchor, Content::Working(working)));
@@ -87,6 +89,12 @@ impl App {
                 let _ = CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
             }
             let result = (|| -> std::result::Result<TextResult, String> {
+                if job == Job::Copy
+                    && click.is_none()
+                    && let Some(code) = crate::qr::decode(&image)
+                {
+                    return Ok(TextResult::Qr(code));
+                }
                 let lines = crate::ocr::recognize(&image).map_err(|e| format!("Распознавание: {}", e.message()))?;
                 let (text, rect) = match click {
                     Some(p) => crate::ocr::paragraph_at(&lines, p).ok_or("Под курсором не нашлось текста")?,
@@ -135,6 +143,14 @@ impl App {
                     }
                     log_info!("распознано и скопировано: {} символов", text.chars().count());
                     (Content::Copied(text), None)
+                }
+                TextResult::Qr(code) => {
+                    match clipboard::put_text(self.hwnd, &code) {
+                        Ok(()) => self.clipboard = None,
+                        Err(e) => log_warn!("QR-код в буфер: {e}"),
+                    }
+                    log_info!("QR-код скопирован: {} символов", code.chars().count());
+                    (Content::Qr(code), None)
                 }
                 TextResult::Translated { text, from, to, anchor } => {
                     log_info!("перевод с «{from}»: {} символов", text.chars().count());

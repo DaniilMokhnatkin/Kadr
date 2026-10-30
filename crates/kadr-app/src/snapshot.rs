@@ -57,7 +57,7 @@ fn run_tool(
     // Курсор у правого нижнего угла, как при растягивании: видны и маркеры, и лупа.
     let cursor = (at(1268.0), at(698.0));
     let i = ((cursor.1 as u32 * w + cursor.0 as u32) * 4) as usize;
-    let magnifier = Magnifier { at: cursor, rgb: Some([pixels[i + 2], pixels[i + 1], pixels[i]]) };
+    let magnifier = Magnifier { at: cursor, rgb: Some([pixels[i + 2], pixels[i + 1], pixels[i]]), copied: false };
 
     let rgba = unsafe {
         let ctx = &gpu.d2d;
