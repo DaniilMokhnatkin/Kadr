@@ -544,20 +544,27 @@ mod tests {
     fn records_a_short_clip_into_a_playable_mp4() {
         let path = std::env::temp_dir().join(format!("kadr-record-{}.mp4", std::process::id()));
         let (tx, rx) = std::sync::mpsc::channel();
-        let (ticks, ticked) = std::sync::mpsc::channel();
+        let ticks = tx.clone();
         let rec = start(Rect::new(0, 0, 320, 240), path.clone(), move |e| match e {
             Event::Tick(_) => {
-                let _ = ticks.send(());
+                let _ = ticks.send(None);
             }
             Event::Done(r) => {
-                let _ = tx.send(r);
+                let _ = tx.send(Some(r));
             }
         });
-        // Setting up the encoder can take a moment; time counts from the first frame.
-        ticked.recv_timeout(Duration::from_secs(20)).expect("started");
+        // Setting up the encoder can take a moment; time counts from the first frame. A failure
+        // before it says why.
+        if let Some(early) = rx.recv_timeout(Duration::from_secs(20)).expect("started") {
+            panic!("ended before the first frame: {:?}", early.err());
+        }
         std::thread::sleep(Duration::from_millis(2000));
         rec.stop();
-        let done = rx.recv_timeout(Duration::from_secs(20)).expect("finished").expect("recorded");
+        let done = loop {
+            if let Some(r) = rx.recv_timeout(Duration::from_secs(20)).expect("finished") {
+                break r.expect("recorded");
+            }
+        };
         let size = std::fs::metadata(&done.path).map(|m| m.len()).unwrap_or(0);
         assert!(size > 2_000, "file of {size} bytes");
         assert!((1.5..4.0).contains(&done.seconds));

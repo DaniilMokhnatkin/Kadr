@@ -312,6 +312,11 @@ pub struct Scene<'a> {
     pub marks: Marks<'a>,
 }
 
+/// One toolbar icon, for Kadr's other windows (the viewer) to share the editor's family.
+pub fn icon(gpu: &Gpu, button: ToolbarButton, r: D2D_RECT_F, ink: D2D1_COLOR_F, scale: f32) {
+    glyphs::draw(gpu, button, r, ink, scale);
+}
+
 pub fn draw(
     gpu: &Gpu,
     shared: &Shared,

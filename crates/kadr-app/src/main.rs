@@ -31,6 +31,7 @@ mod settings_window;
 mod snapshot;
 mod thumbnail;
 mod translate;
+mod viewer;
 
 use std::error::Error;
 

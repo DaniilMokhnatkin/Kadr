@@ -82,6 +82,7 @@ const WM_APP_TEXT: u32 = WM_APP + 10;
 /// The settings window has changes or wants hotkeys paused.
 const WM_APP_SETTINGS: u32 = WM_APP + 11;
 const WM_APP_RECORD: u32 = WM_APP + 12;
+const WM_APP_VIEWER: u32 = WM_APP + 13;
 /// The long-screenshot panel was pressed.
 const TIMER_HOOK_CHECK: usize = 1;
 const TIMER_DRAFT: usize = 2;
@@ -699,7 +700,7 @@ impl App {
                             perf::ms(t, perf::now())
                         );
                         let anchor = ((region.left + region.right) / 2, (region.top + region.bottom) / 2);
-                        self.offer_thumbnail(image, None, None, anchor);
+                        self.offer_thumbnail(image, None, anchor);
                     }
                     Err(e) => {
                         log_warn!("быстрый снимок: {e}");
@@ -1126,13 +1127,13 @@ impl App {
             Export::Copy => {
                 self.copy_image(image.clone());
                 self.begin_exit(true, None);
-                self.offer_thumbnail(image, None, draft.map(|d| d.id), anchor);
+                self.offer_thumbnail(image, None, anchor);
             }
             Export::Save => {
                 let path = file::unique_path(&self.save_folder(), &file::timestamp_name());
                 self.save(path.clone(), image.clone(), draft);
                 self.begin_exit(true, None);
-                self.offer_thumbnail(image, Some(path), None, anchor);
+                self.offer_thumbnail(image, Some(path), anchor);
             }
             Export::SaveAs => self.begin_exit(false, Some((image, draft, anchor))),
         }
@@ -1147,7 +1148,7 @@ impl App {
         match file::ask_path(&self.save_folder(), &file::timestamp_name()) {
             Ok(Some(path)) => {
                 self.save(path.clone(), image.clone(), draft);
-                self.offer_thumbnail(image, Some(path), None, anchor);
+                self.offer_thumbnail(image, Some(path), anchor);
             }
             Ok(None) => {}
             Err(e) => log_warn!("диалог «Сохранить как»: {e}"),
@@ -1155,11 +1156,11 @@ impl App {
     }
 
     /// Shows the corner thumbnail now, or once the overlay has finished leaving.
-    fn offer_thumbnail(&mut self, image: Arc<Image>, path: Option<PathBuf>, draft: Option<String>, anchor: (i32, i32)) {
+    fn offer_thumbnail(&mut self, image: Arc<Image>, path: Option<PathBuf>, anchor: (i32, i32)) {
         if !self.config.save.thumbnail || self.bench_mode {
             return;
         }
-        let shot = crate::thumbnail::Shot { image, path, draft, anchor };
+        let shot = crate::thumbnail::Shot { image, path, anchor };
         if self.exit.is_some() {
             self.thumb_pending = Some(shot);
         } else {
@@ -1177,25 +1178,36 @@ impl App {
 
     fn on_thumbnail(&mut self) {
         match crate::thumbnail::take_request() {
-            Some(crate::thumbnail::Request::Edit(id)) => {
-                if self.active.is_none() && !self.loading_recent {
-                    self.loading_recent = true;
-                    if !self.recent.send(crate::recent_worker::Command::Load(id)) {
-                        self.loading_recent = false;
-                    }
-                }
-            }
-            Some(crate::thumbnail::Request::Reveal(path)) => {
-                self.last_saved = Some(path);
-                self.open_last_saved();
-            }
             Some(crate::thumbnail::Request::View(path)) => {
                 let file = wide(&path.to_string_lossy());
                 unsafe {
                     ShellExecuteW(None, w!("open"), PCWSTR(file.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
                 }
             }
+            Some(crate::thumbnail::Request::Open(shot, from)) => {
+                crate::viewer::open(self.instance, self.hwnd, WM_APP_VIEWER, shot, from);
+            }
             None => {}
+        }
+    }
+
+    /// The viewer's buttons, and its return to the corner.
+    fn on_viewer(&mut self) {
+        for request in crate::viewer::take_requests() {
+            match request {
+                crate::viewer::Request::Copy(image) => self.copy_image(image),
+                crate::viewer::Request::Save(image) => {
+                    let path = file::unique_path(&self.save_folder(), &file::timestamp_name());
+                    self.save(path, image, None);
+                }
+                crate::viewer::Request::Closed(shot, edited) => {
+                    // Drawn on: what is pasted next is the drawn picture.
+                    if edited {
+                        self.copy_image(shot.image.clone());
+                    }
+                    crate::thumbnail::show_settled(self.instance, self.hwnd, WM_APP_THUMB, shot);
+                }
+            }
         }
     }
 
@@ -1521,6 +1533,7 @@ unsafe extern "system" fn host_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         WM_APP_TEXT => with_app(App::on_text_result),
         WM_APP_SETTINGS => with_app(App::on_settings_window),
         WM_APP_RECORD => with_app(App::on_record),
+        WM_APP_VIEWER => with_app(App::on_viewer),
         WM_APP_PIN => with_app(App::on_pin),
         WM_RENDERFORMAT => with_app(|app| {
             if let Some(image) = &app.clipboard {

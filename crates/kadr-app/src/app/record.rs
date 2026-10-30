@@ -106,7 +106,7 @@ impl App {
                 self.clipboard = None;
                 log_info!("видео {:.1} с в буфере: {}", done.seconds, done.path.display());
                 let anchor = ((region.left + region.right) / 2, (region.top + region.bottom) / 2);
-                self.offer_thumbnail(Arc::new(done.preview), Some(done.path), None, anchor);
+                self.offer_thumbnail(Arc::new(done.preview), Some(done.path), anchor);
             }
             Ok(_) => log_info!("запись отменена"),
             Err(e) => {

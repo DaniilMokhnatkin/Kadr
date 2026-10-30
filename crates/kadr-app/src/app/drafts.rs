@@ -14,6 +14,7 @@ pub(super) struct DraftState {
 impl App {
     pub(super) fn hide_recent_before_capture(&mut self) {
         self.finish_paused();
+        crate::viewer::close_now();
         // The corner thumbnail and the text bubble are topmost: they must not end up in the capture.
         let bubble = crate::bubble::is_open();
         if bubble {

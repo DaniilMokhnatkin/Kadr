@@ -28,21 +28,20 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, w};
 use windows_numerics::{Matrix3x2, Vector2};
 
+#[derive(Clone)]
 pub struct Shot {
     pub image: Arc<Image>,
     /// Saved file, if the capture went to disk.
     pub path: Option<PathBuf>,
-    /// Draft in «Недавние» that reopens the capture in the editor.
-    pub draft: Option<String>,
     /// A point on the monitor the capture came from.
     pub anchor: (i32, i32),
 }
 
 pub enum Request {
-    Edit(String),
-    Reveal(PathBuf),
-    /// Neither a file nor a draft (quick and long captures): open a temporary PNG in the viewer.
+    /// A video: open it in the player.
     View(PathBuf),
+    /// A picture: open it in Kadr's own viewer, growing out of the card (screen pixels).
+    Open(Shot, windows::Win32::Foundation::RECT),
 }
 
 /// Card box and margins in DIPs; the margin leaves room for the shadow and the slide.
@@ -138,6 +137,15 @@ fn card_size(image: (f32, f32), s: f32) -> (f32, f32) {
 }
 
 pub fn show(instance: HINSTANCE, host: HWND, message: u32, shot: Shot) {
+    show_with(instance, host, message, shot, false);
+}
+
+/// Back from the viewer: already in place, no slide; it stays its few seconds and leaves.
+pub fn show_settled(instance: HINSTANCE, host: HWND, message: u32, shot: Shot) {
+    show_with(instance, host, message, shot, true);
+}
+
+fn show_with(instance: HINSTANCE, host: HWND, message: u32, shot: Shot, settled: bool) {
     let created = STATE.with(|s| s.borrow().is_some());
     if !created {
         let class = WNDCLASSEXW {
@@ -214,10 +222,15 @@ pub fn show(instance: HINSTANCE, host: HWND, message: u32, shot: Shot) {
         st.gesture = Gesture::None;
         let now = st.now();
         let away = st.away();
-        st.slide.snap(away);
-        st.slide.target_with(0.0, Curve::POP, now);
-        st.opacity.snap(0.0);
-        st.opacity.target_with(1.0, Curve::FADE, now);
+        if settled {
+            st.slide.snap(0.0);
+            st.opacity.snap(1.0);
+        } else {
+            st.slide.snap(away);
+            st.slide.target_with(0.0, Curve::POP, now);
+            st.opacity.snap(0.0);
+            st.opacity.target_with(1.0, Curve::FADE, now);
+        }
         st.hover.snap(0.0);
         unsafe {
             let _ = SetWindowPos(
@@ -540,19 +553,36 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     }
                     Gesture::Pressed { .. } => {
                         let shot = st.shot.as_ref()?;
-                        let request = match (&shot.draft, &shot.path) {
-                            (_, Some(path)) => Request::Reveal(path.clone()),
-                            (Some(id), None) => Request::Edit(id.clone()),
-                            (None, None) => Request::View(file_for_drag(shot)?),
+                        let video = shot.path.as_ref().filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("mp4")));
+                        if let Some(path) = video {
+                            let r = Request::View(path.clone());
+                            st.leave();
+                            return Some(r);
+                        }
+                        // The viewer takes the picture from exactly where the card is now.
+                        let mut win = windows::Win32::Foundation::RECT::default();
+                        unsafe {
+                            let _ = GetWindowRect(st.hwnd, &mut win);
+                        }
+                        let c = st.card_rect();
+                        let dx = st.slide.value(st.now());
+                        let from = windows::Win32::Foundation::RECT {
+                            left: win.left + (c.left + dx).round() as i32,
+                            top: win.top + c.top.round() as i32,
+                            right: win.left + (c.right + dx).round() as i32,
+                            bottom: win.top + c.bottom.round() as i32,
                         };
-                        st.leave();
-                        Some(request)
+                        Some(Request::Open(shot.clone(), from))
                     }
                     Gesture::None => None,
                 }
             });
             if let Some(r) = action {
+                let open = matches!(r, Request::Open(..));
                 request(r);
+                if open {
+                    hide_now();
+                }
             }
             redraw();
             return LRESULT(0);

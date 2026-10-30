@@ -204,8 +204,14 @@ pub fn design_set(dir: &str) -> Result<(), Box<dyn Error>> {
         )?;
         std::fs::write(
             dir.join(format!("thumbnail-{}.png", (scale * 100.0) as i32)),
-            kadr_doc::pixels::encode_png(&crate::thumbnail::preview(thumb, scale)?)?,
+            kadr_doc::pixels::encode_png(&crate::thumbnail::preview(thumb.clone(), scale)?)?,
         )?;
+        for (name, e) in [("viewer", 1.0), ("viewer-opening", 0.45)] {
+            std::fs::write(
+                dir.join(format!("{name}-{}.png", (scale * 100.0) as i32)),
+                kadr_doc::pixels::encode_png(&crate::viewer::preview(thumb.clone(), scale, e)?)?,
+            )?;
+        }
         for (name, n, loading, error) in [
             ("recent", 6, false, None),
             ("recent-full", 10, false, None),
