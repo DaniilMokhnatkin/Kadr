@@ -133,6 +133,7 @@ fn code(b: ToolbarButton) -> usize {
         ToolbarButton::Text => 7,
         ToolbarButton::Translate => 8,
         ToolbarButton::Smart => 9,
+        ToolbarButton::Record => 10,
         ToolbarButton::Tool(t) => 16 + t as usize,
         ToolbarButton::Color(i) => 40 + i,
         ToolbarButton::Width => 48,

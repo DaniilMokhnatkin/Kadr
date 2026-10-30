@@ -53,6 +53,7 @@ mod exit;
 mod editor_input;
 mod pacing;
 mod pins;
+mod record;
 mod settings;
 mod smart;
 mod text;
@@ -80,6 +81,7 @@ const WM_APP_THUMB: u32 = WM_APP + 9;
 const WM_APP_TEXT: u32 = WM_APP + 10;
 /// The settings window has changes or wants hotkeys paused.
 const WM_APP_SETTINGS: u32 = WM_APP + 11;
+const WM_APP_RECORD: u32 = WM_APP + 12;
 /// The long-screenshot panel was pressed.
 const TIMER_HOOK_CHECK: usize = 1;
 const TIMER_DRAFT: usize = 2;
@@ -153,6 +155,7 @@ pub struct App {
     /// Long screenshot in progress, and the area waiting for the overlay to leave first.
     text_tx: Sender<text::TextResult>,
     text_rx: Receiver<text::TextResult>,
+    record: record::RecordState,
     warm_override: Option<bool>,
     /// Последняя вручную выделенная область; быстрый снимок монитора её не заменяет.
     last_region: Option<DocRect>,
@@ -261,6 +264,7 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
             smart: Default::default(),
             text_tx,
             text_rx,
+            record: record::RecordState::default(),
             warm_override,
             last_region: None,
             recent,
@@ -463,6 +467,10 @@ impl App {
     }
 
     fn on_hotkey(&mut self, id: i32, queue_ms: u32) {
+        // While recording, any capture key stops the recording: PrtSc starts and ends it.
+        if self.stop_recording() {
+            return;
+        }
         // Esc skips the closing motion; a new capture finishes it first.
         if self.exit.is_some() {
             self.finish_exit();
@@ -1161,6 +1169,7 @@ impl App {
 
     pub(super) fn show_pending_thumbnail(&mut self) {
         self.show_pending_bubble();
+        self.start_pending_record();
         if let Some(shot) = self.thumb_pending.take() {
             crate::thumbnail::show(self.instance, self.hwnd, WM_APP_THUMB, shot);
         }
@@ -1337,6 +1346,7 @@ impl App {
             ToolbarButton::Text => self.copy_text(),
             ToolbarButton::Translate => self.translate_selection(),
             ToolbarButton::Smart => self.toggle_smart(),
+            ToolbarButton::Record => self.start_record_from_selection(),
             _ => self.editor_button(button),
         }
     }
@@ -1510,6 +1520,7 @@ unsafe extern "system" fn host_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         WM_APP_THUMB => with_app(App::on_thumbnail),
         WM_APP_TEXT => with_app(App::on_text_result),
         WM_APP_SETTINGS => with_app(App::on_settings_window),
+        WM_APP_RECORD => with_app(App::on_record),
         WM_APP_PIN => with_app(App::on_pin),
         WM_RENDERFORMAT => with_app(|app| {
             if let Some(image) = &app.clipboard {

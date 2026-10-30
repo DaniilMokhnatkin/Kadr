@@ -242,6 +242,11 @@ pub(super) fn draw(gpu: &Gpu, button: ToolbarButton, r: D2D_RECT_F, ink: D2D1_CO
             p.line((14.0, 10.5), (20.5, 18.0));
             p.line((20.5, 10.5), (14.0, 18.0));
         }
+        // A record button: a ring with a solid dot.
+        ToolbarButton::Record => {
+            p.ellipse((12.0, 12.0), 8.5, 8.5);
+            p.dot((12.0, 12.0), 4.2);
+        }
         ToolbarButton::Close => {
             p.line((6.5, 6.5), (17.5, 17.5));
             p.line((17.5, 6.5), (6.5, 17.5));

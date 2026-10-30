@@ -24,6 +24,8 @@ mod ocr;
 mod pin_window;
 mod recent_window;
 mod recent_worker;
+mod record_window;
+mod recorder;
 mod sensitive;
 mod settings_window;
 mod snapshot;
