@@ -1,3 +1,4 @@
 /target/
 /dist/
 *.png.part
+/third_party/

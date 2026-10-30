@@ -11,7 +11,7 @@ mod art;
 mod install;
 
 use glass::{Device, Surface, client_size, fade, fill, inflate, inside, mix, rect, rgb, shadow, stroke, text};
-use install::{Job, Payload, Report, Start};
+use install::{Payload, Report, Start, Task};
 use kadr_render::motion::{Curve, Spring};
 use kadr_render::theme::Theme;
 use std::cell::RefCell;
@@ -37,7 +37,8 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 
 const WELCOME: usize = 0;
 const TOUR: usize = 6;
-const READY: usize = TOUR + 1;
+const ENGINE: usize = TOUR + 1;
+const READY: usize = ENGINE + 1;
 const INSTALLING: usize = READY + 1;
 const DONE: usize = INSTALLING + 1;
 const PAGES: usize = DONE + 1;
@@ -77,14 +78,35 @@ const FEATURES: [(&str, &str, &[&str]); TOUR] = [
 ];
 
 /// Install steps as the script reports them: id, title, what is happening while it runs.
-const STEPS: [(&str, &str, &str); 7] = [
+const STEPS: [(&str, &str, &str); 8] = [
     ("prepare", "Подготовка", ""),
     ("cert", "Сертификат подписи", "создаётся на этом компьютере, ключ никуда не уходит"),
     ("copy", "Копирование и подпись", "C:\\Program Files\\Kadr"),
     ("autostart", "Автозапуск и ярлык в «Пуск»", ""),
-    ("ocr-en", "Распознавание текста · английский", "скачивается из Центра обновления Windows — до пары минут"),
-    ("ocr-ru", "Распознавание текста · русский", "скачивается из Центра обновления Windows — до пары минут"),
+    ("paddle", "PaddleOCR в Kadr", "модели распознавания и ONNX Runtime → Program Files\\Kadr\\ocr"),
+    ("ocr-en", "Распознавание текста Windows · английский", "скачивается из Центра обновления Windows — до пары минут"),
+    ("ocr-ru", "Распознавание текста Windows · русский", "скачивается из Центра обновления Windows — до пары минут"),
     ("launch", "Запуск Kadr", ""),
+];
+
+/// The two engines, as the setup explains them: name, what it is, pluses, minuses.
+const ENGINES: [(&str, &str, &[&str], &[&str]); 2] = [
+    (
+        "PaddleOCR",
+        "открытый движок, встроенный в Kadr",
+        &["Работает на любом Windows — без языковых пакетов и интернета", "Точнее на мелком тексте, почте и паролях"],
+        &["Добавляет к Kadr около 30 МБ", "Чуть медленнее: ~0,1 с на снимок"],
+    ),
+    (
+        "Windows",
+        "распознавание, встроенное в систему",
+        &["Ничего не добавляет к Kadr и работает быстрее всех"],
+        &[
+            "Нужны языковые пакеты из Центра обновления Windows",
+            "Ставятся не везде: без интернета, на рабочих компьютерах, в урезанных сборках",
+            "Может пропустить мелкую почту или спутать I и l",
+        ],
+    ),
 ];
 
 #[derive(Clone, PartialEq)]
@@ -103,11 +125,14 @@ enum Hit {
     Secondary,
     Dot(usize),
     Toggle(usize),
+    /// An engine card: 0 PaddleOCR, 1 Windows.
+    Engine(usize),
 }
 
 struct Fonts {
     hero: IDWriteTextFormat,
     title: IDWriteTextFormat,
+    title_center: IDWriteTextFormat,
     lead: IDWriteTextFormat,
     lead_center: IDWriteTextFormat,
     caption: IDWriteTextFormat,
@@ -133,14 +158,25 @@ struct App {
     entered: [f64; PAGES],
     hover: Option<Hit>,
     glow: Vec<(Hit, Spring)>,
-    options: [bool; 2],
-    knobs: [Spring; 2],
+    /// Autostart.
+    options: [bool; 1],
+    knobs: [Spring; 1],
+    /// PaddleOCR chosen (else Windows' OCR).
+    paddle: bool,
+    /// The chosen card's highlight, gliding between the two.
+    choice: Spring,
     payload: Result<Payload, String>,
-    job: Option<Job>,
+    task: Option<Task>,
+    /// The steps of the running (or last) install: ids into STEPS, and their state.
+    plan: Vec<usize>,
     steps: Vec<Step>,
     declined: bool,
     failed: Option<String>,
     progress: Spring,
+    /// Windows' OCR failed and PaddleOCR is being (or was) added on top.
+    adding_paddle: bool,
+    /// The offer of PaddleOCR was turned down.
+    offer_declined: bool,
 }
 
 thread_local! {
@@ -162,13 +198,18 @@ impl App {
         self.entered[page] = t;
         self.slide.target_with(page as f32, Curve::LAYOUT, t);
     }
+    /// Windows' OCR was chosen and did not install: the moment to offer PaddleOCR.
+    fn offering(&self) -> bool {
+        self.page == DONE && self.failed.is_none() && !self.paddle && !self.adding_paddle && !self.offer_declined && self.warned()
+    }
     fn primary_label(&self) -> Option<&'static str> {
         Some(match self.page {
             WELCOME => "Начать",
-            p if p <= TOUR => "Далее",
+            p if p <= ENGINE => "Далее",
             READY => "Установить",
             INSTALLING => return None,
             _ if self.failed.is_some() => "Повторить",
+            _ if self.offering() => "Поставить PaddleOCR",
             _ => "Готово",
         })
     }
@@ -177,15 +218,25 @@ impl App {
             WELCOME => Some("Сразу к установке"),
             p if p <= READY => Some("Назад"),
             DONE if self.failed.is_some() => Some("Закрыть"),
+            DONE if self.offering() => Some("Не сейчас"),
             _ => None,
         }
     }
     fn primary(&mut self) {
         match self.page {
-            READY => self.install(),
+            READY => self.install(install::Job::Full { autostart: self.options[0], paddle: self.paddle }),
             DONE if self.failed.is_some() => {
                 self.failed = None;
+                self.adding_paddle = false;
                 self.go(READY);
+            }
+            DONE if self.offering() => {
+                self.adding_paddle = true;
+                self.install(install::Job::PaddleOnly);
+                if self.task.is_none() {
+                    // Declined or failed to start: back to the offer.
+                    self.adding_paddle = false;
+                }
             }
             DONE => close(self.hwnd),
             INSTALLING => {}
@@ -195,12 +246,21 @@ impl App {
     fn secondary(&mut self) {
         match self.page {
             WELCOME => self.go(READY),
+            DONE if self.offering() => {
+                self.offer_declined = true;
+                self.entered[DONE] = now(self);
+            }
             DONE => close(self.hwnd),
             p if p <= READY => self.go(p - 1),
             _ => {}
         }
     }
-    fn install(&mut self) {
+    fn choose_engine(&mut self, paddle: bool) {
+        self.paddle = paddle;
+        let t = now(self);
+        self.choice.target_with(if paddle { 0.0 } else { 1.0 }, Curve::GLIDE, t);
+    }
+    fn install(&mut self, job: install::Job) {
         let payload = match &self.payload {
             Ok(p) => p,
             Err(e) => {
@@ -210,10 +270,16 @@ impl App {
             }
         };
         self.declined = false;
-        match install::start(self.hwnd, payload, self.options[0], self.options[1]) {
-            Start::Running(job) => {
-                self.job = Some(job);
-                self.steps = vec![Step::Waiting; STEPS.len()];
+        let ids: &[&str] = match job {
+            install::Job::PaddleOnly => &["prepare", "paddle"],
+            install::Job::Full { paddle: true, .. } => &["prepare", "cert", "copy", "autostart", "paddle", "launch"],
+            install::Job::Full { .. } => &["prepare", "cert", "copy", "autostart", "ocr-en", "ocr-ru", "launch"],
+        };
+        match install::start(self.hwnd, payload, job) {
+            Start::Running(task) => {
+                self.task = Some(task);
+                self.plan = ids.iter().filter_map(|id| STEPS.iter().position(|(s, _, _)| s == id)).collect();
+                self.steps = vec![Step::Waiting; self.plan.len()];
                 let t = now(self);
                 self.progress.snap(0.0);
                 self.progress.target(0.02, t);
@@ -228,10 +294,11 @@ impl App {
     }
     /// Follows the script: steps light up, tick off, or warn.
     fn follow(&mut self) {
-        let Some(job) = &mut self.job else { return };
-        let (reports, exit) = job.poll();
+        let Some(task) = &mut self.task else { return };
+        let (reports, exit) = task.poll();
         let t = now(self);
-        let index = |id: &str| STEPS.iter().position(|(s, _, _)| *s == id);
+        let plan = self.plan.clone();
+        let index = |id: &str| plan.iter().position(|&i| STEPS[i].0 == id);
         let mut finished = false;
         for r in reports {
             match r {
@@ -260,12 +327,12 @@ impl App {
             }
         }
         let done = self.steps.iter().filter(|s| !matches!(s, Step::Waiting | Step::Running(_))).count();
-        self.progress.target_with(done as f32 / STEPS.len() as f32, Curve::GLIDE, t);
+        self.progress.target_with(done as f32 / self.steps.len().max(1) as f32, Curve::GLIDE, t);
         if finished || exit.is_some() {
             if !finished && self.failed.is_none() {
                 self.failed = Some("Установка прервалась. Попробуйте ещё раз.".into());
             }
-            self.job = None;
+            self.task = None;
             // Let the last tick be seen before moving on.
             self.entered[DONE] = t + 0.6;
             self.page = DONE;
@@ -309,8 +376,10 @@ struct Layout {
     primary: D2D_RECT_F,
     secondary: D2D_RECT_F,
     dots: Vec<D2D_RECT_F>,
-    toggles: [D2D_RECT_F; 2],
+    toggles: [D2D_RECT_F; 1],
     art: D2D_RECT_F,
+    /// The engine cards, PaddleOCR then Windows.
+    engines: [D2D_RECT_F; 2],
 }
 
 fn layout(app: &App, w: f32, h: f32) -> Layout {
@@ -328,9 +397,11 @@ fn layout(app: &App, w: f32, h: f32) -> Layout {
             rect(x - 6.0 * s, bottom - bh / 2.0 - 8.0 * s, x + 10.0 * s, bottom - bh / 2.0 + 8.0 * s)
         })
         .collect();
-    let toggles = [0, 1].map(|i| {
-        let top = 282.0 * s + i as f32 * 56.0 * s;
-        rect(40.0 * s, top, w - 40.0 * s, top + 56.0 * s)
+    let toggles = [rect(40.0 * s, 282.0 * s, w - 40.0 * s, 338.0 * s)];
+    let half = (w - 80.0 * s - 16.0 * s) / 2.0;
+    let engines = [0, 1].map(|i| {
+        let left = 40.0 * s + i as f32 * (half + 16.0 * s);
+        rect(left, 150.0 * s, left + half, 420.0 * s)
     });
     Layout {
         close: rect(w - 48.0 * s, 14.0 * s, w - 14.0 * s, 48.0 * s),
@@ -339,6 +410,7 @@ fn layout(app: &App, w: f32, h: f32) -> Layout {
         dots,
         toggles,
         art: rect(40.0 * s, 64.0 * s, 40.0 * s + 380.0 * s, 64.0 * s + 330.0 * s),
+        engines,
     }
 }
 
@@ -363,6 +435,11 @@ fn hit(app: &App, x: f32, y: f32) -> Option<Hit> {
         && let Some(i) = l.toggles.iter().position(|r| inside(*r, x, y))
     {
         return Some(Hit::Toggle(i));
+    }
+    if app.page == ENGINE
+        && let Some(i) = l.engines.iter().position(|r| inside(*r, x, y))
+    {
+        return Some(Hit::Engine(i));
     }
     None
 }
@@ -389,6 +466,7 @@ fn fonts(shared: &kadr_render::gpu::Shared, s: f32) -> Option<Fonts> {
     Some(Fonts {
         hero: format(shared, 34.0 * s, bold, true, false, true)?,
         title: format(shared, 27.0 * s, bold, false, false, true)?,
+        title_center: format(shared, 27.0 * s, bold, true, false, true)?,
         lead: format(shared, 15.0 * s, regular, false, false, true)?,
         lead_center: format(shared, 16.0 * s, regular, true, false, true)?,
         caption: format(shared, 12.0 * s, semi, false, false, false)?,
@@ -486,7 +564,7 @@ fn main() {
         glass::match_appearance(hwnd);
     }
     let spring = |c: Curve| Spring::with(0.0, c).precise(0.001);
-    let mut knobs = [spring(Curve::POP), spring(Curve::POP)];
+    let mut knobs = [spring(Curve::POP)];
     knobs.iter_mut().for_each(|k| k.snap(1.0));
     APP.with(|a| {
         *a.borrow_mut() = Some(App {
@@ -502,10 +580,15 @@ fn main() {
             entered: [0.0; PAGES],
             hover: None,
             glow: Vec::new(),
-            options: [true, true],
+            options: [true],
             knobs,
             payload: install::payload(),
-            job: None,
+            task: None,
+            plan: Vec::new(),
+            paddle: true,
+            choice: spring(Curve::GLIDE),
+            adding_paddle: false,
+            offer_declined: false,
             steps: vec![Step::Waiting; STEPS.len()],
             declined: false,
             failed: None,
@@ -873,6 +956,58 @@ fn draw_page(device: &Device, app: &App, f: &Fonts, theme: &Theme, l: &Layout, p
                 cx += kw + 8.0 * s;
             }
         }
+        ENGINE => {
+            let (r, alpha) = lifted(rect(40.0 * s, 64.0 * s, w - 80.0 * s, 104.0 * s), 0);
+            text(gpu, &f.title, "Чем распознавать текст", r, fade(theme.text, alpha));
+            let (r, alpha) = lifted(rect(40.0 * s, 108.0 * s, w - 80.0 * s, 146.0 * s), 1);
+            text(
+                gpu,
+                &f.lead,
+                "Это нужно для «Текст», «Перевод» и «Цензура». Выбор можно поменять потом в «Настройках».",
+                r,
+                fade(theme.text_muted, alpha),
+            );
+            let t = now(app);
+            let chosen = app.choice.value(t);
+            for (n, (name, what, pluses, minuses)) in ENGINES.iter().enumerate() {
+                let (card, alpha) = lifted(l.engines[n], 2 + n);
+                let on = (1.0 - (chosen - n as f32).abs()).clamp(0.0, 1.0);
+                let hover = app.glow.iter().find(|(k, _)| *k == Hit::Engine(n)).map_or(0.0, |(_, sp)| sp.value(t));
+                shadow(gpu, card, 16.0 * s, s, 10.0, 5.0, (0.08 + 0.1 * on) * alpha);
+                fill(gpu, fade(mix(theme.surface, mix(theme.surface, theme.accent, 0.06), on), alpha), card, 16.0 * s);
+                stroke(gpu, fade(mix(theme.hairline, theme.accent, on), alpha), inflate(card, -s * on), 16.0 * s, 1.0 + s * on);
+                if hover > 0.01 {
+                    fill(gpu, fade(theme.tint, 0.35 * hover * alpha), inflate(card, -2.0 * s), 15.0 * s);
+                }
+                // A radio mark, the name and what it is.
+                let (rx, ry) = (card.left + 30.0 * s, card.top + 32.0 * s);
+                unsafe {
+                    gpu.brush.SetColor(&fade(mix(theme.track, theme.accent, on), alpha));
+                    gpu.d2d.DrawEllipse(&D2D1_ELLIPSE { point: Vector2::new(rx, ry), radiusX: 10.0 * s, radiusY: 10.0 * s }, &gpu.brush, 1.8 * s, None);
+                }
+                let k = 5.5 * s * on;
+                fill(gpu, fade(theme.accent, alpha), rect(rx - k, ry - k, rx + k, ry + k), k);
+                text(gpu, &f.small_bold, name, rect(card.left + 50.0 * s, card.top + 18.0 * s, card.right - 16.0 * s, card.top + 46.0 * s), fade(theme.text, alpha));
+                if n == 0 {
+                    let badge = rect(card.right - 118.0 * s, card.top + 20.0 * s, card.right - 16.0 * s, card.top + 44.0 * s);
+                    fill(gpu, fade(theme.accent, 0.14 * alpha), badge, 12.0 * s);
+                    text(gpu, &f.chip, "Рекомендуем", badge, fade(theme.accent, alpha));
+                }
+                text(gpu, &f.small, what, rect(card.left + 50.0 * s, card.top + 44.0 * s, card.right - 16.0 * s, card.top + 64.0 * s), fade(theme.text_muted, alpha));
+                // Pluses in green, minuses in orange, each wrapped to the card.
+                let mut y = card.top + 82.0 * s;
+                let inner = card.right - card.left - 64.0 * s;
+                for (good, line) in pluses.iter().map(|l| (true, l)).chain(minuses.iter().map(|l| (false, l))) {
+                    let height = text_height(device, &f.small, line, inner).max(18.0 * s);
+                    let mark = if good { art::GREEN } else { rgb(0xff9f0a, 1.0) };
+                    let (mx, my) = (card.left + 30.0 * s, y + 9.0 * s);
+                    fill(gpu, fade(mark, 0.16 * alpha), rect(mx - 8.0 * s, my - 8.0 * s, mx + 8.0 * s, my + 8.0 * s), 8.0 * s);
+                    text(gpu, &f.chip, if good { "+" } else { "−" }, rect(mx - 8.0 * s, my - 8.0 * s, mx + 8.0 * s, my + 8.0 * s), fade(mark, alpha));
+                    text(gpu, &f.small, line, rect(card.left + 48.0 * s, y, card.right - 16.0 * s, y + height + 2.0 * s), fade(theme.text, alpha));
+                    y += height + 10.0 * s;
+                }
+            }
+        }
         READY => {
             let (r, alpha) = lifted(rect(40.0 * s, 64.0 * s, w - 80.0 * s, 104.0 * s), 0);
             text(gpu, &f.title, "Одно разрешение — и готово", r, fade(theme.text, alpha));
@@ -881,7 +1016,11 @@ fn draw_page(device: &Device, app: &App, f: &Fonts, theme: &Theme, l: &Layout, p
             let reasons = [
                 "Kadr работал поверх любых окон — даже Диспетчера задач",
                 "подписать Kadr сертификатом, созданным прямо на этом компьютере",
-                "положить Kadr в Program Files и докачать распознавание текста Windows",
+                if app.paddle {
+                    "положить Kadr и PaddleOCR в Program Files"
+                } else {
+                    "положить Kadr в Program Files и докачать распознавание текста Windows"
+                },
             ];
             for (n, reason) in reasons.iter().enumerate() {
                 let y = 150.0 * s + n as f32 * 34.0 * s;
@@ -892,11 +1031,8 @@ fn draw_page(device: &Device, app: &App, f: &Fonts, theme: &Theme, l: &Layout, p
                 text(gpu, &f.small_bold, reason, rect(row.left + 36.0 * s, row.top, row.right, row.bottom), fade(theme.text, alpha));
             }
             // Options.
-            let options = [
-                ("Запускать вместе с Windows", "Kadr будет ждать PrtSc сразу после входа"),
-                ("Скачать распознавание текста", "Английское и русское, если их нет. Нужен интернет"),
-            ];
-            let group = rect(l.toggles[0].left, l.toggles[0].top, l.toggles[1].right, l.toggles[1].bottom);
+            let options = [("Запускать вместе с Windows", "Kadr будет ждать PrtSc сразу после входа")];
+            let group = l.toggles[0];
             let (g, alpha) = lifted(group, 5);
             fill(gpu, fade(theme.group, alpha), g, 14.0 * s);
             stroke(gpu, fade(theme.hairline, 0.7 * alpha), inflate(g, -0.5), 14.0 * s, 1.0);
@@ -931,18 +1067,18 @@ fn draw_page(device: &Device, app: &App, f: &Fonts, theme: &Theme, l: &Layout, p
         }
         INSTALLING => {
             let (r, alpha) = lifted(rect(40.0 * s, 64.0 * s, w - 80.0 * s, 104.0 * s), 0);
-            text(gpu, &f.title, "Устанавливаю Kadr…", r, fade(theme.text, alpha));
+            text(gpu, &f.title, if app.adding_paddle { "Добавляю PaddleOCR…" } else { "Устанавливаю Kadr…" }, r, fade(theme.text, alpha));
             // Overall progress.
             let bar = rect(40.0 * s, 116.0 * s, w - 40.0 * s, 122.0 * s);
             fill(gpu, c(theme.track), bar, 3.0 * s);
             let p = app.progress.value(now(app)).clamp(0.0, 1.0);
             fill(gpu, c(theme.accent), rect(bar.left, bar.top, bar.left + (bar.right - bar.left) * p.max(0.02), bar.bottom), 3.0 * s);
-            let list = rect(40.0 * s, 138.0 * s, w - 40.0 * s, 138.0 * s + STEPS.len() as f32 * 46.0 * s);
+            let list = rect(40.0 * s, 138.0 * s, w - 40.0 * s, 138.0 * s + app.plan.len() as f32 * 46.0 * s);
             let (g, alpha) = lifted(list, 1);
             fill(gpu, fade(theme.group, alpha), g, 14.0 * s);
             stroke(gpu, fade(theme.hairline, 0.7 * alpha), inflate(g, -0.5), 14.0 * s, 1.0);
             let t = now(app);
-            for (n, (_, title, note)) in STEPS.iter().enumerate() {
+            for (n, (_, title, note)) in app.plan.iter().map(|&i| STEPS[i]).enumerate() {
                 let row = rect(g.left, g.top + n as f32 * 46.0 * s, g.right, g.top + (n + 1) as f32 * 46.0 * s);
                 if n > 0 {
                     fill(gpu, fade(theme.hairline, 0.5 * alpha), rect(row.left + 52.0 * s, row.top, row.right, row.top + 1.0), 0.0);
@@ -992,20 +1128,61 @@ fn draw_page(device: &Device, app: &App, f: &Fonts, theme: &Theme, l: &Layout, p
         _ => {
             // Done, or failed.
             let failed = app.failed.as_deref();
+            let offer = app.offering();
             let k = art::pop(art::phase(local, 0.05, 0.6));
-            let center = (w / 2.0, 150.0 * s);
-            let r = 44.0 * s * (0.7 + 0.3 * k);
+            let center = (w / 2.0, if offer { 112.0 * s } else { 150.0 * s });
+            let r = if offer { 34.0 } else { 44.0 } * s * (0.7 + 0.3 * k);
             let badge = rect(center.0 - r, center.1 - r, center.0 + r, center.1 + r);
-            let color = if failed.is_some() { rgb(0xff3b30, 1.0) } else { art::GREEN };
+            let color = if failed.is_some() {
+                rgb(0xff3b30, 1.0)
+            } else if offer {
+                rgb(0xff9f0a, 1.0)
+            } else {
+                art::GREEN
+            };
             shadow(gpu, badge, r, s, 14.0, 8.0, 0.22 * a);
             fill(gpu, c(color), badge, r);
-            if failed.is_some() {
+            if failed.is_some() || offer {
                 glass::text(gpu, &f.hero, "!", badge, c(rgb(0xffffff, 1.0)));
             } else {
                 tick(device, center, 48.0 * s, art::ease(art::phase(local, 0.35, 0.5)), c(rgb(0xffffff, 1.0)), 6.0 * s);
             }
+            if offer {
+                // Windows' OCR did not install: say what that means and why PaddleOCR is offered.
+                let reason = app.steps.iter().find_map(|s| match s {
+                    Step::Warn(text, _) => Some(text.trim().trim_end_matches('.').to_string()),
+                    _ => None,
+                });
+                let (r1, a1) = lifted(rect(60.0 * s, 160.0 * s, w - 60.0 * s, 200.0 * s), 3);
+                text(gpu, &f.title_center, "Распознавание Windows не установилось", r1, fade(theme.text, a1));
+                let why = match reason.filter(|r| !r.is_empty()) {
+                    Some(r) => format!("Windows не смогла поставить языковые пакеты: «{}».", r.chars().take(140).collect::<String>()),
+                    None => "Windows не смогла поставить языковые пакеты.".into(),
+                };
+                let body = format!(
+                    "{why} Без них в Kadr не будут работать «Текст», «Перевод» и «Цензура».\n\nПредлагаем PaddleOCR — открытый движок распознавания, который работает прямо внутри Kadr: \
+                     ему не нужны ни пакеты Windows, ни интернет, а мелкий текст, почту и пароли он читает даже точнее. Займёт около 30 МБ, \
+                     Windows ещё раз спросит разрешение."
+                );
+                let (r2, a2) = lifted(rect(90.0 * s, 210.0 * s, w - 90.0 * s, 420.0 * s), 4);
+                text(gpu, &f.lead_center, &body, r2, fade(theme.text_muted, a2));
+                if app.declined {
+                    text(
+                        gpu,
+                        &f.small,
+                        "Без разрешения добавить PaddleOCR не получится — нажмите кнопку ещё раз и выберите «Да».",
+                        rect(40.0 * s, l.primary.top - 30.0 * s, w - 40.0 * s, l.primary.top - 8.0 * s),
+                        c(rgb(0xff9f0a, 1.0)),
+                    );
+                }
+                return;
+            }
             let (title, body) = match failed {
                 Some(e) => ("Не получилось установить", e.to_string()),
+                None if app.adding_paddle => (
+                    "PaddleOCR установлен",
+                    "Kadr уже распознаёт текст через PaddleOCR — ничего перезапускать не нужно. Нажмите PrtSc, выделите текст и нажмите «Текст».".to_string(),
+                ),
                 None => (
                     "Kadr установлен",
                     format!(
@@ -1027,7 +1204,7 @@ fn draw_page(device: &Device, app: &App, f: &Fonts, theme: &Theme, l: &Layout, p
                 text(
                     gpu,
                     &f.lead_center,
-                    "Распознавание текста не скачалось — без него не работают «Текст», «Перевод» и «Цензура». Подключите интернет и запустите установщик ещё раз.",
+                    "Распознавание текста не установилось — «Текст», «Перевод» и «Цензура» пока не работают. Чтобы добавить PaddleOCR, запустите установщик ещё раз и выберите его.",
                     r3,
                     fade(rgb(0xff9f0a, 1.0), a3),
                 );
@@ -1115,6 +1292,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                         let (v, t) = (f32::from(app.options[i]), now(app));
                         app.knobs[i].target_with(v, Curve::POP, t);
                     }
+                    Some(Hit::Engine(i)) => app.choose_engine(i == 0),
                     None => {}
                 }
             });
@@ -1142,7 +1320,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_CLOSE => {
             // Closing mid-install would leave a half-done install: wait for it.
-            let installing = APP.with(|a| a.try_borrow().is_ok_and(|g| g.as_ref().is_some_and(|app| app.job.is_some())));
+            let installing = APP.with(|a| a.try_borrow().is_ok_and(|g| g.as_ref().is_some_and(|app| app.task.is_some())));
             if !installing {
                 unsafe {
                     let _ = DestroyWindow(hwnd);
@@ -1187,7 +1365,7 @@ fn snapshots(folder: &std::path::Path, scale: f32) -> windows::core::Result<()> 
     let (w, h) = ((WIDTH * scale) as u32, (HEIGHT * scale) as u32);
     let _ = std::fs::create_dir_all(folder);
     // (name, page, seconds into the page)
-    let shots: [(&str, usize, f64); 14] = [
+    let shots: [(&str, usize, f64); 19] = [
         ("01-welcome", WELCOME, 2.0),
         ("02-select", 1, 1.9),
         ("03-draw", 2, 3.2),
@@ -1198,10 +1376,15 @@ fn snapshots(folder: &std::path::Path, scale: f32) -> windows::core::Result<()> 
         ("08-record", 5, 3.2),
         ("09-record-done", 5, 5.3),
         ("10-thumbnail", 6, 2.2),
-        ("11-ready", READY, 2.0),
-        ("12-installing", INSTALLING, 2.0),
-        ("13-done", DONE, 2.0),
-        ("14-failed", DONE, 2.0),
+        ("11-engine", ENGINE, 2.0),
+        ("11b-engine-windows", ENGINE, 2.0),
+        ("12-ready", READY, 2.0),
+        ("13-installing", INSTALLING, 2.0),
+        ("13b-installing-windows", INSTALLING, 2.0),
+        ("14-done", DONE, 2.0),
+        ("15-failed", DONE, 2.0),
+        ("16-offer-paddle", DONE, 2.0),
+        ("17-paddle-added", DONE, 2.0),
     ];
     for (name, page, at) in shots {
         let spring = |c: Curve| Spring::with(0.0, c).precise(0.001);
@@ -1218,29 +1401,53 @@ fn snapshots(folder: &std::path::Path, scale: f32) -> windows::core::Result<()> 
             entered: [-at; PAGES],
             hover: None,
             glow: Vec::new(),
-            options: [true, true],
-            knobs: [spring(Curve::POP), spring(Curve::POP)],
+            options: [true],
+            knobs: [spring(Curve::POP)],
             payload: Err(String::new()),
-            job: None,
+            task: None,
+            plan: Vec::new(),
+            paddle: true,
+            choice: spring(Curve::GLIDE),
+            adding_paddle: false,
+            offer_declined: false,
             steps: vec![Step::Waiting; STEPS.len()],
             declined: false,
-            failed: (name == "14-failed").then(|| "Подпись не удалась: сертификат недоступен.".to_string()),
+            failed: (name == "15-failed").then(|| "Подпись не удалась: сертификат недоступен.".to_string()),
             progress: spring(Curve::GLIDE),
         };
         app.fonts = Some(fonts(&device.shared, scale).unwrap());
         app.slide.snap(page as f32);
         app.knobs.iter_mut().for_each(|k| k.snap(1.0));
+        let windows = name.contains("windows") || name == "16-offer-paddle";
+        if windows {
+            app.paddle = false;
+            app.choice.snap(1.0);
+        }
+        let ids: &[&str] = if windows {
+            &["prepare", "cert", "copy", "autostart", "ocr-en", "ocr-ru", "launch"]
+        } else {
+            &["prepare", "cert", "copy", "autostart", "paddle", "launch"]
+        };
+        app.plan = ids.iter().filter_map(|id| STEPS.iter().position(|(s, _, _)| s == id)).collect();
+        app.steps = vec![Step::Waiting; app.plan.len()];
         if page == INSTALLING {
-            app.steps = vec![
-                Step::Done(-3.0),
-                Step::Done(-2.0),
-                Step::Done(-1.0),
-                Step::Done(-0.5),
-                Step::Warn("Нет связи с Центром обновления".into(), -0.3),
-                Step::Running(0.0),
-                Step::Waiting,
-            ];
-            app.progress.snap(5.0 / 7.0);
+            let done = 4;
+            for (i, step) in app.steps.iter_mut().enumerate() {
+                *step = match i {
+                    i if i < done => Step::Done(-3.0 + i as f64 * 0.5),
+                    i if i == done && windows => Step::Warn("Нет связи с Центром обновления".into(), -0.3),
+                    i if i == done => Step::Running(0.0),
+                    i if i == done + 1 && windows => Step::Running(0.0),
+                    _ => Step::Waiting,
+                };
+            }
+            app.progress.snap(done as f32 / app.plan.len() as f32);
+        }
+        if name == "16-offer-paddle" {
+            app.steps[4] = Step::Warn("Не удалось подключиться к серверу обновлений Windows".into(), -3.0);
+        }
+        if name == "17-paddle-added" {
+            app.adding_paddle = true;
         }
         let image = glass::render_offscreen(&device, w, h, || {
             let theme = Theme::current();

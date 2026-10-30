@@ -232,6 +232,7 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
         let config_path = config::path();
         let (config, config_error) = config::load(&config_path);
         choose_theme(&config);
+        crate::ocr::choose(config.recognition.engine);
         let warm =warm_override.unwrap_or(config.capture.warm);
         let watcher = Watcher::start(config_path.clone(), hwnd, WM_APP_CONFIG);
         let recent = crate::recent_worker::Worker::start(hwnd, WM_APP_RECENT, config.recent.max, bench.is_some());

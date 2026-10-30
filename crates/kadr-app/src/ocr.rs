@@ -1,6 +1,9 @@
-//! Text recognition with the OCR built into Windows (Windows.Media.Ocr): local, no network.
-//! Each installed recognizer language is tried and the richest reading wins, so English text is
-//! read well on a Russian system and the other way round.
+//! Text recognition, local and without network, by one of two engines: PaddleOCR shipped with
+//! Kadr (see `ocr_paddle`), or the OCR built into Windows (Windows.Media.Ocr). The setup picks one,
+//! Settings can change it, and when the chosen one is missing the other steps in.
+//!
+//! With Windows' OCR each installed recognizer language is tried and the readings are merged word
+//! by word, so English text is read well on a Russian system and the other way round.
 use kadr_doc::{Image, Point, Rect};
 use windows::Globalization::Language;
 use windows::Graphics::Imaging::{BitmapAlphaMode, BitmapPixelFormat, SoftwareBitmap};
@@ -17,8 +20,46 @@ pub struct Line {
     pub words: Vec<(String, Rect)>,
 }
 
+/// Settings › recognition: 0 auto, 1 Windows, 2 PaddleOCR.
+static CHOSEN: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn choose(engine: kadr_store::config::OcrEngine) {
+    use kadr_store::config::OcrEngine;
+    let v = match engine {
+        OcrEngine::Auto => 0,
+        OcrEngine::Windows => 1,
+        OcrEngine::Paddle => 2,
+    };
+    CHOSEN.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether PaddleOCR is the one wanted: Settings first; on «auto», what the setup chose (it leaves
+/// `ocr-engine.txt` next to Kadr); with neither, PaddleOCR when it is there.
+fn wants_paddle() -> bool {
+    match CHOSEN.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => std::env::current_exe()
+            .ok()
+            .and_then(|e| std::fs::read_to_string(e.with_file_name("ocr-engine.txt")).ok())
+            .is_none_or(|s| s.trim() != "windows"),
+    }
+}
+
 /// Recognises `image`; lines come back in reading order with desktop coordinates.
 pub fn recognize(image: &Image) -> Result<Vec<Line>> {
+    let paddle = crate::ocr_paddle::available();
+    let windows = engines().is_ok_and(|e| !e.is_empty());
+    // The wanted engine if it is there, else whichever is.
+    let use_paddle = paddle && (wants_paddle() || !windows);
+    if use_paddle {
+        return crate::ocr_paddle::recognize(image).map_err(|e| windows::core::Error::new(windows::Win32::Foundation::E_FAIL, e));
+    }
+    recognize_windows(image)
+}
+
+/// Windows' OCR alone.
+pub fn recognize_windows(image: &Image) -> Result<Vec<Line>> {
     Ok(merge(readings(image)?))
 }
 
@@ -51,7 +92,7 @@ fn readings(image: &Image) -> Result<Vec<(bool, Vec<Line>)>> {
     if engines.is_empty() {
         return Err(windows::core::Error::new(
             windows::Win32::Foundation::E_FAIL,
-            "В Windows нет распознавания текста. Запустите установщик Kadr ещё раз с интернетом — он докачает его.",
+            "Нет распознавания текста: ни языковых пакетов Windows, ни PaddleOCR. Запустите установщик Kadr и выберите PaddleOCR — он работает без пакетов Windows и без интернета.",
         ));
     }
     for (cyrillic, engine) in engines {
@@ -317,7 +358,7 @@ mod tests {
             return;
         }
         let image = render("Hello Kadr 2026");
-        let lines = recognize(&image).unwrap();
+        let lines = recognize_windows(&image).unwrap();
         let all = text(&lines);
         assert!(all.contains("Hello") && all.contains("2026"), "{all:?}");
         assert!(lines[0].rect.left >= image.rect.left && lines[0].rect.right <= image.rect.right);
@@ -343,7 +384,7 @@ mod tests {
         if !engines.iter().any(|(c, _)| *c) {
             return;
         }
-        let all = text(&recognize(&render("Скопировать текст
+        let all = text(&recognize_windows(&render("Скопировать текст
 Hello Kadr 2026")).unwrap());
         assert!(all.contains("Скопировать") && all.contains("текст"), "{all:?}");
         assert!(all.contains("Hello") && all.contains("2026"), "{all:?}");
@@ -355,7 +396,7 @@ Hello Kadr 2026")).unwrap());
             return;
         }
         for dark in [false, true] {
-            let lines = recognize(&render_with("Логин Raptor
+            let lines = recognize_windows(&render_with("Логин Raptor
 Пароль FSDfSSR*EUITS4", 20, dark)).unwrap();
             let kinds: Vec<_> = crate::sensitive::find(&lines).into_iter().map(|(k, _)| k).collect();
             assert_eq!(
@@ -374,7 +415,7 @@ Hello Kadr 2026")).unwrap());
         }
         use crate::sensitive::Kind::*;
         for dark in [false, true] {
-            let lines = recognize(&render_with("Анна Смирнова\nПривет, это raptor_92, встреча в 18:30", 20, dark)).unwrap();
+            let lines = recognize_windows(&render_with("Анна Смирнова\nПривет, это raptor_92, встреча в 18:30", 20, dark)).unwrap();
             let mut kinds: Vec<_> = crate::sensitive::find_strict(&lines).into_iter().map(|(k, _)| k).collect();
             kinds.sort_by_key(|k| *k as u8);
             assert_eq!(
@@ -383,6 +424,32 @@ Hello Kadr 2026")).unwrap());
                 "dark {dark}: {:?}",
                 lines.iter().map(|l| &l.text).collect::<Vec<_>>()
             );
+        }
+    }
+    /// The same checks through PaddleOCR: the censor gets exact words, email and password included.
+    #[test]
+    fn paddle_reads_what_the_censor_needs_word_by_word() {
+        if !crate::ocr_paddle::available() {
+            return;
+        }
+        use crate::sensitive::Kind::*;
+        for dark in [false, true] {
+            let read = |text: &str, px: i32| crate::ocr_paddle::recognize(&render_with(text, px, dark)).unwrap();
+            let kinds = |lines: &[Line]| {
+                let mut k: Vec<_> = crate::sensitive::find_strict(lines).into_iter().map(|(k, _)| k).collect();
+                k.sort_by_key(|k| *k as u8);
+                k
+            };
+            let lines = read("Логин Raptor\nПароль FSDfSSR*EUITS4", 20);
+            assert_eq!(text(&lines), "Логин Raptor\nПароль FSDfSSR*EUITS4", "dark {dark}");
+            let lines = read("Анна Смирнова\nПривет, это raptor_92, встреча в 18:30", 20);
+            assert_eq!(kinds(&lines), [Name, Name, Nick, Number], "dark {dark}: {:?}", text(&lines));
+            let lines = read("Почта: daniil.petrov@gmail.com", 16);
+            assert!(crate::sensitive::find(&lines).iter().any(|(k, _)| *k == Email), "dark {dark}: {:?}", text(&lines));
+            // Word boxes sit on their words: the address box starts right of «Почта:».
+            let line = &lines[0];
+            let (label, address) = (&line.words[0].1, &line.words[1].1);
+            assert!(address.left > label.right - 2 && address.right <= line.rect.right + 2, "{:?}", line.words);
         }
     }
     /// White text image via GDI, offset on the desktop to check coordinate mapping.
@@ -399,7 +466,7 @@ clippy проходят. На настоящем экране не провер�
             19,
             true,
         );
-        let all = text(&recognize(&image).unwrap());
+        let all = text(&recognize_windows(&image).unwrap());
         for phrase in ["Перевод починил", "проходят", "Русские строки остаются"] {
             assert!(all.contains(phrase), "{phrase:?} in {all:?}");
         }
@@ -408,6 +475,31 @@ clippy проходят. На настоящем экране не провер�
         render_with(value, 32, false)
     }
     /// `px` font height; `dark` — light text on a dark background, as in a dark chat window.
+    /// Both engines on the same rendered text, side by side: `cargo test -p kadr-app compare_engines -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn compare_engines() {
+        let samples = [
+            ("Логин Raptor\nПароль FSDfSSR*EUITS4", 20),
+            ("Скопировать текст\nHello Kadr 2026", 20),
+            ("Анна Смирнова\nПривет, это raptor_92, встреча в 18:30", 15),
+            ("Встреча перенесена на пятницу, 14 марта.\nThe meeting moved to Friday, March 14.", 13),
+            ("Почта: daniil.petrov@gmail.com · Телефон +7 912 345-67-89", 12),
+            ("Съешь же ещё этих мягких французских булок, да выпей чаю", 11),
+        ];
+        for dark in [false, true] {
+            for (text, px) in samples {
+                let image = render_with(text, px, dark);
+                let t = std::time::Instant::now();
+                let windows = recognize_windows(&image).map(|l| self::text(&l)).unwrap_or_else(|e| format!("ошибка: {e}"));
+                let wt = t.elapsed().as_millis();
+                let t = std::time::Instant::now();
+                let paddle = crate::ocr_paddle::recognize(&image).map(|l| self::text(&l)).unwrap_or_else(|e| format!("ошибка: {e}"));
+                let pt = t.elapsed().as_millis();
+                eprintln!("--- {px}px {}\n  нужно:   {:?}\n  Windows: {:?} ({wt} мс)\n  Paddle:  {:?} ({pt} мс)", if dark { "тёмный" } else { "светлый" }, text.replace('\n', " / "), windows.replace('\n', " / "), paddle.replace('\n', " / "));
+            }
+        }
+    }
     fn render_with(value: &str, px: i32, dark: bool) -> Image {
         use windows::Win32::Graphics::Gdi::*;
         let (w, h) = (1400, 40 + (px + px / 2) * value.lines().count() as i32);

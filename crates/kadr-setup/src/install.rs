@@ -8,12 +8,14 @@ use windows::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, Shel
 use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
 use windows::core::{HSTRING, PCWSTR, w};
 
-/// Tail of Kadr-Setup.exe: `[kadr.exe][install.ps1][exe length u64][script length u64][MAGIC]`.
-pub const MAGIC: &[u8; 8] = b"KADRSETP";
+/// Tail of Kadr-Setup.exe: `[kadr.exe][install.ps1][ocr.zip][exe u64][script u64][ocr u64][MAGIC]`.
+pub const MAGIC: &[u8; 8] = b"KADRSET2";
 
 pub struct Payload {
     pub exe: Vec<u8>,
     pub script: Vec<u8>,
+    /// PaddleOCR: the models and ONNX Runtime, zipped.
+    pub ocr: Vec<u8>,
 }
 
 /// The program and the script carried by this very file; in a development build, the release
@@ -27,25 +29,24 @@ pub fn payload() -> Result<Payload, String> {
     let root = me.ancestors().nth(3).map(Path::to_path_buf).unwrap_or_default();
     let exe = std::fs::read(root.join("target/release/kadr.exe"));
     let script = std::fs::read(root.join("installer/install.ps1"));
-    match (exe, script) {
-        (Ok(exe), Ok(script)) => Ok(Payload { exe, script }),
+    let ocr = std::fs::read(root.join("dist/ocr.zip"));
+    match (exe, script, ocr) {
+        (Ok(exe), Ok(script), Ok(ocr)) => Ok(Payload { exe, script, ocr }),
         _ => Err("Установщик повреждён: внутри нет Kadr. Скачайте его заново.".into()),
     }
 }
 
 pub fn split(bytes: &[u8]) -> Option<Payload> {
     let n = bytes.len();
-    if n < 24 || &bytes[n - 8..] != MAGIC {
+    if n < 32 || &bytes[n - 8..] != MAGIC {
         return None;
     }
     let num = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap()) as usize;
-    let (exe_len, script_len) = (num(n - 24), num(n - 16));
-    let end = n - 24;
-    let start = end.checked_sub(exe_len + script_len)?;
-    Some(Payload {
-        exe: bytes[start..start + exe_len].to_vec(),
-        script: bytes[start + exe_len..end].to_vec(),
-    })
+    let (exe_len, script_len, ocr_len) = (num(n - 32), num(n - 24), num(n - 16));
+    let end = n - 32;
+    let start = end.checked_sub(exe_len.checked_add(script_len)?.checked_add(ocr_len)?)?;
+    let (a, b) = (start + exe_len, start + exe_len + script_len);
+    Some(Payload { exe: bytes[start..a].to_vec(), script: bytes[a..b].to_vec(), ocr: bytes[b..end].to_vec() })
 }
 
 /// What the script reported.
@@ -75,40 +76,55 @@ pub fn parse(line: &str) -> Option<Report> {
 }
 
 pub enum Start {
-    Running(Job),
+    Running(Task),
     /// The user said «Нет» to the administrator prompt.
     Declined,
     Failed(String),
 }
 
-pub struct Job {
+pub struct Task {
     process: HANDLE,
     progress: PathBuf,
     seen: usize,
     folder: PathBuf,
 }
 
-pub fn start(owner: HWND, payload: &Payload, autostart: bool, ocr: bool) -> Start {
-    let folder = std::env::temp_dir().join(format!("KadrSetup-{}", std::process::id()));
-    let (exe, script, progress) = (folder.join("kadr.bin"), folder.join("install.ps1"), folder.join("progress.txt"));
+/// What to install.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Job {
+    /// Kadr with PaddleOCR (`paddle`) or with Windows' OCR packs.
+    Full { autostart: bool, paddle: bool },
+    /// PaddleOCR alone, into the Kadr just installed.
+    PaddleOnly,
+}
+
+pub fn start(owner: HWND, payload: &Payload, job: Job) -> Start {
+    let folder = std::env::temp_dir().join(format!("KadrSetup-{}-{}", std::process::id(), matches!(job, Job::PaddleOnly) as u8));
+    let (exe, script, ocr, progress) =
+        (folder.join("kadr.bin"), folder.join("install.ps1"), folder.join("ocr.zip"), folder.join("progress.txt"));
     let written = std::fs::create_dir_all(&folder)
         .and_then(|()| std::fs::write(&exe, &payload.exe))
         .and_then(|()| std::fs::write(&script, &payload.script))
+        .and_then(|()| std::fs::write(&ocr, &payload.ocr))
         .and_then(|()| std::fs::write(&progress, b""));
     if let Err(e) = written {
         return Start::Failed(format!("Не удалось подготовить файлы во временной папке: {e}"));
     }
     let mut params = format!(
-        "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{}\" -Exe \"{}\" -Progress \"{}\"",
+        "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{}\" -Exe \"{}\" -PaddleZip \"{}\" -Progress \"{}\"",
         script.display(),
         exe.display(),
+        ocr.display(),
         progress.display()
     );
-    if !autostart {
-        params.push_str(" -NoAutostart");
-    }
-    if !ocr {
-        params.push_str(" -NoOcr");
+    match job {
+        Job::Full { autostart, paddle } => {
+            if !autostart {
+                params.push_str(" -NoAutostart");
+            }
+            params.push_str(if paddle { " -Recognition paddle" } else { " -Recognition windows" });
+        }
+        Job::PaddleOnly => params.push_str(" -PaddleOnly"),
     }
     let params = HSTRING::from(params);
     let mut info = SHELLEXECUTEINFOW {
@@ -122,7 +138,7 @@ pub fn start(owner: HWND, payload: &Payload, autostart: bool, ocr: bool) -> Star
         ..Default::default()
     };
     match unsafe { ShellExecuteExW(&mut info) } {
-        Ok(()) if !info.hProcess.is_invalid() => Start::Running(Job { process: info.hProcess, progress, seen: 0, folder }),
+        Ok(()) if !info.hProcess.is_invalid() => Start::Running(Task { process: info.hProcess, progress, seen: 0, folder }),
         Ok(()) => Start::Failed("Windows не запустила установку.".into()),
         Err(e) if e.code() == ERROR_CANCELLED.to_hresult() => {
             let _ = std::fs::remove_dir_all(&folder);
@@ -132,7 +148,7 @@ pub fn start(owner: HWND, payload: &Payload, autostart: bool, ocr: bool) -> Star
     }
 }
 
-impl Job {
+impl Task {
     /// New reports since the last call, and the exit code once the script has ended.
     pub fn poll(&mut self) -> (Vec<Report>, Option<u32>) {
         let text = std::fs::read(&self.progress).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
@@ -152,7 +168,7 @@ impl Job {
     }
 }
 
-impl Drop for Job {
+impl Drop for Task {
     fn drop(&mut self) {
         unsafe {
             let _ = CloseHandle(self.process);
@@ -167,14 +183,16 @@ mod tests {
     #[test]
     fn the_payload_round_trips_through_the_tail_of_the_file() {
         let mut file = b"MZ setup program".to_vec();
-        let (exe, script) = (b"kadr exe bytes".to_vec(), "скрипт".as_bytes().to_vec());
+        let (exe, script, ocr) = (b"kadr exe bytes".to_vec(), "скрипт".as_bytes().to_vec(), b"PK zip".to_vec());
         file.extend(&exe);
         file.extend(&script);
-        file.extend((exe.len() as u64).to_le_bytes());
-        file.extend((script.len() as u64).to_le_bytes());
+        file.extend(&ocr);
+        for part in [&exe, &script, &ocr] {
+            file.extend((part.len() as u64).to_le_bytes());
+        }
         file.extend(MAGIC);
         let p = split(&file).unwrap();
-        assert_eq!((p.exe, p.script), (exe, script));
+        assert_eq!((p.exe, p.script, p.ocr), (exe, script, ocr));
         assert!(split(b"MZ plain program without payload").is_none());
     }
     #[test]

@@ -30,7 +30,14 @@ param(
     [switch]$RemoveCertificate,
     # Graphical setup: where to report each step, and whether to skip fetching Windows OCR.
     [string]$Progress,
-    [switch]$NoOcr
+    [switch]$NoOcr,
+    # Text recognition: «paddle» — PaddleOCR shipped with Kadr, «windows» — Windows' own OCR packs.
+    [ValidateSet('paddle', 'windows')]
+    [string]$Recognition = 'paddle',
+    # PaddleOCR files (det.onnx, rec.onnx, dict.txt, onnxruntime.dll) as a zip.
+    [string]$PaddleZip,
+    # Only add PaddleOCR to an installed Kadr (when Windows' OCR could not be installed).
+    [switch]$PaddleOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -43,6 +50,7 @@ if (-not $Exe) {
     $Exe = Join-Path $PSScriptRoot 'kadr.bin'
     if (-not (Test-Path $Exe)) { $Exe = Join-Path $PSScriptRoot '..\target\release\kadr.exe' }
 }
+if (-not $PaddleZip) { $PaddleZip = Join-Path $PSScriptRoot 'ocr.zip' }
 Write-Verbose "exe: $Exe"
 $Subject = 'CN=Kadr Local Code Signing'
 $InstallDir = Join-Path $env:ProgramFiles 'Kadr'
@@ -112,8 +120,35 @@ trap {
     break
 }
 
+# PaddleOCR next to Kadr, and a note of which engine was chosen (Kadr reads it on «auto»).
+$OcrDir = Join-Path $InstallDir 'ocr'
+$EngineNote = Join-Path $InstallDir 'ocr-engine.txt'
+function Install-Paddle {
+    Report 'step paddle'
+    if (-not (Test-Path $PaddleZip)) { throw "Нет файлов PaddleOCR: $PaddleZip" }
+    New-Item -ItemType Directory -Path $OcrDir -Force | Out-Null
+    Expand-Archive -Path $PaddleZip -DestinationPath $OcrDir -Force
+    foreach ($file in 'det.onnx', 'rec.onnx', 'dict.txt', 'onnxruntime.dll') {
+        if (-not (Test-Path (Join-Path $OcrDir $file))) { throw "PaddleOCR распакован не полностью: нет $file" }
+    }
+    Get-ChildItem $OcrDir | Unblock-File
+    Set-Content -LiteralPath $EngineNote -Value 'paddle' -Encoding ASCII
+    Write-Host "PaddleOCR: $OcrDir"
+    Report 'ok paddle'
+}
+
 Report 'step prepare'
 Assert-Admin
+
+if ($PaddleOnly) {
+    # Kadr keeps running: it picks PaddleOCR up at its next recognition.
+    if (-not (Test-Path $Target)) { throw 'Kadr ещё не установлен.' }
+    Report 'ok prepare'
+    Install-Paddle
+    Report 'finish'
+    return
+}
+
 Stop-Kadr
 
 if ($Uninstall) {
@@ -166,27 +201,31 @@ $link.Save()
 Write-Host 'Ярлык в меню «Пуск»: Kadr.'
 Report 'ok autostart'
 
-# Text recognition («Текст», «Перевод», «Цензура») uses Windows OCR, which has a pack per language.
-# English and Russian are fetched from Windows Update if missing; without the Internet this step is
-# skipped and can be repeated later by running the installer again.
-foreach ($lang in 'en-US', 'ru-RU') {
-    $id = 'ocr-' + $lang.Substring(0, 2)
-    if ($NoOcr) { Report "skip $id"; continue }
-    Report "step $id"
-    $name = "Language.OCR~~~$lang~0.0.1.0"
-    try {
-        $cap = Get-WindowsCapability -Online -Name $name
-        if ($cap.State -eq 'Installed') {
-            Write-Host "Распознавание текста ($lang): уже есть."
-        } else {
-            Write-Host "Скачиваю распознавание текста ($lang)… это может занять пару минут."
-            Add-WindowsCapability -Online -Name $name | Out-Null
-            Write-Host "Распознавание текста ($lang): установлено."
+if ($Recognition -eq 'paddle') {
+    Install-Paddle
+} else {
+    Set-Content -LiteralPath $EngineNote -Value 'windows' -Encoding ASCII
+    # Windows' OCR has a pack per language. English and Russian are fetched from Windows Update if
+    # missing; without the Internet this step fails and the setup offers PaddleOCR instead.
+    foreach ($lang in 'en-US', 'ru-RU') {
+        $id = 'ocr-' + $lang.Substring(0, 2)
+        if ($NoOcr) { Report "skip $id"; continue }
+        Report "step $id"
+        $name = "Language.OCR~~~$lang~0.0.1.0"
+        try {
+            $cap = Get-WindowsCapability -Online -Name $name
+            if ($cap.State -eq 'Installed') {
+                Write-Host "Распознавание текста ($lang): уже есть."
+            } else {
+                Write-Host "Скачиваю распознавание текста ($lang)… это может занять пару минут."
+                Add-WindowsCapability -Online -Name $name | Out-Null
+                Write-Host "Распознавание текста ($lang): установлено."
+            }
+            Report "ok $id"
+        } catch {
+            Write-Warning "Распознавание текста ($lang) не установлено: $($_.Exception.Message)"
+            Report "warn $id $($_.Exception.Message)"
         }
-        Report "ok $id"
-    } catch {
-        Write-Warning "Распознавание текста ($lang) не установлено: $($_.Exception.Message)"
-        Report "warn $id $($_.Exception.Message)"
     }
 }
 

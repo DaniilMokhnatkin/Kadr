@@ -61,7 +61,10 @@ const TOGGLE_HINTS: [&str; 5] = [
 ];
 const KEYS: [&str; 5] = ["Выделить область", "Монитор под курсором", "Активное окно", "Последняя область", "Недавние"];
 /// Segmented rows: label, hint, choices.
-const CHOICES: [(&str, &str, &[&str]); 1] = [("Тема", "", &["Авто", "Светлая", "Тёмная"])];
+const CHOICES: [(&str, &str, &[&str]); 2] = [
+    ("Тема", "", &["Авто", "Светлая", "Тёмная"]),
+    ("Распознавание текста", "Авто — как при установке", &["Авто", "Windows", "PaddleOCR"]),
+];
 const SEGMENT_W: f32 = 84.0;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -79,7 +82,7 @@ enum Hit {
 struct Layout {
     close: D2D_RECT_F,
     toggles: [D2D_RECT_F; 5],
-    choices: [D2D_RECT_F; 1],
+    choices: [D2D_RECT_F; 2],
     folder: D2D_RECT_F,
     folder_button: D2D_RECT_F,
     folder_reset: D2D_RECT_F,
@@ -116,7 +119,7 @@ fn layout(width: f32, s: f32) -> Layout {
         out
     };
     let toggles: [D2D_RECT_F; 5] = rows(5, 0, &mut y).try_into().unwrap();
-    let choices: [D2D_RECT_F; 1] = rows(1, 1, &mut y).try_into().unwrap();
+    let choices: [D2D_RECT_F; 2] = rows(2, 1, &mut y).try_into().unwrap();
     let folder = rows(1, 2, &mut y)[0];
     let keys: [D2D_RECT_F; 5] = rows(5, 3, &mut y).try_into().unwrap();
     let open_file = rect(left, y, left + 180.0 * s, y + 28.0 * s);
@@ -202,12 +205,21 @@ fn toggle_value(c: &Config, i: usize, auto: bool) -> bool {
 const THEMES: [kadr_store::config::Theme; 3] =
     [kadr_store::config::Theme::Auto, kadr_store::config::Theme::Light, kadr_store::config::Theme::Dark];
 
-/// Rows of CHOICES: only the theme so far.
-fn choice_value(c: &Config, _row: usize) -> usize {
-    THEMES.iter().position(|t| *t == c.appearance.theme).unwrap_or(0)
+const ENGINES: [kadr_store::config::OcrEngine; 3] =
+    [kadr_store::config::OcrEngine::Auto, kadr_store::config::OcrEngine::Windows, kadr_store::config::OcrEngine::Paddle];
+
+/// Rows of CHOICES: the theme, then the text recognition engine.
+fn choice_value(c: &Config, row: usize) -> usize {
+    match row {
+        0 => THEMES.iter().position(|t| *t == c.appearance.theme).unwrap_or(0),
+        _ => ENGINES.iter().position(|e| *e == c.recognition.engine).unwrap_or(0),
+    }
 }
-fn set_choice(c: &mut Config, _row: usize, i: usize) {
-    c.appearance.theme = THEMES[i.min(THEMES.len() - 1)];
+fn set_choice(c: &mut Config, row: usize, i: usize) {
+    match row {
+        0 => c.appearance.theme = THEMES[i.min(THEMES.len() - 1)],
+        _ => c.recognition.engine = ENGINES[i.min(ENGINES.len() - 1)],
+    }
 }
 
 fn key_text(c: &Config, i: usize) -> &str {
@@ -253,7 +265,7 @@ struct State {
     epoch: Instant,
     knobs: [Spring; 5],
     /// Where each segmented control's highlight sits (choice index, gliding).
-    slides: [Spring; 1],
+    slides: [Spring; 2],
     hover: Option<Hit>,
     glow: Vec<(Hit, Spring)>,
     capturing: Option<usize>,
@@ -415,7 +427,7 @@ pub fn show(instance: HINSTANCE, host: HWND, message: u32, config: &Config) {
                 scale: 1.0,
                 epoch: Instant::now(),
                 knobs: [knob(), knob(), knob(), knob(), knob()],
-                slides: [knob()],
+                slides: [knob(), knob()],
                 hover: None,
                 glow: Vec::new(),
                 capturing: None,
@@ -557,7 +569,7 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
         }
     }
     // Groups: white cards with hairlines between rows.
-    for (i, title) in ["ОСНОВНЫЕ", "ВИД", "СОХРАНЕНИЕ", "СОЧЕТАНИЯ КЛАВИШ"].iter().enumerate() {
+    for (i, title) in ["ОСНОВНЫЕ", "ВИД И ТЕКСТ", "СОХРАНЕНИЕ", "СОЧЕТАНИЯ КЛАВИШ"].iter().enumerate() {
         let y = l.sections[i];
         text(gpu, &f.section, title, rect(PAD * s + 12.0 * s, y + 8.0 * s, w, y + SECTION * s - 4.0 * s), theme.text_muted);
         let g = l.groups[i];
@@ -955,7 +967,7 @@ pub fn preview(scale: f32) -> windows::core::Result<kadr_doc::Image> {
         surface: None,
         fonts: None,
         knobs: [knob(true), knob(true), knob(true), knob(true), knob(false)],
-        slides: [Spring::with(0.0, Curve::GLIDE)],
+        slides: [Spring::with(0.0, Curve::GLIDE), Spring::with(2.0, Curve::GLIDE)],
         config,
         auto: true,
         scale,

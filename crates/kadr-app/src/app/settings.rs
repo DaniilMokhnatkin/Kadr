@@ -79,6 +79,7 @@ impl App {
             }
         }
         self.set_warm(self.warm_override.unwrap_or(self.config.capture.warm));
+        crate::ocr::choose(self.config.recognition.engine);
         self.recent.send(crate::recent_worker::Command::Limit(self.config.recent.max));
         crate::settings_window::refresh(&self.config);
         if changed_look {
