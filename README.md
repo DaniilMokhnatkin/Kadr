@@ -46,13 +46,22 @@ cargo build --release
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File installer\fetch-ocr.ps1
-cargo build --release --features uiaccess -p kadr-app
-cargo build --release -p kadr-setup
-powershell -ExecutionPolicy Bypass -File installer\package.ps1
+powershell -ExecutionPolicy Bypass -File installer\build-release.ps1 -Tag v1.0.0
 ```
 
 Готовый `dist\Kadr-Setup.exe` содержит программу, скрипт установки и PaddleOCR. Чтобы собранный
-Kadr проверял обновления, задайте при сборке `KADR_REPO=владелец/репозиторий`.
+Kadr проверял обновления, адрес репозитория задаётся в `.cargo/config.toml`; для своей копии
+можно переопределить его переменной `KADR_REPO` до сборки.
+
+Для следующего релиза: измените версию в `Cargo.toml`, запустите сборку с совпадающим тегом
+`vX.Y.Z` и опубликуйте в GitHub обычный release с файлом `Kadr-Setup.exe`. Установленная
+версия проверяет новый тег и обязательную контрольную сумму GitHub перед запуском установки.
+`build-release.ps1` проверяет соответствие тега и версии; тесты и Clippy запускайте перед публикацией.
+
+Для автоматического выпуска отправьте в GitHub новый тег `vX.Y.Z` на коммите с такой
+версией. Workflow `Release Kadr` проверит и соберёт программу, загрузит установщик
+в черновик и опубликует релиз после сверки размера и SHA-256. Порядок выпуска —
+[RELEASING.md](RELEASING.md).
 
 Фоновая проверка без видимых окон и движения курсора: `powershell -File tools/check.ps1`.
 Замер без рабочего стола: `target\release\kadr.exe --interaction-bench result.txt`.

@@ -1,4 +1,4 @@
-//! Updates from the project's GitHub releases. A day after start and then daily, Kadr asks for the
+//! Updates from the project's GitHub releases. Shortly after start and then daily, Kadr asks for the
 //! latest release; a newer one is offered once in a bubble (and any time from the tray menu).
 //! «Обновить» downloads its Kadr-Setup.exe, checks the SHA-256 GitHub publishes for it, and starts
 //! it: the setup stops Kadr, replaces it and starts the new one, as on a first install.
@@ -20,8 +20,8 @@ pub struct Release {
     /// The first lines of the release notes.
     pub notes: String,
     url: String,
-    /// Lowercase hex, when GitHub published it.
-    sha256: Option<String>,
+    /// The release asset's required SHA-256, supplied by GitHub.
+    sha256: String,
 }
 
 /// What the worker found, for the app's UI thread.
@@ -111,18 +111,35 @@ fn parse(json: &str) -> Option<Release> {
     if v["draft"].as_bool() == Some(true) || v["prerelease"].as_bool() == Some(true) {
         return None;
     }
-    let version = v["tag_name"].as_str()?.trim_start_matches(['v', 'V']).to_string();
+    let tag = v["tag_name"].as_str()?;
+    let version = tag.strip_prefix('v').or_else(|| tag.strip_prefix('V')).unwrap_or(tag).to_string();
+    version_parts(&version)?;
     let asset = v["assets"].as_array()?.iter().find(|a| a["name"].as_str() == Some(ASSET))?;
     let url = asset["browser_download_url"].as_str()?.to_string();
-    let sha256 = asset["digest"].as_str().and_then(|d| d.strip_prefix("sha256:")).map(str::to_ascii_lowercase);
+    let expected_url = format!("https://github.com/{}/releases/download/{tag}/{ASSET}", REPO?);
+    if url != expected_url { return None; }
+    let sha256 = asset["digest"].as_str()?.strip_prefix("sha256:")?.to_ascii_lowercase();
+    if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) { return None; }
     let notes: String = v["body"].as_str().unwrap_or("").lines().take(6).collect::<Vec<_>>().join("\n");
     Some(Release { version, notes: notes.trim().to_string(), url, sha256 })
 }
 
 /// «0.10.1» is newer than «0.9.3»: numbers, not text.
+fn version_parts(version: &str) -> Option<[u64; 3]> {
+    let mut p = version.split('.');
+    let number = |part: &str| {
+        (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()) && (part == "0" || !part.starts_with('0')))
+            .then(|| part.parse().ok()).flatten()
+    };
+    let result = [number(p.next()?)?, number(p.next()?)?, number(p.next()?)?];
+    p.next().is_none().then_some(result)
+}
+
 fn newer(candidate: &str, current: &str) -> bool {
-    let parts = |s: &str| -> Vec<u64> { s.split(['.', '-', '+']).map_while(|p| p.parse().ok()).collect() };
-    parts(candidate) > parts(current)
+    match (version_parts(candidate), version_parts(current)) {
+        (Some(candidate), Some(current)) => candidate > current,
+        _ => false,
+    }
 }
 
 fn note_path() -> Option<std::path::PathBuf> {
@@ -148,7 +165,7 @@ pub fn install() {
     });
 }
 
-fn download_and_run(release: &Release) -> Result<(), String> {
+fn installer_bytes(release: &Release) -> Result<Vec<u8>, String> {
     let (host, path) = crate::http::split(&release.url).ok_or("Странный адрес обновления")?;
     let (status, bytes) = crate::http::request("GET", host, path, "", &[], 512 << 20, "GitHub")?;
     if status != 200 {
@@ -157,11 +174,14 @@ fn download_and_run(release: &Release) -> Result<(), String> {
     if !bytes.starts_with(b"MZ") {
         return Err("Скачался не установщик".into());
     }
-    if let Some(expected) = &release.sha256
-        && sha256(&bytes)? != *expected
-    {
+    if sha256(&bytes)? != release.sha256 {
         return Err("Установщик скачался повреждённым — контрольная сумма не совпала".into());
     }
+    Ok(bytes)
+}
+
+fn download_and_run(release: &Release) -> Result<(), String> {
+    let bytes = installer_bytes(release)?;
     let file = std::env::temp_dir().join(format!("Kadr-Setup-{}.exe", release.version));
     std::fs::write(&file, &bytes).map_err(|e| format!("Не удалось сохранить установщик: {e}"))?;
     kadr_win::log_info!("обновление {}: запускаю {}", release.version, file.display());
@@ -208,13 +228,13 @@ mod tests {
     fn reads_the_release_and_its_setup() {
         let json = r#"{"tag_name":"v0.2.0","draft":false,"prerelease":false,"body":"Что нового:\r\n- GIF\r\n- QR",
             "assets":[{"name":"notes.txt","browser_download_url":"https://x/notes.txt"},
-                      {"name":"Kadr-Setup.exe","browser_download_url":"https://github.com/o/kadr/releases/download/v0.2.0/Kadr-Setup.exe",
-                       "digest":"sha256:ABCDEF"}]}"#;
+                      {"name":"Kadr-Setup.exe","browser_download_url":"https://github.com/DaniilMokhnatkin/Kadr/releases/download/v0.2.0/Kadr-Setup.exe",
+                       "digest":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]}"#;
         let r = parse(json).unwrap();
         assert_eq!(r.version, "0.2.0");
         assert_eq!(r.notes, "Что нового:\n- GIF\n- QR");
         assert!(r.url.ends_with("/Kadr-Setup.exe"));
-        assert_eq!(r.sha256.as_deref(), Some("abcdef"));
+        assert_eq!(r.sha256, "a".repeat(64));
         assert!(parse(&json.replace("\"prerelease\":false", "\"prerelease\":true")).is_none());
         assert!(parse(&json.replace("Kadr-Setup.exe\",\"browser", "Other.exe\",\"browser")).is_none());
     }
@@ -222,5 +242,45 @@ mod tests {
     #[test]
     fn hashes_like_sha256() {
         assert_eq!(sha256(b"abc").unwrap(), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+
+    #[test]
+    fn rejects_non_numeric_versions_and_unverified_downloads() {
+        let sha = "a".repeat(64);
+        let release = |tag: &str, url: &str, digest: &str| format!(
+            r#"{{"tag_name":"{tag}","assets":[{{"name":"Kadr-Setup.exe","browser_download_url":"{url}","digest":"{digest}"}}]}}"#
+        );
+        let repo = REPO.unwrap();
+        let url = format!("https://github.com/{repo}/releases/download/v1.0.1/Kadr-Setup.exe");
+        assert!(parse(&release("v1.0.1", &url, &format!("sha256:{sha}"))).is_some());
+        assert!(parse(&release("release", &url, &format!("sha256:{sha}"))).is_none());
+        assert!(parse(&release("v1.0.1", &url, "")).is_none());
+        assert!(parse(&release("v1.0.1", "https://evil.example/Kadr-Setup.exe", &format!("sha256:{sha}"))).is_none());
+        assert!(!newer("1.0.1-evil", "1.0.0"));
+        assert!(!newer("1.0", "1.0.0"));
+    }
+
+    #[test]
+    fn previous_release_finds_next_stable_release_once() {
+        let tag = "v1.0.0";
+        let sha = "0123456789abcdef".repeat(4);
+        let payload = format!(r#"{{"tag_name":"{tag}","draft":false,"prerelease":false,
+          "assets":[{{"name":"Kadr-Setup.exe","browser_download_url":"https://github.com/{}/releases/download/{tag}/Kadr-Setup.exe","digest":"sha256:{sha}"}}]}}"#, REPO.unwrap());
+        let release = parse(&payload).unwrap();
+        assert!(newer(&release.version, "0.1.0"));
+        assert!(!newer(&release.version, "1.0.0"));
+        assert!(newer("1.0.1", &release.version));
+    }
+
+    #[test]
+    #[ignore = "network: downloads the published installer but never runs it"]
+    fn live_latest_release_download_passes_integrity_check_without_installing() {
+        let path = format!("/repos/{}/releases/latest", REPO.unwrap());
+        let (status, body) = crate::http::request("GET", "api.github.com", &path,
+            "Accept: application/vnd.github+json\r\n", &[], 1 << 20, "GitHub").unwrap();
+        assert_eq!(status, 200);
+        let release = parse(&String::from_utf8_lossy(&body)).expect("numeric version and verifiable GitHub asset");
+        let bytes = installer_bytes(&release).unwrap();
+        println!("Verified Kadr {}: {} bytes, SHA-256 {}. Installer not started.", release.version, bytes.len(), release.sha256);
     }
 }

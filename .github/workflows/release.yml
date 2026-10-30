@@ -1,0 +1,70 @@
+name: Release Kadr
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      KADR_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Prepare Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup default stable
+      - name: Check code
+        run: |
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p kadr-app update::tests -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Fetch verified OCR components
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File installer/fetch-ocr.ps1
+      - name: Build matching version and installer
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File installer/build-release.ps1 -Tag $env:GITHUB_REF_NAME
+      - name: Publish verified installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:GITHUB_REF_NAME
+          $repo = $env:GITHUB_REPOSITORY
+          $existing = & gh release view $tag --repo $repo --json isDraft 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            if (-not ($existing | ConvertFrom-Json).isDraft) { throw 'A published release is never overwritten.' }
+          } else {
+            gh release create $tag --repo $repo --verify-tag --draft --title "Kadr $($tag.Substring(1))" --generate-notes
+            if ($LASTEXITCODE -ne 0) { throw 'Could not create draft release.' }
+          }
+          $file = Get-Item -LiteralPath dist/Kadr-Setup.exe
+          $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  Kadr-Setup.exe" | Set-Content -LiteralPath dist/SHA256SUMS.txt -Encoding ascii
+          gh release upload $tag dist/Kadr-Setup.exe dist/SHA256SUMS.txt --repo $repo --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Asset upload failed; release remains a draft.' }
+          $json = & gh api "repos/$repo/releases/tags/$tag"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot verify uploaded release.' }
+          $release = $json | ConvertFrom-Json
+          $asset = @($release.assets | Where-Object name -eq 'Kadr-Setup.exe')
+          if ($release.tag_name -cne $tag -or $asset.Count -ne 1 -or
+              $asset[0].size -ne $file.Length -or $asset[0].digest -cne "sha256:$hash") {
+            throw 'Uploaded installer does not match the build; release remains a draft.'
+          }
+          gh release edit $tag --repo $repo --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Could not publish the verified release.' }
