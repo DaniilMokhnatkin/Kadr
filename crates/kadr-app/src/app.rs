@@ -1568,8 +1568,17 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
         WM_CHAR => with_app(|app| app.on_text(wp.0 as u16)),
         WM_MOUSEWHEEL => with_app(|app| app.editor_wheel(((wp.0 >> 16) as u16 as i16) as i32)),
         WM_LBUTTONDBLCLK => with_app(|app| {
-            if let Some(a) = &mut app.active {
-                a.drawing.edit_text();
+            // On a text label: edit it. Elsewhere inside the selection, with the pointer tool
+            // (drawing tools take two quick clicks as two marks): copy, as in ShareX.
+            let copy = app.active.as_mut().is_some_and(|a| {
+                !a.drawing.edit_text()
+                    && a.drawing.tool == kadr_doc::annotation::Tool::Select
+                    && !a.drawing.typing()
+                    && a.session.show_toolbar()
+                    && a.session.selection().is_some_and(|s| s.contains(doc_point(cursor_pos())))
+            });
+            if copy {
+                app.export(Export::Copy);
             }
             app.render_all();
         }),

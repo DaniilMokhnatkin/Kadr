@@ -28,6 +28,8 @@ struct Edit {
     start: Point,
     shape: Annotation,
     handle: Handle,
+    /// Dragging one point alone: the tip of a numbered marker's tail.
+    point: Option<usize>,
 }
 impl Default for Drawing {
     fn default() -> Self {
@@ -217,8 +219,17 @@ impl Drawing {
         }
         if self.tool == Tool::Select {
             let previous = self.selected.filter(|i| *i < self.shapes.len());
-            let handle = previous.and_then(|i| hit_handle(&self.shapes[i].bounds(), p, 8));
-            let index = if handle.is_some() {
+            // A numbered marker's tip is grabbed on its own, so the bubble stays and the tail turns.
+            let tip = |s: &Annotation| {
+                s.tool == Tool::Counter
+                    && s.points[0] != s.points[1]
+                    && ((p.x - s.points[0][0]) as f64).hypot((p.y - s.points[0][1]) as f64) <= 10.0
+            };
+            let point = self.shapes.iter().rposition(tip);
+            let handle = if point.is_some() { None } else { previous.and_then(|i| hit_handle(&self.shapes[i].bounds(), p, 8)) };
+            let index = if point.is_some() {
+                point
+            } else if handle.is_some() {
                 previous
             } else {
                 self.shapes.iter().rposition(|s| s.hit(p))
@@ -236,6 +247,7 @@ impl Drawing {
                     start: p,
                     shape: self.shapes[i].clone(),
                     handle: handle.unwrap_or(Handle::Move),
+                    point: point.map(|_| 0),
                 });
                 return true;
             }
@@ -263,10 +275,9 @@ impl Drawing {
                 .unwrap_or(0)
                 .saturating_add(1)
                 .min(9999);
-            self.last = Some(shape.id);
-            let before = self.snapshot();
-            self.shapes.push(shape);
-            self.record(before);
+            // As in ShareX: the press marks the spot, a drag carries the bubble away from it with a
+            // tail pointing back; a plain click leaves the bubble on the spot.
+            self.pending = Some(shape);
         } else if self.tool == Tool::Text {
             let before = self.snapshot();
             self.last = Some(shape.id);
@@ -325,7 +336,11 @@ impl Drawing {
         if let Some(edit) = &self.edit {
             let i = self.selected.unwrap();
             let bounds = edit.shape.bounds();
-            if edit.handle == Handle::Move {
+            if let Some(k) = edit.point {
+                let mut shape = edit.shape.clone();
+                shape.points[k] = [p.x, p.y];
+                self.shapes[i] = shape;
+            } else if edit.handle == Handle::Move {
                 let target = bounds
                     .offset(p.x - edit.start.x, p.y - edit.start.y)
                     .moved_inside(&crop);
@@ -473,6 +488,29 @@ impl Drawing {
 mod tests {
     use super::*;
     const C: Rect = Rect::new(-100, 0, 500, 500);
+    #[test]
+    fn numbered_markers_point_at_the_pressed_spot_and_the_tip_moves_alone() {
+        let mut d = Drawing::default();
+        d.set_tool(Tool::Counter);
+        // A click: the bubble on the spot, numbered 1.
+        d.down(Point::new(100, 100), C, 1);
+        d.up(Point::new(100, 100), C, false);
+        // A drag: the tip stays where the press was, the bubble follows the hand; numbered 2.
+        d.down(Point::new(200, 300), C, 1);
+        d.motion(Point::new(260, 200), C, false);
+        d.up(Point::new(280, 180), C, false);
+        let s = d.shapes();
+        assert_eq!((s[0].number, s[0].points[0], s[0].points[1]), (1, [100, 100], [100, 100]));
+        assert_eq!((s[1].number, s[1].points[0], s[1].points[1]), (2, [200, 300], [280, 180]));
+        // Grabbing the tip turns the tail; the bubble stays.
+        d.set_tool(Tool::Select);
+        d.down(Point::new(203, 297), C, 1);
+        d.up(Point::new(150, 320), C, false);
+        assert_eq!((d.shapes()[1].points[0], d.shapes()[1].points[1]), ([150, 320], [280, 180]));
+        // One undo puts the tip back.
+        d.undo();
+        assert_eq!(d.shapes()[1].points[0], [200, 300]);
+    }
     #[test]
     fn switching_windows_commits_visible_stroke_and_does_not_continue_it_on_return() {
         let mut d = Drawing::default();

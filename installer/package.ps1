@@ -3,7 +3,7 @@
     Собирает папку и архив для установки Kadr на другой компьютер: dist\Kadr-setup и dist\Kadr-setup.zip.
 
 .DESCRIPTION
-    Внутри: kadr.exe (uiAccess, C-рантайм вшит), install.ps1, «Установить.cmd», «Удалить.cmd»
+    Внутри: kadr.bin (это kadr.exe: uiAccess, C-рантайм вшит; .bin — чтобы его не запускали из папки), install.ps1, «Установить.cmd», «Удалить.cmd»
     и «ИНСТРУКЦИЯ.txt». Администратор не нужен. Запуск из корня проекта:
         cargo build --release --features uiaccess -p kadr-app
         powershell -ExecutionPolicy Bypass -File installer\package.ps1
@@ -20,7 +20,7 @@ if (Select-String -Path $exe -Pattern 'VCRUNTIME140' -Quiet) {
 $out = Join-Path $root 'dist\Kadr-setup'
 if (Test-Path $out) { Remove-Item $out -Recurse -Force }
 New-Item -ItemType Directory -Path $out | Out-Null
-Copy-Item $exe $out
+Copy-Item $exe (Join-Path $out 'kadr.bin')
 foreach ($name in 'install.ps1', 'Установить.cmd', 'Удалить.cmd', 'ИНСТРУКЦИЯ.txt') {
     Copy-Item (Join-Path $PSScriptRoot $name) $out
 }

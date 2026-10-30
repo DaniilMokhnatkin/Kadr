@@ -1,222 +1,264 @@
 //! One 24-unit outline family, drawn at display resolution without icon fonts or raster assets.
+//! Every outline is a real path geometry stroked with round caps and round joins, so corners and
+//! curves stay clean at any scale instead of being butt-ended segments laid side by side.
 use super::*;
-use windows::Win32::Graphics::Direct2D::D2D1_ELLIPSE;
+use windows::Win32::Graphics::Direct2D::Common::{D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN};
+use windows::Win32::Graphics::Direct2D::{
+    D2D1_CAP_STYLE_ROUND, D2D1_ELLIPSE, D2D1_LINE_JOIN_ROUND, D2D1_STROKE_STYLE_PROPERTIES, ID2D1Factory,
+};
+
+/// Stroke width in grid units.
+const STROKE: f32 = 1.75;
+
+struct Pen<'a> {
+    gpu: &'a Gpu,
+    factory: ID2D1Factory,
+    style: Option<ID2D1StrokeStyle>,
+    x: f32,
+    y: f32,
+    s: f32,
+}
+
+impl Pen<'_> {
+    fn at(&self, (a, b): (f32, f32)) -> Vector2 {
+        Vector2::new(self.x + a * self.s, self.y + b * self.s)
+    }
+    fn figure(&self, points: &[(f32, f32)], closed: bool, filled: bool) {
+        let Some((first, rest)) = points.split_first() else { return };
+        unsafe {
+            let Ok(geometry) = self.factory.CreatePathGeometry() else { return };
+            let Ok(sink) = geometry.Open() else { return };
+            sink.BeginFigure(self.at(*first), if filled { D2D1_FIGURE_BEGIN_FILLED } else { D2D1_FIGURE_BEGIN_HOLLOW });
+            let rest: Vec<Vector2> = rest.iter().map(|p| self.at(*p)).collect();
+            sink.AddLines(&rest);
+            sink.EndFigure(if closed { D2D1_FIGURE_END_CLOSED } else { D2D1_FIGURE_END_OPEN });
+            if sink.Close().is_err() {
+                return;
+            }
+            if filled {
+                self.gpu.d2d.FillGeometry(&geometry, &self.gpu.brush, None);
+            } else {
+                self.gpu.d2d.DrawGeometry(&geometry, &self.gpu.brush, STROKE * self.s, self.style.as_ref());
+            }
+        }
+    }
+    /// An open polyline with joined corners.
+    fn path(&self, points: &[(f32, f32)]) {
+        self.figure(points, false, false);
+    }
+    fn shape(&self, points: &[(f32, f32)]) {
+        self.figure(points, true, false);
+    }
+    fn fill(&self, points: &[(f32, f32)]) {
+        self.figure(points, true, true);
+    }
+    fn line(&self, a: (f32, f32), b: (f32, f32)) {
+        self.path(&[a, b]);
+    }
+    fn ellipse(&self, c: (f32, f32), rx: f32, ry: f32) {
+        let e = D2D1_ELLIPSE { point: self.at(c), radiusX: rx * self.s, radiusY: ry * self.s };
+        unsafe { self.gpu.d2d.DrawEllipse(&e, &self.gpu.brush, STROKE * self.s, self.style.as_ref()) };
+    }
+    fn dot(&self, c: (f32, f32), r: f32) {
+        let e = D2D1_ELLIPSE { point: self.at(c), radiusX: r * self.s, radiusY: r * self.s };
+        unsafe { self.gpu.d2d.FillEllipse(&e, &self.gpu.brush) };
+    }
+    fn rounded(&self, l: f32, t: f32, r: f32, b: f32, radius: f32) {
+        let rr = D2D1_ROUNDED_RECT {
+            rect: rect(self.x + l * self.s, self.y + t * self.s, self.x + r * self.s, self.y + b * self.s),
+            radiusX: radius * self.s,
+            radiusY: radius * self.s,
+        };
+        unsafe { self.gpu.d2d.DrawRoundedRectangle(&rr, &self.gpu.brush, STROKE * self.s, self.style.as_ref()) };
+    }
+}
+
+/// Points along a quadratic Bézier, for smooth curves made of short segments.
+fn quad(a: (f32, f32), c: (f32, f32), b: (f32, f32)) -> Vec<(f32, f32)> {
+    (0..=16)
+        .map(|i| {
+            let t = i as f32 / 16.0;
+            let u = 1.0 - t;
+            (u * u * a.0 + 2.0 * u * t * c.0 + t * t * b.0, u * u * a.1 + 2.0 * u * t * c.1 + t * t * b.1)
+        })
+        .collect()
+}
+
+/// Points along a circular arc, angles in degrees, y pointing down.
+fn arc(c: (f32, f32), r: f32, from: f32, to: f32) -> Vec<(f32, f32)> {
+    let n = ((to - from).abs() / 10.0).ceil().max(2.0) as usize;
+    (0..=n)
+        .map(|i| {
+            let a = (from + (to - from) * i as f32 / n as f32).to_radians();
+            (c.0 + r * a.cos(), c.1 + r * a.sin())
+        })
+        .collect()
+}
+
+/// A round marker with a pointed tail: the outline of a numbered step.
+pub(super) fn teardrop(c: (f32, f32), r: f32, tip: (f32, f32)) -> Vec<(f32, f32)> {
+    let (dx, dy) = (tip.0 - c.0, tip.1 - c.1);
+    let d = dx.hypot(dy).max(r + 0.01);
+    let toward = dy.atan2(dx).to_degrees();
+    let half = (r / d).acos().to_degrees();
+    let mut points = vec![tip];
+    points.extend(arc(c, r, toward + half, toward + 360.0 - half));
+    points
+}
 
 pub(super) fn draw(gpu: &Gpu, button: ToolbarButton, r: D2D_RECT_F, ink: D2D1_COLOR_F, scale: f32) {
-    let x = (r.left + r.right) / 2.0 - 12.0 * scale;
-    let y = (r.top + r.bottom) / 2.0 - 12.0 * scale;
-    let point = |a: f32, b: f32| Vector2::new(x + a * scale, y + b * scale);
+    let Ok(factory) = (unsafe { gpu.d2d.GetFactory() }) else { return };
+    let style = unsafe {
+        factory.CreateStrokeStyle(
+            &D2D1_STROKE_STYLE_PROPERTIES {
+                startCap: D2D1_CAP_STYLE_ROUND,
+                endCap: D2D1_CAP_STYLE_ROUND,
+                dashCap: D2D1_CAP_STYLE_ROUND,
+                lineJoin: D2D1_LINE_JOIN_ROUND,
+                ..Default::default()
+            },
+            None,
+        )
+    }
+    .ok();
+    let p = Pen {
+        gpu,
+        factory,
+        style,
+        x: (r.left + r.right) / 2.0 - 12.0 * scale,
+        y: (r.top + r.bottom) / 2.0 - 12.0 * scale,
+        s: scale,
+    };
     unsafe {
         gpu.brush.SetColor(&ink);
     }
-    let line = |a: f32, b: f32, c: f32, d: f32| unsafe {
-        gpu.d2d.DrawLine(
-            point(a, b),
-            point(c, d),
-            &gpu.brush,
-            1.7 * scale,
-            None::<&ID2D1StrokeStyle>,
-        );
-    };
-    let path = |points: &[(f32, f32)]| {
-        for p in points.windows(2) {
-            line(p[0].0, p[0].1, p[1].0, p[1].1);
-        }
-    };
-    let ellipse = |a: f32, b: f32, rx: f32, ry: f32| unsafe {
-        gpu.d2d.DrawEllipse(
-            &D2D1_ELLIPSE {
-                point: point(a, b),
-                radiusX: rx * scale,
-                radiusY: ry * scale,
-            },
-            &gpu.brush,
-            1.7 * scale,
-            None::<&ID2D1StrokeStyle>,
-        );
-    };
-    let box_ = |a: f32, b: f32, c: f32, d: f32| path(&[(a, b), (c, b), (c, d), (a, d), (a, b)]);
     let dots = || {
-        for a in [8.0, 12.0, 16.0] {
-            for b in [8.0, 12.0, 16.0] {
-                unsafe {
-                    gpu.d2d.FillEllipse(
-                        &D2D1_ELLIPSE {
-                            point: point(a, b),
-                            radiusX: 0.9 * scale,
-                            radiusY: 0.9 * scale,
-                        },
-                        &gpu.brush,
-                    );
-                }
+        for a in [8.5, 12.0, 15.5] {
+            for b in [8.5, 12.0, 15.5] {
+                p.dot((a, b), 0.95);
             }
         }
     };
     match button {
         ToolbarButton::Tool(tool) => match tool {
-            Tool::Select => path(&[
-                (5.0, 3.0),
-                (5.0, 19.0),
-                (9.0, 15.0),
-                (12.0, 21.0),
-                (15.0, 19.5),
-                (12.0, 13.5),
-                (18.0, 13.0),
-                (5.0, 3.0),
-            ]),
+            Tool::Select => p.shape(&[(6.5, 3.5), (6.5, 19.0), (10.3, 15.3), (13.0, 21.0), (15.6, 19.8), (13.0, 14.2), (18.2, 14.0)]),
+            // A shaft and an open head two fifths of its length, at a right angle.
             Tool::Arrow => {
-                line(5.0, 19.0, 19.0, 5.0);
-                path(&[(10.0, 5.0), (19.0, 5.0), (19.0, 14.0)]);
+                p.line((5.5, 18.5), (17.8, 6.2));
+                p.path(&[(10.8, 6.0), (18.0, 6.0), (18.0, 13.2)]);
             }
-            Tool::Line => line(5.0, 19.0, 19.0, 5.0),
-            Tool::Rectangle => box_(4.5, 5.5, 19.5, 18.5),
-            Tool::Ellipse => ellipse(12.0, 12.0, 8.0, 6.5),
+            Tool::Line => p.line((5.5, 18.5), (18.5, 5.5)),
+            Tool::Rectangle => p.rounded(4.5, 6.0, 19.5, 18.0, 2.0),
+            Tool::Ellipse => p.ellipse((12.0, 12.0), 8.5, 6.5),
             Tool::Pen => {
-                path(&[
-                    (4.0, 20.0),
-                    (5.5, 14.0),
-                    (16.0, 3.5),
-                    (20.5, 8.0),
-                    (10.0, 18.5),
-                    (4.0, 20.0),
-                ]);
-                line(14.0, 6.0, 18.0, 10.0);
+                p.shape(&[(4.5, 19.5), (5.6, 14.6), (15.6, 4.6), (19.4, 8.4), (9.4, 18.4)]);
+                p.line((13.6, 6.6), (17.4, 10.4));
             }
             Tool::Marker => {
-                path(&[(4.0, 17.0), (14.0, 4.0), (20.0, 9.0), (10.0, 20.0), (4.0, 17.0)]);
-                line(3.0, 22.0, 13.0, 22.0);
-                line(6.5, 14.0, 12.0, 18.0);
+                p.shape(&[(5.0, 16.5), (14.0, 5.0), (19.5, 9.5), (10.0, 20.0)]);
+                p.line((7.0, 14.0), (12.5, 18.0));
+                p.line((4.0, 21.5), (12.0, 21.5));
             }
             Tool::Text => {
-                path(&[(4.0, 7.0), (4.0, 4.0), (20.0, 4.0), (20.0, 7.0)]);
-                line(12.0, 4.0, 12.0, 20.0);
-                line(8.0, 20.0, 16.0, 20.0);
+                p.path(&[(5.0, 7.5), (5.0, 4.5), (19.0, 4.5), (19.0, 7.5)]);
+                p.line((12.0, 4.5), (12.0, 19.5));
+                p.line((9.0, 19.5), (15.0, 19.5));
             }
+            // A numbered marker pointing at its spot, with an optically centred «1».
             Tool::Counter => {
-                ellipse(12.0, 12.0, 8.5, 8.5);
-                path(&[(9.0, 10.0), (12.0, 7.0), (12.0, 17.0)]);
-                line(9.0, 17.0, 15.0, 17.0);
+                p.shape(&teardrop((13.5, 10.0), 6.8, (4.5, 20.0)));
+                p.path(&[(12.3, 8.8), (14.0, 7.6), (14.0, 12.6)]);
             }
             Tool::Blur => {
-                box_(3.5, 3.5, 20.5, 20.5);
+                p.rounded(4.0, 4.0, 20.0, 20.0, 2.5);
                 dots();
             }
             Tool::BlurEllipse => {
-                ellipse(12.0, 12.0, 9.0, 8.0);
+                p.ellipse((12.0, 12.0), 9.0, 8.0);
                 dots();
             }
             Tool::BlurBrush => {
-                path(&[(5.0, 18.0), (10.0, 14.0), (13.0, 7.0), (18.0, 4.0)]);
-                ellipse(7.0, 17.0, 3.5, 3.5);
-                line(14.0, 7.0, 18.0, 11.0);
+                p.path(&quad((6.0, 18.0), (11.0, 9.0), (19.0, 4.5)));
+                p.ellipse((7.0, 17.0), 3.2, 3.2);
             }
             Tool::Spotlight => {
-                box_(4.0, 4.0, 20.0, 20.0);
-                box_(9.0, 9.0, 15.0, 15.0);
-                line(4.0, 8.0, 7.0, 8.0);
-                line(17.0, 16.0, 20.0, 16.0);
+                p.rounded(4.0, 4.0, 20.0, 20.0, 2.5);
+                p.rounded(9.0, 9.0, 15.0, 15.0, 1.5);
             }
             Tool::Redact => {
-                box_(4.0, 5.0, 20.0, 19.0);
-                unsafe {
-                    gpu.d2d.FillRectangle(
-                        &rect(x + 4.0 * scale, y + 10.0 * scale, x + 20.0 * scale, y + 14.0 * scale),
-                        &gpu.brush,
-                    );
-                }
+                p.rounded(4.0, 5.0, 20.0, 19.0, 2.0);
+                p.fill(&[(4.0, 10.0), (20.0, 10.0), (20.0, 14.0), (4.0, 14.0)]);
             }
         },
         ToolbarButton::Copy => {
-            box_(8.0, 8.0, 20.0, 20.0);
-            path(&[(16.0, 5.0), (16.0, 3.0), (3.0, 3.0), (3.0, 16.0), (5.0, 16.0)]);
+            p.rounded(8.5, 8.5, 20.0, 20.0, 2.0);
+            p.path(&[(15.5, 5.5), (15.5, 4.0), (4.0, 4.0), (4.0, 15.5), (5.5, 15.5)]);
         }
         ToolbarButton::Save => {
-            line(12.0, 3.0, 12.0, 15.0);
-            path(&[(7.0, 10.0), (12.0, 15.0), (17.0, 10.0)]);
-            path(&[(4.0, 14.0), (4.0, 20.0), (20.0, 20.0), (20.0, 14.0)]);
+            p.line((12.0, 3.5), (12.0, 14.5));
+            p.path(&[(7.5, 10.0), (12.0, 14.5), (16.5, 10.0)]);
+            p.path(&[(4.5, 14.5), (4.5, 19.5), (19.5, 19.5), (19.5, 14.5)]);
         }
         ToolbarButton::SaveAs => {
-            path(&[
-                (4.0, 19.0),
-                (4.0, 6.0),
-                (10.0, 6.0),
-                (12.0, 9.0),
-                (20.0, 9.0),
-                (20.0, 19.0),
-                (4.0, 19.0),
-            ]);
-            line(8.0, 14.0, 16.0, 14.0);
-            path(&[(13.0, 11.0), (16.0, 14.0), (13.0, 17.0)]);
+            p.shape(&[(4.0, 18.5), (4.0, 6.0), (9.5, 6.0), (11.5, 8.5), (20.0, 8.5), (20.0, 18.5)]);
+            p.line((8.5, 13.5), (15.5, 13.5));
+            p.path(&[(12.8, 10.8), (15.5, 13.5), (12.8, 16.2)]);
         }
+        // An upright push pin: a cap, a flared collar, and a straight needle.
         ToolbarButton::Pin => {
-            path(&[
-                (9.0, 3.0),
-                (19.0, 3.0),
-                (17.0, 10.0),
-                (20.0, 14.0),
-                (10.0, 14.0),
-                (7.0, 11.0),
-                (10.0, 9.0),
-                (9.0, 3.0),
-            ]);
-            line(11.0, 14.0, 5.0, 21.0);
+            p.shape(&[(8.5, 3.5), (15.5, 3.5), (14.2, 9.5), (17.5, 13.5), (6.5, 13.5), (9.8, 9.5)]);
+            p.line((12.0, 13.5), (12.0, 20.5));
         }
         ToolbarButton::Recent => {
-            path(&[(4.0, 10.0), (4.0, 4.0), (4.0, 10.0), (10.0, 10.0)]);
-            ellipse(13.0, 13.0, 8.0, 8.0);
-            path(&[(13.0, 8.0), (13.0, 13.0), (17.0, 15.0)]);
+            let mut back = arc((12.5, 12.5), 8.0, 200.0, 520.0);
+            back.reverse();
+            p.path(&back);
+            p.path(&[(3.0, 7.5), (5.0, 10.0), (8.0, 8.5)]);
+            p.path(&[(12.5, 8.0), (12.5, 12.5), (15.5, 14.5)]);
         }
         // An eye under a stroke: «hide what should not be seen».
         ToolbarButton::Smart => {
-            path(&[(3.0, 12.0), (7.0, 7.5), (12.0, 6.0), (17.0, 7.5), (21.0, 12.0), (17.0, 16.5), (12.0, 18.0), (7.0, 16.5), (3.0, 12.0)]);
-            ellipse(12.0, 12.0, 2.6, 2.6);
-            line(4.5, 19.5, 19.5, 4.5);
+            let mut eye = quad((3.0, 12.0), (12.0, 3.0), (21.0, 12.0));
+            eye.extend(quad((21.0, 12.0), (12.0, 21.0), (3.0, 12.0)).into_iter().skip(1));
+            p.shape(&eye);
+            p.ellipse((12.0, 12.0), 2.6, 2.6);
+            p.line((5.0, 19.0), (19.0, 5.0));
         }
         // Scan corners around a T: «text from the picture».
         ToolbarButton::Text => {
-            path(&[(3.0, 8.0), (3.0, 3.0), (8.0, 3.0)]);
-            path(&[(16.0, 3.0), (21.0, 3.0), (21.0, 8.0)]);
-            path(&[(3.0, 16.0), (3.0, 21.0), (8.0, 21.0)]);
-            path(&[(16.0, 21.0), (21.0, 21.0), (21.0, 16.0)]);
-            line(8.0, 8.0, 16.0, 8.0);
-            line(12.0, 8.0, 12.0, 17.0);
+            p.path(&[(3.5, 8.0), (3.5, 3.5), (8.0, 3.5)]);
+            p.path(&[(16.0, 3.5), (20.5, 3.5), (20.5, 8.0)]);
+            p.path(&[(3.5, 16.0), (3.5, 20.5), (8.0, 20.5)]);
+            p.path(&[(16.0, 20.5), (20.5, 20.5), (20.5, 16.0)]);
+            p.line((8.5, 8.5), (15.5, 8.5));
+            p.line((12.0, 8.5), (12.0, 16.0));
         }
-        // A Latin A beside a CJK-like character: the usual translate mark.
+        // A Latin A beside a CJK-like character, both about as wide as they are tall.
         ToolbarButton::Translate => {
-            path(&[(2.5, 20.0), (7.0, 7.0), (11.5, 20.0)]);
-            line(4.4, 15.0, 9.6, 15.0);
-            line(13.0, 6.0, 21.5, 6.0);
-            line(17.25, 3.0, 17.25, 6.0);
-            line(14.0, 9.0, 21.0, 20.0);
-            line(21.0, 9.0, 14.0, 20.0);
+            p.path(&[(3.0, 18.0), (7.0, 8.5), (11.0, 18.0)]);
+            p.line((4.6, 14.5), (9.4, 14.5));
+            p.line((17.25, 5.0), (17.25, 7.5));
+            p.line((13.0, 7.5), (21.5, 7.5));
+            p.line((14.0, 10.5), (20.5, 18.0));
+            p.line((20.5, 10.5), (14.0, 18.0));
         }
         ToolbarButton::Close => {
-            line(6.0, 6.0, 18.0, 18.0);
-            line(18.0, 6.0, 6.0, 18.0);
+            p.line((6.5, 6.5), (17.5, 17.5));
+            p.line((17.5, 6.5), (6.5, 17.5));
         }
         ToolbarButton::Undo => {
-            path(&[(8.0, 4.0), (3.0, 9.0), (8.0, 14.0)]);
-            path(&[
-                (3.0, 9.0),
-                (15.0, 9.0),
-                (19.0, 11.0),
-                (20.0, 14.0),
-                (19.0, 17.0),
-                (16.0, 19.0),
-                (11.0, 19.0),
-            ]);
+            p.path(&[(8.0, 4.5), (3.5, 9.0), (8.0, 13.5)]);
+            let mut curve = vec![(3.5, 9.0), (14.0, 9.0)];
+            curve.extend(arc((14.0, 14.0), 5.0, -90.0, 90.0).into_iter().skip(1));
+            curve.push((10.5, 19.0));
+            p.path(&curve);
         }
         ToolbarButton::Redo => {
-            path(&[(16.0, 4.0), (21.0, 9.0), (16.0, 14.0)]);
-            path(&[
-                (21.0, 9.0),
-                (9.0, 9.0),
-                (5.0, 11.0),
-                (4.0, 14.0),
-                (5.0, 17.0),
-                (8.0, 19.0),
-                (13.0, 19.0),
-            ]);
+            p.path(&[(16.0, 4.5), (20.5, 9.0), (16.0, 13.5)]);
+            let mut curve = vec![(20.5, 9.0), (10.0, 9.0)];
+            curve.extend(arc((10.0, 14.0), 5.0, 270.0, 90.0).into_iter().skip(1));
+            curve.push((13.5, 19.0));
+            p.path(&curve);
         }
         _ => {}
     }

@@ -249,12 +249,14 @@ fn sample_shapes(scale: f32) -> Vec<kadr_doc::annotation::Annotation> {
         (Tool::Rectangle, [820, 410], [1080, 510]),
         (Tool::Text, [820, 350], [820, 350]),
         (Tool::Counter, [540, 360], [540, 360]),
+        (Tool::Counter, [700, 420], [620, 330]),
         (Tool::Blur, [840, 550], [1160, 650]),
     ] {
         let mut s = Annotation::new(shapes.len() as u64 + 1, tool, Point::new(a[0], a[1]));
         s.points[1] = b;
         s.text = "Здесь важная деталь".into();
         s.seed = 42;
+        s.number = 1 + shapes.iter().filter(|x: &&Annotation| x.tool == Tool::Counter).count() as u32 * u32::from(tool == Tool::Counter);
         shapes.push(s.transformed(
             Rect::new(0, 0, 1600, 900),
             Rect::new(0, 0, (1600.0 * scale) as i32, (900.0 * scale) as i32),

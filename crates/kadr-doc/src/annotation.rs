@@ -187,6 +187,13 @@ impl Annotation {
                 let inner = Rect::new(r.left + 8, r.top + 8, r.right - 8, r.bottom - 8);
                 !inner.contains(p)
             }
+            // The bubble (second point) and the tail down to its tip (first point).
+            Tool::Counter => {
+                let [cx, cy] = self.points[1];
+                let r = (self.font_size() * 3 / 4) as f64;
+                (((p.x - cx) as f64).hypot((p.y - cy) as f64) <= r + 4.0)
+                    || distance(p, self.points[1], self.points[0]) <= tolerance
+            }
             _ => true,
         }
     }

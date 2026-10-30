@@ -47,7 +47,14 @@ fn readings(image: &Image) -> Result<Vec<(bool, Vec<Line>)>> {
         BitmapAlphaMode::Ignore,
     )?;
     let mut readings = Vec::new();
-    for (cyrillic, engine) in engines()? {
+    let engines = engines()?;
+    if engines.is_empty() {
+        return Err(windows::core::Error::new(
+            windows::Win32::Foundation::E_FAIL,
+            "В Windows нет распознавания текста. Запустите установщик Kadr ещё раз с интернетом — он докачает его.",
+        ));
+    }
+    for (cyrillic, engine) in engines {
         let result = engine.RecognizeAsync(&bitmap)?.join()?;
         let lines = result.Lines()?;
         let mut out = Vec::new();

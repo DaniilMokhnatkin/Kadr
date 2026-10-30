@@ -217,38 +217,70 @@ fn draw_shape(
                     edit.filter(|e| e.0 == s.id).map(|e| (e.1, e.2)),
                 )?;
             }
+            // The bubble sits at the second point; when it was dragged away from the first, a tail
+            // narrows from the bubble down to that spot, as in ShareX.
             Tool::Counter => {
                 let radius = s.font_size() as f32 * 0.75;
-                gpu.d2d.FillEllipse(
-                    &D2D1_ELLIPSE {
-                        point: a,
-                        radiusX: radius,
-                        radiusY: radius,
-                    },
-                    &gpu.brush,
-                );
-                let value = s.number.to_string();
-                let size = s.font_size() as f32;
+                let (dx, dy) = (a.X - b.X, a.Y - b.Y);
+                let d = dx.hypot(dy);
+                if d > radius * 1.15 {
+                    let toward = dy.atan2(dx);
+                    let half = (radius / d).acos();
+                    let geometry = shared.d2d.CreatePathGeometry()?;
+                    let sink = geometry.Open()?;
+                    let on = |angle: f32| Vector2 { X: b.X + radius * angle.cos(), Y: b.Y + radius * angle.sin() };
+                    sink.BeginFigure(a, D2D1_FIGURE_BEGIN_FILLED);
+                    sink.AddLine(on(toward + half));
+                    sink.AddArc(&D2D1_ARC_SEGMENT {
+                        point: on(toward - half),
+                        size: D2D_SIZE_F { width: radius, height: radius },
+                        rotationAngle: 0.0,
+                        sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                        arcSize: D2D1_ARC_SIZE_LARGE,
+                    });
+                    sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                    sink.Close()?;
+                    gpu.d2d.FillGeometry(&geometry, &gpu.brush, None);
+                } else {
+                    gpu.d2d.FillEllipse(&D2D1_ELLIPSE { point: b, radiusX: radius, radiusY: radius }, &gpu.brush);
+                }
                 let light = (s.color[0] as u32 * 299 + s.color[1] as u32 * 587 + s.color[2] as u32 * 114) > 150000;
-                draw_text(
-                    gpu,
-                    shared,
-                    &value,
-                    Vector2 {
-                        X: a.X - value.len() as f32 * size * 0.28,
-                        Y: a.Y - size * 0.68,
-                    },
-                    size,
-                    if light { [17, 17, 17] } else { [255, 255, 255] },
-                    false,
-                    None,
-                )?;
+                draw_number(gpu, shared, &s.number.to_string(), b, s.font_size() as f32, if light { [17, 17, 17] } else { [255, 255, 255] })?;
             }
             _ => {}
         }
     }
     Ok(())
 }
+/// A marker's number, centred by its ink rather than its advance box: a «1» has a wide right
+/// side bearing and would otherwise sit visibly left of centre.
+fn draw_number(gpu: &Gpu, shared: &Shared, value: &str, center: Vector2, size: f32, color: [u8; 3]) -> Result<()> {
+    let text: Vec<_> = value.encode_utf16().collect();
+    unsafe {
+        let format = shared.dwrite.CreateTextFormat(
+            PCWSTR(shared.ui_family.as_ptr()),
+            None,
+            DWRITE_FONT_WEIGHT_SEMI_BOLD,
+            DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            size,
+            w!("ru-RU"),
+        )?;
+        format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+        let layout = shared.dwrite.CreateTextLayout(&text, &format, 65536.0, 65536.0)?;
+
+        let o = layout.GetOverhangMetrics()?;
+        // Ink box inside the layout box: overhangs are positive outward of [0, max] (65536 wide).
+        let (left, top) = (-o.left, -o.top);
+        let (right, bottom) = (65536.0 + o.right, 65536.0 + o.bottom);
+        let (ink_w, ink_h) = (right - left, bottom - top);
+        let at = Vector2 { X: center.X - ink_w / 2.0 - left, Y: center.Y - ink_h / 2.0 - top };
+        gpu.brush.SetColor(&ink(color, 1.0));
+        gpu.d2d.DrawTextLayout(at, &layout, &gpu.brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_text(
     gpu: &Gpu,

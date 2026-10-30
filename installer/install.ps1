@@ -34,8 +34,10 @@ $ErrorActionPreference = 'Stop'
 # В Windows PowerShell 5.1 $PSScriptRoot пуст в значениях по умолчанию param() при запуске через -File,
 # поэтому путь по умолчанию считаем здесь.
 if (-not $Exe) {
-    # In the ready package kadr.exe lies next to this script; in the project it is the release build.
-    $Exe = Join-Path $PSScriptRoot 'kadr.exe'
+    # In the ready package the program lies next to this script as kadr.bin: a uiAccess program
+    # cannot start outside Program Files, so it must not invite a double-click there. In the
+    # project it is the release build.
+    $Exe = Join-Path $PSScriptRoot 'kadr.bin'
     if (-not (Test-Path $Exe)) { $Exe = Join-Path $PSScriptRoot '..\target\release\kadr.exe' }
 }
 Write-Verbose "exe: $Exe"
@@ -43,6 +45,7 @@ $Subject = 'CN=Kadr Local Code Signing'
 $InstallDir = Join-Path $env:ProgramFiles 'Kadr'
 $Target = Join-Path $InstallDir 'kadr.exe'
 $RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$Shortcut = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Kadr.lnk'
 
 function Assert-Admin {
     $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
@@ -101,6 +104,7 @@ Stop-Kadr
 
 if ($Uninstall) {
     Remove-ItemProperty -Path $RunKey -Name 'Kadr' -ErrorAction SilentlyContinue
+    Remove-Item $Shortcut -ErrorAction SilentlyContinue
     if (Test-Path $InstallDir) { Remove-Item $InstallDir -Recurse -Force }
     if ($RemoveCertificate) { Remove-SigningCertificate }
     Write-Host 'Kadr удалён.'
@@ -132,6 +136,32 @@ Write-Host "Подписано: $Target"
 if (-not $NoAutostart) {
     Set-ItemProperty -Path $RunKey -Name 'Kadr' -Value "`"$Target`""
     Write-Host 'Автозапуск включён.'
+}
+
+# Start menu: after «Выход» from the tray Kadr is found and started again by name.
+$link = (New-Object -ComObject WScript.Shell).CreateShortcut($Shortcut)
+$link.TargetPath = $Target
+$link.Description = 'Kadr — скриншоты'
+$link.Save()
+Write-Host 'Ярлык в меню «Пуск»: Kadr.'
+
+# Text recognition («Текст», «Перевод», «Цензура») uses Windows OCR, which has a pack per language.
+# English and Russian are fetched from Windows Update if missing; without the Internet this step is
+# skipped and can be repeated later by running the installer again.
+foreach ($lang in 'en-US', 'ru-RU') {
+    $name = "Language.OCR~~~$lang~0.0.1.0"
+    try {
+        $cap = Get-WindowsCapability -Online -Name $name
+        if ($cap.State -eq 'Installed') {
+            Write-Host "Распознавание текста ($lang): уже есть."
+        } else {
+            Write-Host "Скачиваю распознавание текста ($lang)… это может занять пару минут."
+            Add-WindowsCapability -Online -Name $name | Out-Null
+            Write-Host "Распознавание текста ($lang): установлено."
+        }
+    } catch {
+        Write-Warning "Распознавание текста ($lang) не установлено: $($_.Exception.Message)"
+    }
 }
 
 # Из этой консоли Kadr стартовал бы с правами администратора. Через explorer он запускается
