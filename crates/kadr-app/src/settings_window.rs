@@ -60,11 +60,19 @@ const TOGGLE_HINTS: [&str; 5] = [
     "≈8 мс вместо ≈23 мс, чуть больше памяти",
 ];
 const KEYS: [&str; 5] = ["Выделить область", "Монитор под курсором", "Активное окно", "Последняя область", "Недавние"];
+/// Segmented rows: label, hint, choices.
+const CHOICES: [(&str, &str, &[&str]); 2] = [
+    ("Тема", "", &["Авто", "Светлая", "Тёмная"]),
+    ("Умное размытие", "Строгое — ещё имена, ники и числа", &["Обычное", "Строгое"]),
+];
+const SEGMENT_W: f32 = 84.0;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Hit {
     Close,
     Toggle(usize),
+    /// Row, choice.
+    Choice(usize, usize),
     Folder,
     FolderReset,
     Key(usize),
@@ -74,21 +82,32 @@ enum Hit {
 struct Layout {
     close: D2D_RECT_F,
     toggles: [D2D_RECT_F; 5],
+    choices: [D2D_RECT_F; 2],
     folder: D2D_RECT_F,
     folder_button: D2D_RECT_F,
     folder_reset: D2D_RECT_F,
     keys: [D2D_RECT_F; 5],
     open_file: D2D_RECT_F,
-    groups: [D2D_RECT_F; 3],
-    sections: [f32; 3],
+    groups: [D2D_RECT_F; 4],
+    sections: [f32; 4],
+    scale: f32,
     height: f32,
+}
+
+/// The segmented control's track at the right of a row.
+fn track(r: D2D_RECT_F, s: f32, n: usize) -> D2D_RECT_F {
+    rect(r.right - 12.0 * s - n as f32 * SEGMENT_W * s, r.top + 8.0 * s, r.right - 12.0 * s, r.bottom - 8.0 * s)
+}
+fn segment(t: D2D_RECT_F, s: f32, i: f32) -> D2D_RECT_F {
+    let left = t.left + i * SEGMENT_W * s;
+    rect(left, t.top, left + SEGMENT_W * s, t.bottom)
 }
 
 fn layout(width: f32, s: f32) -> Layout {
     let (left, right) = (PAD * s, width - PAD * s);
     let mut y = 84.0 * s;
-    let mut sections = [0.0; 3];
-    let mut groups = [rect(0.0, 0.0, 0.0, 0.0); 3];
+    let mut sections = [0.0; 4];
+    let mut groups = [rect(0.0, 0.0, 0.0, 0.0); 4];
     let mut rows = |n: usize, section: usize, y: &mut f32| -> Vec<D2D_RECT_F> {
         sections[section] = *y;
         *y += SECTION * s;
@@ -100,14 +119,16 @@ fn layout(width: f32, s: f32) -> Layout {
         out
     };
     let toggles: [D2D_RECT_F; 5] = rows(5, 0, &mut y).try_into().unwrap();
-    let folder = rows(1, 1, &mut y)[0];
-    let keys: [D2D_RECT_F; 5] = rows(5, 2, &mut y).try_into().unwrap();
+    let choices: [D2D_RECT_F; 2] = rows(2, 1, &mut y).try_into().unwrap();
+    let folder = rows(1, 2, &mut y)[0];
+    let keys: [D2D_RECT_F; 5] = rows(5, 3, &mut y).try_into().unwrap();
     let open_file = rect(left, y, left + 180.0 * s, y + 28.0 * s);
     let folder_button = rect(right - 112.0 * s, folder.top + 8.0 * s, right - 12.0 * s, folder.bottom - 8.0 * s);
     let folder_reset = rect(folder_button.left - 92.0 * s, folder_button.top, folder_button.left - 8.0 * s, folder_button.bottom);
     Layout {
         close: rect(width - 44.0 * s, 12.0 * s, width - 12.0 * s, 44.0 * s),
         toggles,
+        choices,
         folder,
         folder_button,
         folder_reset,
@@ -116,6 +137,7 @@ fn layout(width: f32, s: f32) -> Layout {
         groups,
         sections,
         height: y + 44.0 * s,
+        scale: s,
     }
 }
 
@@ -125,6 +147,13 @@ fn hit(l: &Layout, x: f32, y: f32, custom_folder: bool) -> Option<Hit> {
     }
     if let Some(i) = l.toggles.iter().position(|r| inside(*r, x, y)) {
         return Some(Hit::Toggle(i));
+    }
+    for (row, r) in l.choices.iter().enumerate() {
+        let n = CHOICES[row].2.len();
+        let t = track(*r, l.scale, n);
+        if let Some(i) = (0..n).find(|&i| inside(segment(t, l.scale, i as f32), x, y)) {
+            return Some(Hit::Choice(row, i));
+        }
     }
     if inside(l.folder_button, x, y) {
         return Some(Hit::Folder);
@@ -173,6 +202,28 @@ fn toggle_value(c: &Config, i: usize, auto: bool) -> bool {
     }
 }
 
+fn choice_value(c: &Config, row: usize) -> usize {
+    use kadr_store::config::{SmartMode, Theme};
+    match row {
+        0 => match c.appearance.theme {
+            Theme::Auto => 0,
+            Theme::Light => 1,
+            Theme::Dark => 2,
+        },
+        _ => match c.smart.mode {
+            SmartMode::Standard => 0,
+            SmartMode::Strict => 1,
+        },
+    }
+}
+fn set_choice(c: &mut Config, row: usize, i: usize) {
+    use kadr_store::config::{SmartMode, Theme};
+    match row {
+        0 => c.appearance.theme = [Theme::Auto, Theme::Light, Theme::Dark][i.min(2)],
+        _ => c.smart.mode = if i == 0 { SmartMode::Standard } else { SmartMode::Strict },
+    }
+}
+
 fn key_text(c: &Config, i: usize) -> &str {
     let h = &c.hotkeys;
     [&h.region, &h.fullscreen, &h.window, &h.last_region, &h.recent][i]
@@ -215,6 +266,8 @@ struct State {
     scale: f32,
     epoch: Instant,
     knobs: [Spring; 5],
+    /// Where each segmented control's highlight sits (choice index, gliding).
+    slides: [Spring; 2],
     hover: Option<Hit>,
     glow: Vec<(Hit, Spring)>,
     capturing: Option<usize>,
@@ -253,6 +306,14 @@ impl State {
                 self.knobs[i].snap(v);
             } else {
                 self.knobs[i].target_with(v, Curve::POP, now);
+            }
+        }
+        for row in 0..2 {
+            let v = choice_value(&self.config, row) as f32;
+            if snap {
+                self.slides[row].snap(v);
+            } else {
+                self.slides[row].target_with(v, Curve::GLIDE, now);
             }
         }
     }
@@ -301,6 +362,17 @@ pub fn refresh(config: &Config) {
             }
         }
     });
+}
+
+/// The appearance changed: new window material and ink.
+pub fn restyle() {
+    let hwnd = STATE.with(|s| s.try_borrow().ok().as_deref().and_then(Option::as_ref).map(|st| st.hwnd));
+    if let Some(hwnd) = hwnd {
+        unsafe {
+            glass::match_appearance(hwnd);
+            let _ = InvalidateRect(Some(hwnd), None, false);
+        }
+    }
 }
 
 pub fn show(instance: HINSTANCE, host: HWND, message: u32, config: &Config) {
@@ -357,6 +429,7 @@ pub fn show(instance: HINSTANCE, host: HWND, message: u32, config: &Config) {
                 scale: 1.0,
                 epoch: Instant::now(),
                 knobs: [knob(), knob(), knob(), knob(), knob()],
+                slides: [knob(), knob()],
                 hover: None,
                 glow: Vec::new(),
                 capturing: None,
@@ -498,7 +571,7 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
         }
     }
     // Groups: white cards with hairlines between rows.
-    for (i, title) in ["ОСНОВНЫЕ", "СОХРАНЕНИЕ", "СОЧЕТАНИЯ КЛАВИШ"].iter().enumerate() {
+    for (i, title) in ["ОСНОВНЫЕ", "ВИД", "СОХРАНЕНИЕ", "СОЧЕТАНИЯ КЛАВИШ"].iter().enumerate() {
         let y = l.sections[i];
         text(gpu, &f.section, title, rect(PAD * s + 12.0 * s, y + 8.0 * s, w, y + SECTION * s - 4.0 * s), theme.text_muted);
         let g = l.groups[i];
@@ -532,6 +605,35 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
         let knob = rect(x, track.top + 2.0 * s, x + d, track.top + 2.0 * s + d);
         glass::shadow(gpu, knob, d / 2.0, s, 2.0, 1.0, 0.18);
         fill(gpu, rgb(0xffffff, 1.0), knob, d / 2.0);
+    }
+    // Segmented controls: a raised pill glides to the chosen option.
+    for (row, r) in l.choices.iter().enumerate() {
+        if row > 0 {
+            separator(*r);
+        }
+        let (label, hint, options) = CHOICES[row];
+        let t = track(*r, s, options.len());
+        if hint.is_empty() {
+            text(gpu, &f.label, label, label_rect(*r, t.left - 8.0 * s), theme.text);
+        } else {
+            let top = rect(r.left + 16.0 * s, r.top + 4.0 * s, t.left - 8.0 * s, r.top + ROW * s * 0.55);
+            let bottom = rect(r.left + 16.0 * s, r.top + ROW * s * 0.5, t.left - 8.0 * s, r.bottom - 4.0 * s);
+            text(gpu, &f.label, label, top, theme.text);
+            text(gpu, &f.hint, hint, bottom, theme.text_muted);
+        }
+        fill(gpu, theme.tint, t, 8.0 * s);
+        let at = st.slides[row].value(now);
+        moving |= st.slides[row].active(now);
+        let pill = inflate(segment(t, s, at.clamp(0.0, (options.len() - 1) as f32)), -2.0 * s);
+        glass::shadow(gpu, pill, 6.0 * s, s, 2.0, 1.0, 0.14);
+        fill(gpu, if theme.dark { theme.control } else { theme.surface }, pill, 6.0 * s);
+        for (i, option) in options.iter().enumerate() {
+            let cell = segment(t, s, i as f32);
+            // Ink follows the pill: full where it rests, muted elsewhere, brighter on hover.
+            let near = (1.0 - (at - i as f32).abs()).clamp(0.0, 1.0);
+            let ink = mix(theme.text_muted, theme.text, near.max(0.6 * glow(Hit::Choice(row, i))));
+            text(gpu, &f.chip, option, cell, ink);
+        }
     }
     // Folder.
     let r = l.folder;
@@ -713,6 +815,13 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                         st.sync_knobs(false);
                         st.commit();
                     }
+                    Some(Hit::Choice(row, i)) => {
+                        if choice_value(&st.config, row) != i {
+                            set_choice(&mut st.config, row, i);
+                            st.sync_knobs(false);
+                            st.commit();
+                        }
+                    }
                     Some(Hit::Folder) => pick = true,
                     Some(Hit::FolderReset) => {
                         st.config.save.folder.clear();
@@ -850,6 +959,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
 pub fn preview(scale: f32) -> windows::core::Result<kadr_doc::Image> {
     let mut config = Config::default();
     config.capture.warm = false;
+    config.smart.mode = kadr_store::config::SmartMode::Strict;
     config.save.folder = r"D:\Снимки экрана".into();
     let knob = |v: bool| Spring::with(f32::from(v), Curve::POP);
     let mut st = State {
@@ -860,6 +970,7 @@ pub fn preview(scale: f32) -> windows::core::Result<kadr_doc::Image> {
         surface: None,
         fonts: None,
         knobs: [knob(true), knob(true), knob(true), knob(true), knob(false)],
+        slides: [Spring::with(0.0, Curve::GLIDE), Spring::with(1.0, Curve::GLIDE)],
         config,
         auto: true,
         scale,
@@ -890,7 +1001,17 @@ mod tests {
         for s in [1.0f32, 1.5, 2.0] {
             let w = WIDTH * s;
             let l = layout(w, s);
-            let all: Vec<D2D_RECT_F> = l.toggles.iter().chain([&l.folder]).chain(l.keys.iter()).copied().collect();
+            let all: Vec<D2D_RECT_F> =
+                l.toggles.iter().chain(l.choices.iter()).chain([&l.folder]).chain(l.keys.iter()).copied().collect();
+            for (row, r) in l.choices.iter().enumerate() {
+                let n = CHOICES[row].2.len();
+                let t = track(*r, s, n);
+                assert!(t.left > r.left + 150.0 * s, "the label keeps room");
+                for i in 0..n {
+                    let c = segment(t, s, i as f32);
+                    assert_eq!(hit(&l, (c.left + c.right) / 2.0, (c.top + c.bottom) / 2.0, false), Some(Hit::Choice(row, i)));
+                }
+            }
             for pair in all.windows(2) {
                 assert!(pair[0].bottom <= pair[1].top + 0.01);
             }

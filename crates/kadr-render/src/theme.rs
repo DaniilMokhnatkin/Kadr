@@ -213,12 +213,30 @@ fn fade_of(mut c: D2D1_COLOR_F, a: f32) -> D2D1_COLOR_F {
     c
 }
 
-/// Windows «app mode: dark» (Personalize\AppsUseLightTheme = 0).
+/// The appearance chosen in Settings: 0 follows Windows, 1 light, 2 dark.
+static CHOSEN: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// `None` follows Windows; `Some(true)` is always dark, `Some(false)` always light.
+pub fn choose(dark: Option<bool>) {
+    let v = match dark {
+        None => 0,
+        Some(false) => 1,
+        Some(true) => 2,
+    };
+    CHOSEN.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Windows «app mode: dark» (Personalize\AppsUseLightTheme = 0), unless Settings say otherwise.
 fn apps_use_dark() -> bool {
     // Design snapshots render both appearances without touching the Windows setting.
     match std::env::var("KADR_APPEARANCE").as_deref() {
         Ok("dark") => return true,
         Ok("light") => return false,
+        _ => {}
+    }
+    match CHOSEN.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => return false,
+        2 => return true,
         _ => {}
     }
     use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};

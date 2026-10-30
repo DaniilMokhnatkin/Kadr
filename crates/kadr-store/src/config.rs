@@ -12,6 +12,57 @@ pub struct Config {
     pub capture: Capture,
     pub save: Save,
     pub recent: Recent,
+    pub appearance: Appearance,
+    pub smart: Smart,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    /// Follows Windows «app mode».
+    #[default]
+    Auto,
+    Light,
+    Dark,
+}
+impl Theme {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Appearance {
+    pub theme: Theme,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SmartMode {
+    /// Contacts, documents, cards, secrets.
+    #[default]
+    Standard,
+    /// Also names, nicknames and numbers: anything in the text that could point to a person.
+    Strict,
+}
+impl SmartMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Strict => "strict",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Smart {
+    pub mode: SmartMode,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -126,6 +177,12 @@ thumbnail = true  # миниатюра в углу: перетащите в ча
 [recent]
 enabled = true  # сохранять несохранённые снимки зашифрованно
 max = 10        # от 1 до 10; старые записи вытесняются
+
+[appearance]
+theme = "auto"  # auto — как в Windows, light — светлая, dark — тёмная
+
+[smart]
+mode = "standard"  # умное размытие: standard — контакты и документы, strict — ещё имена, ники и числа
 "#;
 
 /// The file as the settings window writes it: the template's layout and comments with these values.
@@ -163,6 +220,14 @@ pub fn render(c: &Config) -> String {
     out.push_str(&format!(
         "\n[recent]\nenabled = {:<6}# сохранять несохранённые снимки зашифрованно\nmax = {:<10}# от 1 до 10; старые записи вытесняются\n",
         c.recent.enabled, c.recent.max
+    ));
+    out.push_str(&format!(
+        "\n[appearance]\ntheme = {:<8}# auto — как в Windows, light — светлая, dark — тёмная\n",
+        basic(c.appearance.theme.name())
+    ));
+    out.push_str(&format!(
+        "\n[smart]\nmode = {:<12}# умное размытие: standard — контакты и документы, strict — ещё имена, ники и числа\n",
+        basic(c.smart.mode.name())
     ));
     out
 }
@@ -238,6 +303,8 @@ mod tests {
         c.save.thumbnail = false;
         c.capture.warm = false;
         c.recent.max = 3;
+        c.appearance.theme = Theme::Dark;
+        c.smart.mode = SmartMode::Strict;
         assert_eq!(Config::parse(&render(&c)).unwrap(), c);
         c.save.folder = r"C:\Users\me\Pictures".into();
         assert!(render(&c).contains(r"folder = 'C:\Users\me\Pictures'"));

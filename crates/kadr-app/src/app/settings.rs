@@ -58,6 +58,7 @@ impl App {
             return;
         }
         let changed_keys = config.hotkeys != self.config.hotkeys;
+        let changed_look = config.appearance != self.config.appearance;
         if changed_keys {
             self.unregister_hotkeys();
         }
@@ -80,6 +81,10 @@ impl App {
         self.set_warm(self.warm_override.unwrap_or(self.config.capture.warm));
         self.recent.send(crate::recent_worker::Command::Limit(self.config.recent.max));
         crate::settings_window::refresh(&self.config);
+        if changed_look {
+            super::choose_theme(&self.config);
+            self.on_theme_change();
+        }
         log_info!("настройки применены: {}", self.config_path.display());
     }
 

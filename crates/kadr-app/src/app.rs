@@ -231,7 +231,8 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
         let (text_tx, text_rx) = channel();
         let config_path = config::path();
         let (config, config_error) = config::load(&config_path);
-        let warm = warm_override.unwrap_or(config.capture.warm);
+        choose_theme(&config);
+        let warm =warm_override.unwrap_or(config.capture.warm);
         let watcher = Watcher::start(config_path.clone(), hwnd, WM_APP_CONFIG);
         let recent = crate::recent_worker::Worker::start(hwnd, WM_APP_RECENT, config.recent.max, bench.is_some());
         let mut app = App {
@@ -519,6 +520,13 @@ impl App {
             overlay.update_motion_preference();
         }
         self.request_redraw();
+        if let Some(window) = &self.recent_window {
+            unsafe {
+                crate::glass::match_appearance(window.hwnd);
+                let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(window.hwnd), None, false);
+            }
+        }
+        crate::settings_window::restyle();
         let mut data = self.tray_data();
         data.uFlags = NIF_ICON;
         data.hIcon = self.icons.tray();
@@ -1734,4 +1742,13 @@ fn editor_bar(d: &Drawing, smart: kadr_render::scene::SmartUi) -> kadr_render::s
         redo: d.can_redo(),
         smart,
     }
+}
+
+/// Settings › appearance: auto follows Windows, otherwise the chosen one.
+pub(crate) fn choose_theme(config: &Config) {
+    kadr_render::theme::choose(match config.appearance.theme {
+        config::Theme::Auto => None,
+        config::Theme::Light => Some(false),
+        config::Theme::Dark => Some(true),
+    });
 }
