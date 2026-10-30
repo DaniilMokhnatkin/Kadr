@@ -33,6 +33,8 @@ pub enum Kind {
     Link,
     /// The words after «ул.», «д.», «кв.» and the like.
     Address,
+    /// Full mode: a whole line of text.
+    Text,
 }
 
 /// Boxes to blur, one per finding, slightly padded so glyph edges are covered too.
@@ -369,15 +371,24 @@ fn secret(w: &str) -> bool {
 /// Strict mode: on top of `find`, whatever in the text could point to a person — names, nicknames,
 /// links, addresses and every number of two digits or more. Errs on the side of hiding.
 pub fn find_strict(lines: &[Line]) -> Vec<(Kind, Rect)> {
-    let mut out = find(lines);
+    let standard = find(lines);
+    let mut out = standard.clone();
     for line in lines {
         let clean: Vec<String> = line.words.iter().map(|(w, _)| trim(w).to_string()).collect();
-        // «Иван Петров», «Anna Smith»: a chat sender or a contact on a line of its own.
-        let names_only = (2..=3).contains(&clean.len()) && clean.iter().all(|w| capitalized(w));
+        // «Иван Петров», «Anna Smith» on a line of their own; «Сашечка» or «Danissimo» with a time
+        // or a date beside it: a chat list row or a contact.
+        let names: Vec<&String> = clean.iter().filter(|w| !w.is_empty() && !stamp(w)).collect();
+        let dated = clean.iter().any(|w| stamp(w)) || stamped_row(line, lines);
+        let names_only = (1..=3).contains(&names.len())
+            && (names.len() >= 2 || dated)
+            && names.iter().all(|w| capitalized(w));
         let mut address = 0;
+        let mut kinds: Vec<Option<Kind>> = vec![None; line.words.len()];
         for (i, (raw, r)) in line.words.iter().enumerate() {
             let w = clean[i].as_str();
-            if w.is_empty() || out.iter().any(|(_, o)| o.intersect(r).is_some()) {
+            // Already hidden by the standard pass. Padded boxes touch the next word, so «mostly
+            // inside» counts, not «touches».
+            if w.is_empty() || standard.iter().any(|(_, o)| mostly_inside(r, o)) {
                 continue;
             }
             // The first word of a line usually starts a sentence: a capital letter there says little.
@@ -401,6 +412,23 @@ pub fn find_strict(lines: &[Line]) -> Vec<(Kind, Rect)> {
             } else {
                 None
             };
+            kinds[i] = kind;
+        }
+        // A name is often several capitalised words: «Just Studios», «Иван Мохнаткин». One found
+        // part takes its neighbours along, the sentence-starting first word included.
+        for i in 0..kinds.len() {
+            if kinds[i] == Some(Kind::Name) {
+                // «Подпись: Сидорова» — a colon or comma ends the name.
+                let ends = |j: usize| line.words[j].0.ends_with([':', ',', ';', '.', '!', '?']);
+                let free = |j: usize, kinds: &[Option<Kind>]| kinds[j].is_none() && capitalized(&clean[j]);
+                let before: Vec<usize> = (0..i).rev().take_while(|&j| free(j, &kinds) && !ends(j)).collect();
+                let after: Vec<usize> = (i + 1..kinds.len()).take_while(|&j| free(j, &kinds) && !ends(j - 1)).collect();
+                for j in before.into_iter().chain(after) {
+                    kinds[j] = Some(Kind::Name);
+                }
+            }
+        }
+        for (kind, (_, r)) in kinds.into_iter().zip(&line.words) {
             if let Some(kind) = kind {
                 let pad = (r.height() / 6).max(2);
                 out.push((kind, Rect::new(r.left - pad, r.top - pad, r.right + pad, r.bottom + pad)));
@@ -408,6 +436,51 @@ pub fn find_strict(lines: &[Line]) -> Vec<(Kind, Rect)> {
         }
     }
     out
+}
+
+/// Full mode: every line of text, padded like the other findings.
+pub fn find_all(lines: &[Line]) -> Vec<(Kind, Rect)> {
+    lines
+        .iter()
+        .filter(|l| !l.text.trim().is_empty())
+        .map(|l| {
+            let r = l.rect;
+            let pad = (r.height() / 6).max(2);
+            (Kind::Text, Rect::new(r.left - pad, r.top - pad, r.right + pad, r.bottom + pad))
+        })
+        .collect()
+}
+
+fn mostly_inside(word: &Rect, hidden: &Rect) -> bool {
+    let area = |r: Rect| r.width() as i64 * r.height() as i64;
+    word.intersect(hidden).is_some_and(|i| area(i) * 2 > area(*word))
+}
+
+/// «12:24», «0:18», «Wed», «Пн», «30.10», «10.2026»: the time or date at the end of a chat row.
+fn stamp(w: &str) -> bool {
+    let lower = w.to_lowercase();
+    let days = [
+        "mon", "tue", "wed", "thu", "fri", "sat", "sun", "пн", "вт", "ср", "чт", "пт", "сб", "вс", "yesterday", "вчера",
+    ];
+    let clock = |sep: char| {
+        let parts: Vec<&str> = w.split(sep).collect();
+        (2..=3).contains(&parts.len())
+            && parts.iter().all(|p| (1..=4).contains(&p.len()) && p.chars().all(|c| c.is_ascii_digit()))
+    };
+    days.contains(&lower.as_str()) || clock(':') || clock('.')
+}
+
+/// Another recognised line on the same row is a time or a date: Windows OCR often reads the
+/// name on the left and the time on the right of a chat row as separate lines.
+fn stamped_row(line: &Line, lines: &[Line]) -> bool {
+    lines.iter().any(|other| {
+        let shared = other.rect.bottom.min(line.rect.bottom) - other.rect.top.max(line.rect.top);
+        !std::ptr::eq(other, line)
+            && other.rect.left > line.rect.right
+            && shared * 2 > line.rect.height().min(other.rect.height())
+            && other.text.split_whitespace().count() == 1
+            && stamp(trim(other.text.trim()))
+    })
 }
 
 fn trim(w: &str) -> &str {
@@ -472,9 +545,26 @@ const NAMES: &[&str] = &[
     "lisa", "maria", "julia", "anne", "jane", "amy", "rachel", "hannah",
 ];
 
+/// Affectionate suffixes without their case ending: «Саш-ечк-а», «Наст-юш-а», «Дим-асик», «Кат-юл-я».
+const FOND: &[&str] = &[
+    "ечк", "очк", "еньк", "оньк", "ушк", "юшк", "юш", "уш", "ул", "юл", "ус", "юс", "ечек", "очек", "асик", "ик", "чик",
+    "ок", "ек", "к",
+];
+
 fn known_name(w: &str) -> bool {
     let s = stem(w);
-    NAMES.iter().any(|n| stem(n) == s)
+    if NAMES.iter().any(|n| stem(n) == s) {
+        return true;
+    }
+    // «Сашечка» = «саш» + «ечк» + «а»: a name's base, an affectionate suffix, a case ending.
+    let lower = w.to_lowercase().replace('ё', "е");
+    NAMES.iter().any(|n| {
+        let base = n.trim_end_matches(['а', 'я', 'й', 'ь']);
+        base.chars().count() >= 3
+            && lower.strip_prefix(base).is_some_and(|rest| {
+                FOND.iter().any(|f| rest.strip_prefix(f).is_some_and(|tail| tail.chars().count() <= 2))
+            })
+    })
 }
 
 /// Russian surnames and patronymics by their endings, in any case: «Петрову», «Сидоровой», «Ивановна».
@@ -655,5 +745,65 @@ mod tests {
         assert_eq!(strict("Почта a.b@mail.ru"), [s(Email, "a.b@mail.ru")]);
         assert!(strict("Отправить сообщение").is_empty());
         assert!(strict("Сегодня хорошая погода. Завтра тоже").is_empty());
+    }
+    /// Hidden words of a strict pass over several lines.
+    fn hidden(lines: &[Line]) -> Vec<String> {
+        let found = find_strict(lines);
+        lines
+            .iter()
+            .flat_map(|l| l.words.iter())
+            .filter(|(_, r)| found.iter().any(|(_, f)| mostly_inside(r, f)))
+            .map(|(w, _)| w.clone())
+            .collect()
+    }
+    /// A line at `left`, `top` with words `gap` px apart.
+    fn placed(text: &str, left: i32, top: i32, gap: i32) -> Line {
+        let mut x = left;
+        let words: Vec<(String, Rect)> = text
+            .split(' ')
+            .map(|w| {
+                let r = Rect::new(x, top, x + 10 * w.chars().count() as i32, top + 20);
+                x = r.right + gap;
+                (w.to_string(), r)
+            })
+            .collect();
+        Line { text: text.into(), rect: Rect::new(left, top, x - gap, top + 20), words }
+    }
+    #[test]
+    fn strict_mode_catches_what_a_telegram_window_shows() {
+        // Chat list: the name on the left, the time read as a separate line on the right.
+        let list = [
+            placed("Сашечка", 70, 180, 6),
+            placed("12:24", 280, 182, 6),
+            placed("Думаю уже ладно завтра заберу", 70, 205, 6),
+            placed("Danissimo", 70, 860, 6),
+            placed("0:18", 280, 862, 6),
+        ];
+        let h = hidden(&list);
+        assert!(h.contains(&"Сашечка".to_string()) && h.contains(&"Danissimo".to_string()), "{h:?}");
+        assert!(!h.iter().any(|w| w == "Думаю" || w == "заберу"), "{h:?}");
+        // Profile: first name and surname set tight together; the padded box of one must not shield the other.
+        let h = hidden(&[placed("Тимофей Мохнаткин", 580, 175, 3)]);
+        assert_eq!(h, ["Тимофей", "Мохнаткин"]);
+        // A channel name: its first word goes with the rest.
+        let h = hidden(&[placed("Just Lorem Studios", 500, 262, 6), placed("Wed", 770, 262, 6)]);
+        assert_eq!(h, ["Just", "Lorem", "Studios"]);
+        // Affectionate forms in any case.
+        for w in ["Сашечка", "Настюше", "Димасик", "Катюлей", "Ванечку", "Сашка"] {
+            assert!(known_name(w), "{w}");
+        }
+        for w in ["Максимум", "Романтика", "Привет", "Сегодня", "Отправить"] {
+            assert!(!known_name(w), "{w}");
+        }
+    }
+    #[test]
+    fn full_mode_covers_every_line_of_text() {
+        let lines = [placed("Привет, как дела?", 10, 10, 6), placed("Всё отлично", 10, 40, 6), placed(" ", 10, 70, 6)];
+        let found = find_all(&lines);
+        assert_eq!(found.len(), 2);
+        for (line, (kind, r)) in lines.iter().zip(&found) {
+            assert_eq!(*kind, Kind::Text);
+            assert!(line.words.iter().all(|(_, w)| mostly_inside(w, r)));
+        }
     }
 }

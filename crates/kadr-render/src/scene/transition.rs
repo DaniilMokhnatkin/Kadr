@@ -133,7 +133,6 @@ fn code(b: ToolbarButton) -> usize {
         ToolbarButton::Text => 7,
         ToolbarButton::Translate => 8,
         ToolbarButton::Smart => 9,
-        ToolbarButton::Scroll => 10,
         ToolbarButton::Tool(t) => 16 + t as usize,
         ToolbarButton::Color(i) => 40 + i,
         ToolbarButton::Width => 48,
@@ -162,7 +161,7 @@ fn selected(b: ToolbarButton, property: bool, e: Option<EditorBar>) -> bool {
     match b {
         ToolbarButton::Tool(t) => e.is_some_and(|e| e.tool == t || (t == Tool::Blur && e.tool.is_blur() && !property)),
         ToolbarButton::Color(i) => e.is_some_and(|e| e.color == i),
-        ToolbarButton::Smart => e.is_some_and(|e| matches!(e.smart, SmartUi::On(_))),
+        ToolbarButton::Smart => e.is_some_and(|e| e.smart != SmartUi::Off),
         _ => false,
     }
 }

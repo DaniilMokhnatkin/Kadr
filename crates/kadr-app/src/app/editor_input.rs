@@ -231,16 +231,6 @@ impl App {
         let Some(active) = &mut self.active else {
             return;
         };
-        // Scrolling down inside the frame, before any drawing, starts a long screenshot.
-        let inside = active.session.selection().is_some_and(|s| s.contains(doc_point(cursor_pos())));
-        if delta < 0
-            && inside
-            && active.drawing.tool == kadr_doc::annotation::Tool::Select
-            && active.drawing.shapes().is_empty()
-        {
-            self.start_scroll_from_selection();
-            return;
-        }
         let d = &mut active.drawing;
         if d.tool.is_blur() {
             let strength = (d.strength as i32 + delta.signum()).clamp(0, 2);

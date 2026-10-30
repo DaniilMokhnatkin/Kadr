@@ -61,10 +61,7 @@ const TOGGLE_HINTS: [&str; 5] = [
 ];
 const KEYS: [&str; 5] = ["Выделить область", "Монитор под курсором", "Активное окно", "Последняя область", "Недавние"];
 /// Segmented rows: label, hint, choices.
-const CHOICES: [(&str, &str, &[&str]); 2] = [
-    ("Тема", "", &["Авто", "Светлая", "Тёмная"]),
-    ("Умное размытие", "Строгое — ещё имена, ники и числа", &["Обычное", "Строгое"]),
-];
+const CHOICES: [(&str, &str, &[&str]); 1] = [("Тема", "", &["Авто", "Светлая", "Тёмная"])];
 const SEGMENT_W: f32 = 84.0;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -82,7 +79,7 @@ enum Hit {
 struct Layout {
     close: D2D_RECT_F,
     toggles: [D2D_RECT_F; 5],
-    choices: [D2D_RECT_F; 2],
+    choices: [D2D_RECT_F; 1],
     folder: D2D_RECT_F,
     folder_button: D2D_RECT_F,
     folder_reset: D2D_RECT_F,
@@ -119,7 +116,7 @@ fn layout(width: f32, s: f32) -> Layout {
         out
     };
     let toggles: [D2D_RECT_F; 5] = rows(5, 0, &mut y).try_into().unwrap();
-    let choices: [D2D_RECT_F; 2] = rows(2, 1, &mut y).try_into().unwrap();
+    let choices: [D2D_RECT_F; 1] = rows(1, 1, &mut y).try_into().unwrap();
     let folder = rows(1, 2, &mut y)[0];
     let keys: [D2D_RECT_F; 5] = rows(5, 3, &mut y).try_into().unwrap();
     let open_file = rect(left, y, left + 180.0 * s, y + 28.0 * s);
@@ -202,26 +199,15 @@ fn toggle_value(c: &Config, i: usize, auto: bool) -> bool {
     }
 }
 
-fn choice_value(c: &Config, row: usize) -> usize {
-    use kadr_store::config::{SmartMode, Theme};
-    match row {
-        0 => match c.appearance.theme {
-            Theme::Auto => 0,
-            Theme::Light => 1,
-            Theme::Dark => 2,
-        },
-        _ => match c.smart.mode {
-            SmartMode::Standard => 0,
-            SmartMode::Strict => 1,
-        },
-    }
+const THEMES: [kadr_store::config::Theme; 3] =
+    [kadr_store::config::Theme::Auto, kadr_store::config::Theme::Light, kadr_store::config::Theme::Dark];
+
+/// Rows of CHOICES: only the theme so far.
+fn choice_value(c: &Config, _row: usize) -> usize {
+    THEMES.iter().position(|t| *t == c.appearance.theme).unwrap_or(0)
 }
-fn set_choice(c: &mut Config, row: usize, i: usize) {
-    use kadr_store::config::{SmartMode, Theme};
-    match row {
-        0 => c.appearance.theme = [Theme::Auto, Theme::Light, Theme::Dark][i.min(2)],
-        _ => c.smart.mode = if i == 0 { SmartMode::Standard } else { SmartMode::Strict },
-    }
+fn set_choice(c: &mut Config, _row: usize, i: usize) {
+    c.appearance.theme = THEMES[i.min(THEMES.len() - 1)];
 }
 
 fn key_text(c: &Config, i: usize) -> &str {
@@ -267,7 +253,7 @@ struct State {
     epoch: Instant,
     knobs: [Spring; 5],
     /// Where each segmented control's highlight sits (choice index, gliding).
-    slides: [Spring; 2],
+    slides: [Spring; 1],
     hover: Option<Hit>,
     glow: Vec<(Hit, Spring)>,
     capturing: Option<usize>,
@@ -308,7 +294,7 @@ impl State {
                 self.knobs[i].target_with(v, Curve::POP, now);
             }
         }
-        for row in 0..2 {
+        for row in 0..CHOICES.len() {
             let v = choice_value(&self.config, row) as f32;
             if snap {
                 self.slides[row].snap(v);
@@ -429,7 +415,7 @@ pub fn show(instance: HINSTANCE, host: HWND, message: u32, config: &Config) {
                 scale: 1.0,
                 epoch: Instant::now(),
                 knobs: [knob(), knob(), knob(), knob(), knob()],
-                slides: [knob(), knob()],
+                slides: [knob()],
                 hover: None,
                 glow: Vec::new(),
                 capturing: None,
@@ -959,7 +945,6 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
 pub fn preview(scale: f32) -> windows::core::Result<kadr_doc::Image> {
     let mut config = Config::default();
     config.capture.warm = false;
-    config.smart.mode = kadr_store::config::SmartMode::Strict;
     config.save.folder = r"D:\Снимки экрана".into();
     let knob = |v: bool| Spring::with(f32::from(v), Curve::POP);
     let mut st = State {
@@ -970,7 +955,7 @@ pub fn preview(scale: f32) -> windows::core::Result<kadr_doc::Image> {
         surface: None,
         fonts: None,
         knobs: [knob(true), knob(true), knob(true), knob(true), knob(false)],
-        slides: [Spring::with(0.0, Curve::GLIDE), Spring::with(1.0, Curve::GLIDE)],
+        slides: [Spring::with(0.0, Curve::GLIDE)],
         config,
         auto: true,
         scale,

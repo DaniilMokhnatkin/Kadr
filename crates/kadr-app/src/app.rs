@@ -53,7 +53,6 @@ mod exit;
 mod editor_input;
 mod pacing;
 mod pins;
-mod scroll;
 mod settings;
 mod smart;
 mod text;
@@ -82,7 +81,6 @@ const WM_APP_TEXT: u32 = WM_APP + 10;
 /// The settings window has changes or wants hotkeys paused.
 const WM_APP_SETTINGS: u32 = WM_APP + 11;
 /// The long-screenshot panel was pressed.
-const WM_APP_SCROLL: u32 = WM_APP + 12;
 const TIMER_HOOK_CHECK: usize = 1;
 const TIMER_DRAFT: usize = 2;
 
@@ -153,8 +151,6 @@ pub struct App {
     bubble_pending: Option<(DocRect, crate::bubble::Content)>,
     smart: smart::Smart,
     /// Long screenshot in progress, and the area waiting for the overlay to leave first.
-    scroll: Option<scroll::Scroll>,
-    scroll_pending: Option<DocRect>,
     text_tx: Sender<text::TextResult>,
     text_rx: Receiver<text::TextResult>,
     warm_override: Option<bool>,
@@ -263,8 +259,6 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
             thumb_pending: None,
             bubble_pending: None,
             smart: Default::default(),
-            scroll: None,
-            scroll_pending: None,
             text_tx,
             text_rx,
             warm_override,
@@ -469,13 +463,6 @@ impl App {
     }
 
     fn on_hotkey(&mut self, id: i32, queue_ms: u32) {
-        if self.scroll_hotkey(id) {
-            return;
-        }
-        // A new capture while a long screenshot runs keeps what was glued so far.
-        if self.scroll.is_some() {
-            self.finish_scroll(true);
-        }
         // Esc skips the closing motion; a new capture finishes it first.
         if self.exit.is_some() {
             self.finish_exit();
@@ -556,9 +543,6 @@ impl App {
     }
 
     fn on_timer(&mut self, id: usize) {
-        if self.scroll_timer(id) {
-            return;
-        }
         if id == TIMER_DRAFT {
             unsafe {
                 let _ = KillTimer(Some(self.hwnd), TIMER_DRAFT);
@@ -951,19 +935,8 @@ impl App {
                     text_edit: active.drawing.text_selection(),
                 }),
                 glide: session.selection().is_none(),
-                hint: (exit_pose.is_none() && overlay.contains(cursor_pos()))
-                    .then(|| match session.selection() {
-                        None => Some(kadr_render::scene::HintKind::Translate),
-                        // Taught only before any drawing: then the wheel is a size control.
-                        Some(_) if active.drawing.shapes().is_empty()
-                            && active.drawing.tool == kadr_doc::annotation::Tool::Select
-                            && session.show_toolbar() =>
-                        {
-                            Some(kadr_render::scene::HintKind::Scroll)
-                        }
-                        Some(_) => None,
-                    })
-                    .flatten(),
+                hint: (exit_pose.is_none() && overlay.contains(cursor_pos()) && session.selection().is_none())
+                    .then_some(kadr_render::scene::HintKind::Translate),
                 smart: Some(kadr_render::scene::SmartFx { scanning: smart_fx.0, areas: &smart_fx.1 }),
                 exit: exit_pose.map_or(0.0, |(e, _)| e),
                 flash: exit_pose.is_some_and(|(_, f)| f),
@@ -1188,7 +1161,6 @@ impl App {
 
     pub(super) fn show_pending_thumbnail(&mut self) {
         self.show_pending_bubble();
-        self.start_pending_scroll();
         if let Some(shot) = self.thumb_pending.take() {
             crate::thumbnail::show(self.instance, self.hwnd, WM_APP_THUMB, shot);
         }
@@ -1365,7 +1337,6 @@ impl App {
             ToolbarButton::Text => self.copy_text(),
             ToolbarButton::Translate => self.translate_selection(),
             ToolbarButton::Smart => self.toggle_smart(),
-            ToolbarButton::Scroll => self.start_scroll_from_selection(),
             _ => self.editor_button(button),
         }
     }
@@ -1539,7 +1510,6 @@ unsafe extern "system" fn host_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         WM_APP_THUMB => with_app(App::on_thumbnail),
         WM_APP_TEXT => with_app(App::on_text_result),
         WM_APP_SETTINGS => with_app(App::on_settings_window),
-        WM_APP_SCROLL => with_app(App::on_scroll_window),
         WM_APP_PIN => with_app(App::on_pin),
         WM_RENDERFORMAT => with_app(|app| {
             if let Some(image) = &app.clipboard {

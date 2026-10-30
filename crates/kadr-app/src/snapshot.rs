@@ -99,7 +99,7 @@ fn run_tool(
                         strength: 1,
                         undo: true,
                         redo: false,
-                        smart: scene::SmartUi::On(2),
+                        smart: scene::SmartUi::On(scene::Censor::Hard, 12),
                     }),
                 }),
                 hud: if editor { None } else { Some(&hud) },

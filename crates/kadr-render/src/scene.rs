@@ -172,8 +172,6 @@ pub enum ToolbarButton {
     Translate,
     /// Find and blur personal data in the selection; again to take the blur away.
     Smart,
-    /// Long screenshot: frame the selection and glue it while the page scrolls.
-    Scroll,
     Close,
     Tool(Tool),
     Color(usize),
@@ -205,8 +203,7 @@ impl ToolbarButton {
             Self::Recent => "Недавние",
             Self::Text => "Скопировать текст",
             Self::Translate => "Перевести",
-            Self::Smart => "Скрыть данные",
-            Self::Scroll => "Длинный снимок",
+            Self::Smart => "Цензура",
             Self::Close => "Закрыть",
             Self::Tool(tool) => tool.label(),
             Self::Color(_) => "Цвет",
@@ -240,8 +237,6 @@ pub struct EditorBar {
 pub enum HintKind {
     /// Nothing selected yet: Alt+click translates a paragraph.
     Translate,
-    /// An area is selected: scrolling inside it makes a long screenshot.
-    Scroll,
 }
 
 /// Per found area: screen rect, how much of the original still shows over the blur (1 → 0 as it
@@ -252,15 +247,34 @@ pub struct SmartFx<'a> {
     pub areas: &'a [(RECT, f32, f32)],
 }
 
-/// «Скрыть данные»: the pill's state, from idle to searching to hidden (with how many).
+/// How much the censor hides; the pill steps through them: off → light → hard → full → off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Censor {
+    /// Contacts, documents, cards, secrets.
+    Light,
+    /// Also names, nicknames, numbers, links, addresses.
+    Hard,
+    /// Every piece of text.
+    Full,
+}
+
+impl Censor {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Light => "Лёгкая",
+            Self::Hard => "Жёсткая",
+            Self::Full => "Полная",
+        }
+    }
+}
+
+/// The censor pill: off, searching at a level, or hiding so many areas (0: nothing found).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum SmartUi {
     #[default]
     Off,
-    Scanning,
-    On(u16),
-    /// Searched, nothing to hide; shown for a moment.
-    Empty,
+    Scanning(Censor),
+    On(Censor, u16),
 }
 
 /// Что нарисовать поверх кадра. Одинаково для всех мониторов: каждый рисует свою часть.
@@ -584,7 +598,6 @@ fn build_toolbar_layout(
             ToolbarButton::Pin,
             ToolbarButton::Text,
             ToolbarButton::Translate,
-            ToolbarButton::Scroll,
             ToolbarButton::SaveAs,
             ToolbarButton::Save,
             ToolbarButton::Close,
@@ -597,7 +610,6 @@ fn build_toolbar_layout(
             ToolbarButton::Pin,
             ToolbarButton::Text,
             ToolbarButton::Translate,
-            ToolbarButton::Scroll,
             ToolbarButton::SaveAs,
             ToolbarButton::Save,
             ToolbarButton::Close,
@@ -796,7 +808,7 @@ fn draw_toolbar(
             let state = toolbar.editor.map(|e| e.smart).unwrap_or_default();
             let base = mix(theme.control, theme.selected, c.selected);
             fill_rounded(gpu, fade(mix(base, theme.tint_strong, 0.5 * c.hover * (1.0 - c.selected)), a), *r, 10.0 * s);
-            if state == SmartUi::Scanning {
+            if matches!(state, SmartUi::Scanning(_)) {
                 let phase = (text.animation_time() * 0.9).fract() as f32;
                 shimmer(gpu, *r, phase, 70.0 * s, if theme.dark { 0.22 } else { 0.55 } * a, 10.0 * s);
             }
@@ -906,8 +918,7 @@ fn draw_toolbar(
             ToolbarButton::Pin => "Закрепить · Ctrl+D".into(),
             ToolbarButton::Text => "Скопировать текст · Ctrl+Shift+C".into(),
             ToolbarButton::Translate => "Перевести на русский · Ctrl+T".into(),
-            ToolbarButton::Smart => "Найти и размыть почту, телефоны, карты, IP и ключи".into(),
-            ToolbarButton::Scroll => "Длинный снимок · или колесо внутри рамки".into(),
+            ToolbarButton::Smart => "Цензура: выкл → лёгкая → жёсткая → полная".into(),
             ToolbarButton::Recent => "Недавние · Ctrl+H".into(),
             ToolbarButton::Close => "Закрыть · Esc".into(),
             ToolbarButton::Width => "Толщина · [ / ] · колесо".into(),
@@ -1247,7 +1258,6 @@ fn draw_hint(
     let s = scene.scale;
     let (key, rest) = match kind {
         HintKind::Translate => ("Alt", "+ клик по тексту — перевод"),
-        HintKind::Scroll => ("Колесо", "внутри рамки — длинный снимок"),
     };
     let key = measure(shared, &text.label, key)?;
     let rest = measure(shared, &text.label, rest)?;
@@ -1610,13 +1620,13 @@ fn intersect(a: D2D_RECT_F, b: D2D_RECT_F) -> Option<D2D_RECT_F> {
     );
     (r.right > r.left && r.bottom > r.top).then_some(r)
 }
-/// What the «Скрыть данные» pill says in each state.
+/// What the censor pill says in each state.
 fn smart_label(state: SmartUi) -> String {
     match state {
-        SmartUi::Off => "Скрыть данные".into(),
-        SmartUi::Scanning => "Ищу данные…".into(),
-        SmartUi::On(n) => format!("Скрыто · {n}"),
-        SmartUi::Empty => "Не найдено".into(),
+        SmartUi::Off => "Цензура · выкл".into(),
+        SmartUi::Scanning(level) => format!("{} · ищу…", level.name()),
+        SmartUi::On(level, 0) => format!("{} · ничего", level.name()),
+        SmartUi::On(level, n) => format!("{} · {n}", level.name()),
     }
 }
 
