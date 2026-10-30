@@ -23,6 +23,16 @@ pub enum Kind {
     Login,
     /// A one-time code on its own line, under «Вот твой код» or «Your verification code».
     Code,
+    // Strict mode only.
+    /// A first name, surname, patronymic or initial.
+    Name,
+    /// «@handle», «raptor_92», «DarkRaptor».
+    Nick,
+    /// Any number of two digits or more.
+    Number,
+    Link,
+    /// The words after «ул.», «д.», «кв.» and the like.
+    Address,
 }
 
 /// Boxes to blur, one per finding, slightly padded so glyph edges are covered too.
@@ -356,6 +366,160 @@ fn secret(w: &str) -> bool {
     allowed && ((known.iter().any(|p| w.starts_with(p)) && w.len() >= 16) || (w.len() >= 20 && letters >= 4 && digits >= 3))
 }
 
+/// Strict mode: on top of `find`, whatever in the text could point to a person — names, nicknames,
+/// links, addresses and every number of two digits or more. Errs on the side of hiding.
+pub fn find_strict(lines: &[Line]) -> Vec<(Kind, Rect)> {
+    let mut out = find(lines);
+    for line in lines {
+        let clean: Vec<String> = line.words.iter().map(|(w, _)| trim(w).to_string()).collect();
+        // «Иван Петров», «Anna Smith»: a chat sender or a contact on a line of its own.
+        let names_only = (2..=3).contains(&clean.len()) && clean.iter().all(|w| capitalized(w));
+        let mut address = 0;
+        for (i, (raw, r)) in line.words.iter().enumerate() {
+            let w = clean[i].as_str();
+            if w.is_empty() || out.iter().any(|(_, o)| o.intersect(r).is_some()) {
+                continue;
+            }
+            // The first word of a line usually starts a sentence: a capital letter there says little.
+            let sentence_start = i == 0 || line.words[i - 1].0.ends_with(['.', '!', '?', '…']);
+            let kind = if address > 0 {
+                address = if raw.ends_with(',') { 0 } else { address - 1 };
+                Some(Kind::Address)
+            } else if address_word(raw) {
+                address = 3;
+                None
+            } else if link(w) {
+                Some(Kind::Link)
+            } else if (raw.trim_start_matches(['(', '«', '"']).starts_with('@') && w.len() > 2) || nick(w) {
+                Some(Kind::Nick)
+            } else if w.chars().filter(char::is_ascii_digit).count() >= 2 {
+                Some(Kind::Number)
+            } else if initial(raw)
+                || (capitalized(w) && (names_only || known_name(w) || surname(w) || !sentence_start))
+            {
+                Some(Kind::Name)
+            } else {
+                None
+            };
+            if let Some(kind) = kind {
+                let pad = (r.height() / 6).max(2);
+                out.push((kind, Rect::new(r.left - pad, r.top - pad, r.right + pad, r.bottom + pad)));
+            }
+        }
+    }
+    out
+}
+
+fn trim(w: &str) -> &str {
+    w.trim_matches(|c: char| ",;:!?()[]{}<>«»\"'….".contains(c))
+}
+
+/// «Иван», «Smith», «Петрова-Водкина»: a capital, then lower-case letters.
+fn capitalized(w: &str) -> bool {
+    let mut chars = w.chars();
+    chars.next().is_some_and(char::is_uppercase)
+        && w.chars().count() >= 2
+        && w.chars().all(|c| c.is_alphabetic() || c == '-')
+        && w.chars().skip(1).any(char::is_lowercase)
+}
+
+/// «И.», «А.С.»: initials.
+fn initial(raw: &str) -> bool {
+    let parts: Vec<&str> = raw.trim_end_matches([',', ':']).split_inclusive('.').collect();
+    !parts.is_empty()
+        && parts.len() <= 3
+        && parts.iter().all(|p| {
+            let mut c = p.chars();
+            c.next().is_some_and(char::is_uppercase) && c.next() == Some('.') && c.next().is_none()
+        })
+}
+
+/// Base of a name in any case: «Ивану», «Ивана», «Иваном» → «иван».
+fn stem(w: &str) -> String {
+    let w = w.to_lowercase().replace('ё', "е");
+    for end in ["ой", "ей", "ом", "ем", "ою", "ею", "у", "ю", "а", "я", "е", "ы", "и"] {
+        if let Some(base) = w.strip_suffix(end)
+            && base.chars().count() >= 3
+        {
+            return base.to_string();
+        }
+    }
+    w
+}
+
+const NAMES: &[&str] = &[
+    // Russian, full and everyday forms.
+    "александр", "алексей", "андрей", "антон", "артем", "арсений", "аркадий", "богдан", "борис", "вадим", "валентин",
+    "валерий", "василий", "виктор", "виталий", "владимир", "владислав", "всеволод", "вячеслав", "геннадий", "георгий",
+    "глеб", "григорий", "давид", "даниил", "данил", "данила", "денис", "дмитрий", "евгений", "егор", "захар", "иван",
+    "игорь", "илья", "кирилл", "константин", "леонид", "максим", "матвей", "мирон", "михаил", "никита", "николай",
+    "олег", "павел", "петр", "роман", "руслан", "савелий", "семен", "сергей", "станислав", "степан", "тимофей",
+    "тимур", "федор", "филипп", "эдуард", "юрий", "ярослав", "саша", "саня", "леша", "леха", "тема", "вова", "володя",
+    "витя", "гоша", "гриша", "даня", "дима", "димон", "женя", "ваня", "костя", "лева", "макс", "миша", "коля", "паша",
+    "петя", "рома", "сережа", "серега", "стас", "степа", "тима", "федя", "юра", "ярик", "эдик", "сема", "боря",
+    "александра", "алина", "алиса", "алла", "анастасия", "ангелина", "анна", "антонина", "арина", "валентина",
+    "валерия", "варвара", "василиса", "вера", "вероника", "виктория", "галина", "дарья", "диана", "ева", "евгения",
+    "екатерина", "елена", "елизавета", "жанна", "злата", "зоя", "инна", "ирина", "карина", "кира", "кристина",
+    "ксения", "лариса", "лидия", "любовь", "людмила", "маргарита", "марина", "мария", "милана", "надежда", "наталья",
+    "наталия", "нина", "оксана", "олеся", "ольга", "полина", "светлана", "софия", "софья", "таисия", "тамара",
+    "татьяна", "ульяна", "эвелина", "юлия", "яна", "аня", "настя", "катя", "лена", "лиза", "маша", "наташа", "оля",
+    "света", "таня", "юля", "вика", "даша", "ира", "ксюша", "люба", "люда", "надя", "соня", "галя", "валя", "лера",
+    // English.
+    "john", "james", "michael", "david", "robert", "william", "richard", "thomas", "daniel", "matthew", "christopher",
+    "chris", "paul", "peter", "george", "alex", "alexander", "andrew", "steven", "kevin", "brian", "jason", "ryan",
+    "jacob", "ethan", "noah", "liam", "oliver", "lucas", "mike", "nick", "tom", "sam", "ben", "jack", "harry", "mary",
+    "jennifer", "linda", "elizabeth", "sarah", "jessica", "emily", "emma", "olivia", "sophia", "anna", "kate", "laura",
+    "lisa", "maria", "julia", "anne", "jane", "amy", "rachel", "hannah",
+];
+
+fn known_name(w: &str) -> bool {
+    let s = stem(w);
+    NAMES.iter().any(|n| stem(n) == s)
+}
+
+/// Russian surnames and patronymics by their endings, in any case: «Петрову», «Сидоровой», «Ивановна».
+fn surname(w: &str) -> bool {
+    let w = w.to_lowercase().replace('ё', "е");
+    w.chars().count() >= 5
+        && [
+            "ов", "ев", "ова", "ева", "ову", "еву", "овым", "евым", "овой", "евой", "ин", "ина", "ину", "иным", "иной",
+            "ский", "ская", "ского", "ской", "скому", "цкий", "цкая", "цкого", "цкой", "енко", "вич", "вна", "вича",
+            "вичу", "вны", "вне",
+        ]
+        .iter()
+        .any(|end| w.ends_with(end))
+}
+
+/// «raptor_92», «Daniil2003», «DarkRaptor»: a handle rather than a word.
+fn nick(w: &str) -> bool {
+    let ascii = w.chars().all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c));
+    let letters = w.chars().any(|c| c.is_ascii_alphabetic());
+    let mixed = w.chars().any(|c| c.is_ascii_digit()) || w.contains('_');
+    let camel = w.chars().zip(w.chars().skip(1)).any(|(a, b)| a.is_ascii_lowercase() && b.is_ascii_uppercase());
+    ascii && letters && w.len() >= 3 && (mixed || camel)
+}
+
+fn link(w: &str) -> bool {
+    if w.contains("://") || w.starts_with("www.") {
+        return true;
+    }
+    let lower = w.to_lowercase();
+    let host = lower.split('/').next().unwrap_or("");
+    let tld = host.rsplit('.').next().unwrap_or("");
+    host.contains('.')
+        && host.split('.').all(|p| !p.is_empty())
+        && ["ru", "com", "net", "org", "me", "io", "рф", "su", "ua", "by", "kz", "tv", "gg", "dev", "app", "info", "pro"]
+            .contains(&tld)
+}
+
+/// «ул.», «д.», «кв.», «проспект», «street»: the next words are an address.
+fn address_word(raw: &str) -> bool {
+    let lower = raw.to_lowercase();
+    let short = ["ул.", "пр.", "просп.", "пер.", "наб.", "пл.", "мкр.", "д.", "кв.", "корп.", "стр.", "st.", "ave.", "apt."];
+    let long = ["улица", "проспект", "переулок", "набережная", "бульвар", "шоссе", "площадь", "микрорайон", "квартира", "street", "avenue"];
+    short.contains(&lower.as_str()) || long.contains(&lower.trim_end_matches(',').trim_end_matches('.'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,5 +624,36 @@ mod tests {
         ] {
             assert!(kinds(text).is_empty(), "{text}: {:?}", kinds(text));
         }
+    }
+    /// Strict findings as (kind, word) pairs, in reading order.
+    fn strict(text: &str) -> Vec<(Kind, String)> {
+        let l = line(text);
+        let mut found: Vec<(Kind, String)> = find_strict(std::slice::from_ref(&l))
+            .into_iter()
+            .map(|(k, r)| {
+                let words: Vec<&str> =
+                    l.words.iter().filter(|(_, w)| r.intersect(w).is_some()).map(|(w, _)| w.as_str()).collect();
+                (k, words.join(" "))
+            })
+            .collect();
+        found.sort_by_key(|(_, w)| text.find(w.as_str()));
+        found
+    }
+    #[test]
+    fn strict_mode_hides_names_nicks_numbers_links_and_addresses() {
+        use Kind::*;
+        let s = |k: Kind, w: &str| (k, w.to_string());
+        assert_eq!(strict("Иван Петров"), [s(Name, "Иван"), s(Name, "Петров")]);
+        assert_eq!(strict("Вчера написал Даниилу, он ответил"), [s(Name, "Даниилу,")]);
+        assert_eq!(strict("Привет, это Raptor_92 из чата"), [s(Nick, "Raptor_92")]);
+        assert_eq!(strict("Пиши мне @danya_dev или в tg"), [s(Nick, "@danya_dev")]);
+        assert_eq!(strict("Встреча 14 марта в 18:30, комната 305"), [s(Number, "14"), s(Number, "18:30,"), s(Number, "305")]);
+        assert_eq!(strict("Сайт kadr.app и https://t.me/raptor"), [s(Link, "kadr.app"), s(Link, "https://t.me/raptor")]);
+        assert_eq!(strict("Доставка: ул. Ленина, д. 5"), [s(Address, "Ленина,"), s(Address, "5")]);
+        assert_eq!(strict("Подпись: Сидорова А.В."), [s(Name, "Сидорова"), s(Name, "А.В.")]);
+        // The standard findings stay; ordinary words and a sentence's first capital stay visible.
+        assert_eq!(strict("Почта a.b@mail.ru"), [s(Email, "a.b@mail.ru")]);
+        assert!(strict("Отправить сообщение").is_empty());
+        assert!(strict("Сегодня хорошая погода. Завтра тоже").is_empty());
     }
 }

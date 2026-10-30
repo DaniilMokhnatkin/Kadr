@@ -3,6 +3,8 @@
 //! stitcher step. Writes the glued result next to the page.
 //!
 //! cargo run --release --example scroll_probe -p kadr-app -- <folder>
+// Edge hands the page to its running instance and exits at once; nothing to wait for.
+#![allow(clippy::zombie_processes)]
 use kadr_doc::stitch::{Step, Stitcher};
 use kadr_doc::{Image, Rect};
 use std::time::{Duration, Instant};

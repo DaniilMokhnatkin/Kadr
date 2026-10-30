@@ -175,7 +175,24 @@ fn merge(readings: Vec<(bool, Vec<Line>)>) -> Vec<Line> {
                 _ => false,
             };
             words.push(match (take_latin, m) {
-                (true, Some(j)) => other.words[j].clone(),
+                // The Latin reader may split what the other read as one word («raptor» + «_92,»):
+                // every Latin piece centred inside this word belongs to it.
+                (true, Some(_)) => {
+                    let r = line.words[k].1;
+                    let parts: Vec<&(String, Rect)> = other
+                        .words
+                        .iter()
+                        .filter(|(_, b)| (r.left..=r.right).contains(&((b.left + b.right) / 2)) && r.intersect(b).is_some())
+                        .collect();
+                    let mut text = String::new();
+                    for (n, (w, b)) in parts.iter().enumerate() {
+                        if n > 0 && b.left - parts[n - 1].1.right > b.height() / 6 {
+                            text.push(' ');
+                        }
+                        text.push_str(w);
+                    }
+                    (text, r)
+                }
                 _ => line.words[k].clone(),
             });
         }
@@ -337,6 +354,25 @@ Hello Kadr 2026")).unwrap());
             assert_eq!(
                 kinds,
                 [crate::sensitive::Kind::Login, crate::sensitive::Kind::Password],
+                "dark {dark}: {:?}",
+                lines.iter().map(|l| &l.text).collect::<Vec<_>>()
+            );
+        }
+    }
+    #[test]
+    fn strict_mode_finds_a_chat_after_real_recognition() {
+        let Ok(engines) = engines() else { return };
+        if !engines.iter().any(|(c, _)| *c) {
+            return;
+        }
+        use crate::sensitive::Kind::*;
+        for dark in [false, true] {
+            let lines = recognize(&render_with("Анна Смирнова\nПривет, это raptor_92, встреча в 18:30", 20, dark)).unwrap();
+            let mut kinds: Vec<_> = crate::sensitive::find_strict(&lines).into_iter().map(|(k, _)| k).collect();
+            kinds.sort_by_key(|k| *k as u8);
+            assert_eq!(
+                kinds,
+                [Name, Name, Nick, Number],
                 "dark {dark}: {:?}",
                 lines.iter().map(|l| &l.text).collect::<Vec<_>>()
             );

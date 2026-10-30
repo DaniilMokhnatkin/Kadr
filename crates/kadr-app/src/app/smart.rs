@@ -99,12 +99,16 @@ impl App {
         self.smart.scanning = true;
         self.smart.empty_until = None;
         let (job, tx, host) = (self.smart.job, self.text_tx.clone(), self.hwnd.0 as isize);
+        let strict = self.config.smart.mode == kadr_store::config::SmartMode::Strict;
         std::thread::spawn(move || {
             unsafe {
                 let _ = CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
             }
             let found = crate::ocr::recognize(&image)
-                .map(|lines| crate::sensitive::find(&lines).into_iter().map(|(_, r)| r).collect())
+                .map(|lines| {
+                    let found = if strict { crate::sensitive::find_strict(&lines) } else { crate::sensitive::find(&lines) };
+                    found.into_iter().map(|(_, r)| r).collect()
+                })
                 .map_err(|e| e.message());
             let _ = tx.send(text::TextResult::Smart(job, found));
             unsafe {
