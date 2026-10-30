@@ -23,6 +23,8 @@ pub(super) struct Smart {
     level: Option<Censor>,
     /// The level to search once the current blurs have dissolved away.
     then: Option<Censor>,
+    /// «Скрывать данные при копировании»: the export waiting for the search and its blurs.
+    after: Option<Export>,
     anim: Option<Anim>,
     /// Blurs found and planned, waiting for their pixels to be computed on a worker.
     pending: Option<Vec<kadr_doc::annotation::Annotation>>,
@@ -193,6 +195,30 @@ impl App {
     }
 
     /// The pill: one step to the next level.
+    /// Copy with «Скрывать данные при копировании» on: search first (the beam hides the wait),
+    /// copy once the blurs are in. False when there is nothing to wait for.
+    pub(super) fn censor_before(&mut self, how: Export) -> bool {
+        if !self.config.capture.auto_censor || self.smart.level.is_some() || self.smart.anim.is_some() {
+            return false;
+        }
+        self.smart.after = Some(how);
+        if self.smart.scanning.is_none() {
+            self.scan(Censor::Light);
+        }
+        if self.smart.scanning.is_none() {
+            self.smart.after = None;
+            return false;
+        }
+        true
+    }
+
+    /// The search behind a waiting copy is over: copy now.
+    fn export_after(&mut self) {
+        if let Some(how) = self.smart.after.take() {
+            self.export(how);
+        }
+    }
+
     pub(super) fn toggle_smart(&mut self) {
         if self.smart.anim.is_some() {
             return;
@@ -208,6 +234,7 @@ impl App {
         self.smart.source = None;
         self.smart.peek = None;
         self.smart.level = None;
+        self.smart.after = None;
         let found = active.drawing.smart_shapes();
         if !found.is_empty() {
             // Out: the original dissolves back over the blur, the blurs go, then the next level.
@@ -295,6 +322,8 @@ impl App {
         self.smart.pending = None;
         self.smart.source = None;
         self.request_redraw();
+        // The selection changed under a waiting copy: search what it is now.
+        self.export_after();
         true
     }
 
@@ -327,6 +356,7 @@ impl App {
             self.smart.scanning = None;
             self.smart.level = Some(level);
             self.request_redraw();
+            self.export_after();
             return;
         }
         // The blurs are computed on a worker while the search glint keeps running; the frame
@@ -479,6 +509,10 @@ impl App {
         {
             let showing = anim.showing;
             self.smart.anim = None;
+            if showing {
+                // The blurs have arrived: a copy waiting for them goes now.
+                self.export_after();
+            }
             if !showing && let Some(active) = &mut self.active {
                 active.drawing.remove_smart();
                 self.schedule_draft();

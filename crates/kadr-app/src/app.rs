@@ -182,6 +182,7 @@ struct Saved {
     draft: Option<crate::recent_worker::Token>,
 }
 
+#[derive(Clone, Copy, PartialEq)]
 enum Export {
     Copy,
     Save,
@@ -1061,6 +1062,9 @@ impl App {
         if let Some(active) = &mut self.active {
             active.drawing.finish_gesture();
             active.drawing.finish_text();
+        }
+        if how == Export::Copy && self.censor_before(how) {
+            return;
         }
         let Some(image) = self.selected_image() else {
             return;

@@ -107,6 +107,8 @@ pub struct Capture {
     pub warm: bool,
     /// The zoomed patch with the pixel's colour beside the cursor while aiming.
     pub magnifier: bool,
+    /// Copying first blurs e-mails, phones and cards found in the selection.
+    pub auto_censor: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -182,7 +184,7 @@ impl Default for Hotkeys {
 
 impl Default for Capture {
     fn default() -> Self {
-        Self { warm: true, magnifier: true }
+        Self { warm: true, magnifier: true, auto_censor: false }
     }
 }
 
@@ -206,6 +208,7 @@ recent      = "Ctrl+Alt+PrintScreen"    # вернуть несохранённ�
 [capture]
 warm = true   # держать захват наготове: ~8 мс вместо ~23 мс
 magnifier = true  # лупа с цветом пикселя у курсора, пока выбираете область
+auto_censor = false # перед копированием размывать почты, телефоны и номера карт
 
 [save]
 folder = ""     # пусто — «Изображения\Screenshots»
@@ -250,8 +253,8 @@ pub fn render(c: &Config) -> String {
     out.push_str(&key("last_region", &h.last_region, "та же область, что в прошлый раз"));
     out.push_str(&key("recent", &h.recent, "вернуть несохранённый снимок"));
     out.push_str(&format!(
-        "\n[capture]\nwarm = {:<7}# держать захват наготове: ~8 мс вместо ~23 мс\nmagnifier = {:<6}# лупа с цветом пикселя у курсора, пока выбираете область\n",
-        c.capture.warm, c.capture.magnifier
+        "\n[capture]\nwarm = {:<7}# держать захват наготове: ~8 мс вместо ~23 мс\nmagnifier = {:<6}# лупа с цветом пикселя у курсора, пока выбираете область\nauto_censor = {:<6}# перед копированием размывать почты, телефоны и номера карт\n",
+        c.capture.warm, c.capture.magnifier, c.capture.auto_censor
     ));
     out.push_str(&format!(
         "\n[save]\nfolder = {:<7}# пусто — «Изображения\\Screenshots»\nnotify = {:<7}# уведомление после сохранения\nthumbnail = {:<6}# миниатюра в углу: перетащите в чат, клик — открыть\n",
