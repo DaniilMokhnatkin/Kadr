@@ -65,10 +65,11 @@ const TOGGLE_HINTS: [&str; 7] = [
 ];
 const KEYS: [&str; 5] = ["Выделить область", "Монитор под курсором", "Активное окно", "Последняя область", "Недавние"];
 /// Segmented rows: label, hint, choices.
-const CHOICES: [(&str, &str, &[&str]); 3] = [
+const CHOICES: [(&str, &str, &[&str]); 4] = [
     ("Тема", "", &["Авто", "Светлая", "Тёмная"]),
     ("Распознавание текста", "Авто — как при установке", &["Авто", "Windows", "PaddleOCR"]),
     ("Переводчик", "Авто предпочитает локальную модель", &["Авто", "Офлайн", "Google"]),
+    ("Запись экрана", "GIF — без звука, для чатов", &["MP4", "GIF"]),
 ];
 const SEGMENT_W: f32 = 84.0;
 
@@ -88,7 +89,7 @@ enum Hit {
 struct Layout {
     close: D2D_RECT_F,
     toggles: [D2D_RECT_F; 7],
-    choices: [D2D_RECT_F; 3],
+    choices: [D2D_RECT_F; 4],
     folder: D2D_RECT_F,
     folder_button: D2D_RECT_F,
     folder_reset: D2D_RECT_F,
@@ -128,7 +129,7 @@ fn layout(width: f32, s: f32) -> Layout {
         out
     };
     let toggles: [D2D_RECT_F; 7] = rows(7, 0, &mut y).try_into().unwrap();
-    let choices: [D2D_RECT_F; 3] = rows(3, 1, &mut y).try_into().unwrap();
+    let choices: [D2D_RECT_F; 4] = rows(4, 1, &mut y).try_into().unwrap();
     let folder = rows(1, 2, &mut y)[0];
     let keys: [D2D_RECT_F; 5] = rows(5, 3, &mut y).try_into().unwrap();
     let open_file = rect(left, y, left + 180.0 * s, y + 28.0 * s);
@@ -251,7 +252,7 @@ const ENGINES: [kadr_store::config::OcrEngine; 3] = [
     kadr_store::config::OcrEngine::Paddle,
 ];
 
-/// Rows of CHOICES: the theme, then the text recognition engine.
+/// Rows of CHOICES: the theme, text recognition, the translator and the recording format.
 fn choice_value(c: &Config, row: usize) -> usize {
     match row {
         0 => THEMES.iter().position(|t| *t == c.appearance.theme).unwrap_or(0),
@@ -260,6 +261,7 @@ fn choice_value(c: &Config, row: usize) -> usize {
             kadr_store::config::TranslationEngine::Offline => 1,
             kadr_store::config::TranslationEngine::Google => 2,
         },
+        3 => usize::from(c.capture.video == kadr_store::config::VideoFormat::Gif),
         _ => ENGINES.iter().position(|e| *e == c.recognition.engine).unwrap_or(0),
     }
 }
@@ -272,6 +274,10 @@ fn set_choice(c: &mut Config, row: usize, i: usize) {
                 kadr_store::config::TranslationEngine::Offline,
                 kadr_store::config::TranslationEngine::Google,
             ][i.min(2)]
+        }
+        3 => {
+            c.capture.video =
+                if i == 1 { kadr_store::config::VideoFormat::Gif } else { kadr_store::config::VideoFormat::Mp4 }
         }
         _ => c.recognition.engine = ENGINES[i.min(ENGINES.len() - 1)],
     }
@@ -323,7 +329,7 @@ struct State {
     epoch: Instant,
     knobs: [Spring; 7],
     /// Where each segmented control's highlight sits (choice index, gliding).
-    slides: [Spring; 3],
+    slides: [Spring; 4],
     hover: Option<Hit>,
     glow: Vec<(Hit, Spring)>,
     capturing: Option<usize>,
@@ -499,7 +505,7 @@ pub fn show(instance: HINSTANCE, host: HWND, message: u32, config: &Config) {
                 scale: 1.0,
                 epoch: Instant::now(),
                 knobs: [knob(), knob(), knob(), knob(), knob(), knob(), knob()],
-                slides: [knob(), knob(), knob()],
+                slides: [knob(), knob(), knob(), knob()],
                 hover: None,
                 glow: Vec::new(),
                 capturing: None,
@@ -1127,7 +1133,12 @@ pub fn preview(scale: f32) -> windows::core::Result<kadr_doc::Image> {
         surface: None,
         fonts: None,
         knobs: [knob(true), knob(true), knob(true), knob(false), knob(false), knob(true), knob(false)],
-        slides: [Spring::with(0.0, Curve::GLIDE), Spring::with(2.0, Curve::GLIDE), Spring::with(0.0, Curve::GLIDE)],
+        slides: [
+            Spring::with(0.0, Curve::GLIDE),
+            Spring::with(2.0, Curve::GLIDE),
+            Spring::with(0.0, Curve::GLIDE),
+            Spring::with(0.0, Curve::GLIDE),
+        ],
         config,
         auto: true,
         scale,

@@ -65,6 +65,23 @@ pub struct Recognition {
     pub engine: OcrEngine,
 }
 
+/// Screen recording: an MP4 with the computer's sound, or a silent GIF for chats.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum VideoFormat {
+    #[default]
+    Mp4,
+    Gif,
+}
+impl VideoFormat {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Mp4 => "mp4",
+            Self::Gif => "gif",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Theme {
@@ -109,6 +126,7 @@ pub struct Capture {
     pub magnifier: bool,
     /// Copying first blurs e-mails, phones and cards found in the selection.
     pub auto_censor: bool,
+    pub video: VideoFormat,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -184,7 +202,7 @@ impl Default for Hotkeys {
 
 impl Default for Capture {
     fn default() -> Self {
-        Self { warm: true, magnifier: true, auto_censor: false }
+        Self { warm: true, magnifier: true, auto_censor: false, video: VideoFormat::Mp4 }
     }
 }
 
@@ -209,6 +227,7 @@ recent      = "Ctrl+Alt+PrintScreen"    # вернуть несохранённ�
 warm = true   # держать захват наготове: ~8 мс вместо ~23 мс
 magnifier = true  # лупа с цветом пикселя у курсора, пока выбираете область
 auto_censor = false # перед копированием размывать почты, телефоны и номера карт
+video = "mp4"   # запись экрана: mp4 — со звуком, gif — без звука, для чатов
 
 [save]
 folder = ""     # пусто — «Изображения\Screenshots»
@@ -253,8 +272,8 @@ pub fn render(c: &Config) -> String {
     out.push_str(&key("last_region", &h.last_region, "та же область, что в прошлый раз"));
     out.push_str(&key("recent", &h.recent, "вернуть несохранённый снимок"));
     out.push_str(&format!(
-        "\n[capture]\nwarm = {:<7}# держать захват наготове: ~8 мс вместо ~23 мс\nmagnifier = {:<6}# лупа с цветом пикселя у курсора, пока выбираете область\nauto_censor = {:<6}# перед копированием размывать почты, телефоны и номера карт\n",
-        c.capture.warm, c.capture.magnifier, c.capture.auto_censor
+        "\n[capture]\nwarm = {:<7}# держать захват наготове: ~8 мс вместо ~23 мс\nmagnifier = {:<6}# лупа с цветом пикселя у курсора, пока выбираете область\nauto_censor = {:<6}# перед копированием размывать почты, телефоны и номера карт\nvideo = {:<8}# запись экрана: mp4 — со звуком, gif — без звука, для чатов\n",
+        c.capture.warm, c.capture.magnifier, c.capture.auto_censor, basic(c.capture.video.name())
     ));
     out.push_str(&format!(
         "\n[save]\nfolder = {:<7}# пусто — «Изображения\\Screenshots»\nnotify = {:<7}# уведомление после сохранения\nthumbnail = {:<6}# миниатюра в углу: перетащите в чат, клик — открыть\n",

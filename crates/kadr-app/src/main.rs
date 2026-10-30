@@ -15,6 +15,7 @@ mod capture_audit;
 mod capture_mode;
 mod chrome;
 mod config_watch;
+mod gif_writer;
 mod glass;
 mod icons;
 mod interaction_bench;

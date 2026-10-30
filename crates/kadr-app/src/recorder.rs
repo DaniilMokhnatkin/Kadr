@@ -3,6 +3,7 @@
 //! from WASAPI loopback (whatever the speakers play), and Media Foundation's own H.264 and AAC
 //! encoders write the file — nothing beyond Windows itself. Everything runs on one worker thread
 //! with its own capture device, so the app stays responsive and the sink writer is never shared.
+use crate::gif_writer::GifWriter;
 use kadr_doc::{Image, Rect};
 use kadr_win::{log_info, log_warn};
 use std::path::PathBuf;
@@ -27,6 +28,8 @@ use windows::core::{Error, HSTRING, Interface, Result};
 const FPS: u32 = 30;
 /// One frame in Media Foundation's 100 ns units.
 const FRAME: i64 = 10_000_000 / FPS as i64;
+/// GIF runs at 15 fps: smooth enough for a screen, half the frames to encode and send.
+const GIF_FRAME: i64 = 10_000_000 / 15;
 
 pub enum Event {
     /// Recording runs: how long so far.
@@ -117,21 +120,32 @@ fn record(
         t.ok_or_else(|| Error::from(windows::Win32::Foundation::E_FAIL))?
     };
     let mut canvas = Canvas::new(w, h)?;
-    let mut sound = Loopback::start().map_err(|e| log_warn!("запись: звук недоступен: {e}")).ok();
-
-    unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL)? };
-    let writer = Writer::new(path, w, h, sound.as_ref().map(|s| s.rate));
-    let writer = match writer {
-        Ok(w) => w,
-        Err(e) => {
-            unsafe {
-                let _ = MFShutdown();
+    // A `.gif` path: a silent animation for chats, at a calmer pace; anything else is MP4 with sound.
+    let gif = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("gif"));
+    let frame = if gif { GIF_FRAME } else { FRAME };
+    let mut sound = if gif {
+        None
+    } else {
+        Loopback::start().map_err(|e| log_warn!("запись: звук недоступен: {e}")).ok()
+    };
+    let sink = if gif {
+        Sink::Gif(GifWriter::new(path, w, h).map_err(|e| Error::new(windows::Win32::Foundation::E_FAIL, e))?)
+    } else {
+        unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL)? };
+        match Writer::new(path, w, h, sound.as_ref().map(|s| s.rate)) {
+            Ok(w) => Sink::Mp4(w),
+            Err(e) => {
+                unsafe {
+                    let _ = MFShutdown();
+                }
+                return Err(e);
             }
-            return Err(e);
         }
     };
     log_info!(
-        "запись: {w}×{h}, {FPS} к/с, звук {}",
+        "запись{}: {w}×{h}, {} к/с, звук {}",
+        if gif { " GIF" } else { "" },
+        10_000_000 / frame,
         sound.as_ref().map_or("нет".to_string(), |s| format!("{} Гц", s.rate))
     );
 
@@ -164,15 +178,20 @@ fn record(
             Err(e) => log_warn!("запись, захват: {e}"),
         }
         canvas.cursor(region);
-        // Frames are stamped on a fixed 30 fps grid; a late turn skips ahead instead of drifting.
-        let due = (elapsed.as_nanos() as i64 / (FRAME * 100)).max(frames);
-        if let Err(e) = writer.video(canvas.pixels(), due * FRAME, FRAME) {
-            result = Err(e);
-            break;
+        // Frames are stamped on a fixed grid; a late turn skips ahead instead of drifting.
+        let due = (elapsed.as_nanos() as i64 / (frame * 100)).max(frames);
+        match &sink {
+            Sink::Mp4(writer) => {
+                if let Err(e) = writer.video(canvas.pixels(), due * frame, frame) {
+                    result = Err(e);
+                    break;
+                }
+            }
+            Sink::Gif(writer) => writer.frame(canvas.pixels(), Duration::from_nanos((due * frame * 100) as u64)),
         }
         frames = due + 1;
-        if let Some(s) = &mut sound
-            && let Err(e) = s.drain(&writer, started.elapsed())
+        if let (Some(s), Sink::Mp4(writer)) = (&mut sound, &sink)
+            && let Err(e) = s.drain(writer, started.elapsed())
         {
             log_warn!("запись: звук прервался: {e}");
             sound = None;
@@ -181,7 +200,7 @@ fn record(
             last_tick = Some(elapsed);
             notify(Event::Tick(elapsed));
         }
-        let next = Duration::from_nanos((frames * FRAME * 100) as u64);
+        let next = Duration::from_nanos((frames * frame * 100) as u64);
         if stop.load(Ordering::Relaxed) {
             break;
         }
@@ -190,20 +209,36 @@ fn record(
         }
     }
     let seconds = started.elapsed().as_secs_f64();
-    if let Some(s) = &mut sound
-        && let Err(e) = s.close(&writer, started.elapsed())
-    {
-        log_warn!("запись: конец звука: {e}");
-    }
-    let finished = if cancel.load(Ordering::Relaxed) { Ok(()) } else { result.and_then(|()| writer.finish()) };
-    drop(sound);
-    drop(writer);
-    unsafe {
-        let _ = MFShutdown();
-    }
+    let cancelled = cancel.load(Ordering::Relaxed);
+    let finished = match sink {
+        Sink::Mp4(writer) => {
+            if let Some(s) = &mut sound
+                && let Err(e) = s.close(&writer, started.elapsed())
+            {
+                log_warn!("запись: конец звука: {e}");
+            }
+            let finished = if cancelled { Ok(()) } else { result.and_then(|()| writer.finish()) };
+            drop(sound);
+            drop(writer);
+            unsafe {
+                let _ = MFShutdown();
+            }
+            finished
+        }
+        Sink::Gif(writer) => writer
+            .finish(started.elapsed())
+            .map_err(|e| Error::new(windows::Win32::Foundation::E_FAIL, e))
+            .or_else(|e| if cancelled { Ok(()) } else { Err(e) }),
+    };
     finished?;
     log_info!("запись: {seconds:.1} с → {}", path.display());
     Ok(Finished { path: path.to_path_buf(), preview: canvas.image(), seconds })
+}
+
+/// Where the frames go.
+enum Sink {
+    Mp4(Writer),
+    Gif(GifWriter),
 }
 
 fn device(adapter: &IDXGIAdapter) -> Result<(ID3D11Device, ID3D11DeviceContext)> {
@@ -577,6 +612,34 @@ mod tests {
         if let Some(keep) = std::env::var_os("KADR_KEEP_CLIP") {
             let _ = std::fs::copy(&done.path, keep);
         }
+        let _ = std::fs::remove_file(&done.path);
+    }
+
+    #[test]
+    fn records_a_gif_that_loops_for_about_as_long_as_it_ran() {
+        let path = std::env::temp_dir().join(format!("kadr-record-{}.gif", std::process::id()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let rec = start(Rect::new(0, 0, 320, 240), path.clone(), move |e| {
+            if let Event::Done(r) = e {
+                let _ = tx.send(r);
+            }
+        });
+        std::thread::sleep(Duration::from_millis(1500));
+        rec.stop();
+        let done = rx.recv_timeout(Duration::from_secs(20)).expect("finished").expect("recorded");
+        let mut options = gif::DecodeOptions::new();
+        options.set_color_output(gif::ColorOutput::RGBA);
+        let mut decoder = options.read_info(std::fs::File::open(&done.path).unwrap()).unwrap();
+        assert_eq!((decoder.width(), decoder.height()), (320, 240));
+        let mut total = 0u32;
+        let mut count = 0;
+        while let Some(frame) = decoder.read_next_frame().unwrap() {
+            total += frame.delay as u32;
+            count += 1;
+        }
+        assert!(count >= 1);
+        // Centiseconds: the animation lasts as long as the recording, give or take a frame.
+        assert!((total as f64 / 100.0 - done.seconds).abs() < 0.3, "{total} cs vs {:.2} s", done.seconds);
         let _ = std::fs::remove_file(&done.path);
     }
 }
