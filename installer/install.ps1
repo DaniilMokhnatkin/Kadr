@@ -36,12 +36,15 @@ param(
     [string]$Recognition = 'paddle',
     # PaddleOCR files (det.onnx, rec.onnx, dict.txt, onnxruntime.dll) as a zip.
     [string]$PaddleZip,
-    # Only add PaddleOCR to an installed Kadr (when Windows' OCR could not be installed).
+    # The offline translator (about 400 MB of downloads) with the install.
     [switch]$WithTranslation,
     [string]$TranslationManifest,
     [string]$TranslationWorker,
     [string]$TranslationCache,
-    [switch]$PaddleOnly
+    # Only add PaddleOCR to an installed Kadr (when Windows' OCR could not be installed).
+    [switch]$PaddleOnly,
+    # Only add the offline translator to an installed Kadr («Скачать» in its settings).
+    [switch]$TranslationOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -183,7 +186,46 @@ function Test-TranslationAsset($asset, [string]$path) {
     $false
 }
 
-# A few attempts per address; curl.exe (Windows 10 1803+) when Invoke-WebRequest itself fails.
+# Bytes of the translation pack already in place and in all, for «Загрузка N из M МБ».
+$script:TranslationDone = 0
+$script:TranslationTotal = 0
+
+# Streams `url` into `path`, telling the setup (or Kadr's settings) how far it got.
+function Save-Download([string]$url, [string]$path) {
+    $request = [Net.HttpWebRequest]::Create($url)
+    $request.UserAgent = 'Kadr-Setup'
+    $request.Timeout = 30000
+    $request.ReadWriteTimeout = 60000
+    $response = $request.GetResponse()
+    try {
+        $in = $response.GetResponseStream()
+        $out = [IO.File]::Create($path)
+        try {
+            $buffer = New-Object byte[] 262144
+            $since = [Diagnostics.Stopwatch]::StartNew()
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            $got = 0
+            while (($n = $in.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                $out.Write($buffer, 0, $n)
+                $got += $n
+                if ($since.ElapsedMilliseconds -ge 700) {
+                    $since.Restart()
+                    $done = [math]::Round(($script:TranslationDone + $got) / 1MB)
+                    $total = [math]::Max([math]::Round($script:TranslationTotal / 1MB), $done)
+                    $speed = $got / 1MB / [math]::Max($clock.Elapsed.TotalSeconds, 0.1)
+                    Report ('progress translation Загрузка {0} из {1} МБ · {2:0.0} МБ/с' -f $done, $total, $speed)
+                }
+            }
+        } finally {
+            $out.Dispose()
+            $in.Dispose()
+        }
+    } finally {
+        $response.Dispose()
+    }
+}
+
+# A few attempts per address; curl.exe (Windows 10 1803+) when the download itself fails.
 function Get-TranslationAsset($asset, [string]$file) {
     $urls = @(@($asset.url) + @($asset.mirrors) | Where-Object { $_ })
     if (-not $urls) { throw "У компонента $($asset.name) нет адреса для загрузки" }
@@ -194,7 +236,7 @@ function Get-TranslationAsset($asset, [string]$file) {
             Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue
             try {
                 try {
-                    Invoke-WebRequest -Uri $url -OutFile $part -UseBasicParsing
+                    Save-Download $url $part
                 } catch {
                     $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
                     if (-not (Test-Path -LiteralPath $curl)) { throw }
@@ -255,6 +297,8 @@ function Install-TranslationFiles {
         New-Item -ItemType Directory -Path $runtime,$downloads -Force | Out-Null
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $ProgressPreference='SilentlyContinue'
+        $script:TranslationDone = 0
+        $script:TranslationTotal = [double]$manifest.download_bytes
         foreach ($asset in $manifest.assets) {
             if (-not $asset.name -or [IO.Path]::GetFileName($asset.name) -ne $asset.name) {throw 'Некорректный пакет перевода'}
             if ($asset.kind -eq 'vcredist' -and (Test-VcRuntime)) { continue }
@@ -264,6 +308,8 @@ function Install-TranslationFiles {
                 if (Test-TranslationAsset $asset $cached) { Copy-Item -LiteralPath $cached -Destination $file -Force }
             }
             if (-not (Test-TranslationAsset $asset $file)) { Get-TranslationAsset $asset $file }
+            $script:TranslationDone += (Get-Item -LiteralPath $file).Length
+            Report ('progress translation Готово {0} из {1} МБ' -f [math]::Round($script:TranslationDone / 1MB), [math]::Round([math]::Max($script:TranslationTotal, $script:TranslationDone) / 1MB))
             if ($asset.kind -eq 'vcredist') {
                 $signature=Get-AuthenticodeSignature -LiteralPath $file
                 if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft Corporation') {throw 'Неверная подпись Microsoft Visual C++ Runtime'}
@@ -288,6 +334,7 @@ function Install-TranslationFiles {
         # Test a real inference before replacing a previously installed component. UTF-8 without
         # a BOM: the console's code page (or a BOM) would garble the request on some systems.
         $OutputEncoding=[Text.UTF8Encoding]::new($false)
+        Report 'progress translation Проверка перевода…'
         $probe=@('{"text":"Hello","to":"ru"}' | & (Join-Path $runtime 'python.exe') -I -u (Join-Path $stage 'translation-worker.py'))
         if ($LASTEXITCODE -ne 0) {throw "Офлайн-переводчик не запустился (код $LASTEXITCODE)"}
         $line=$probe | Where-Object { $_ -and $_.Trim().StartsWith('{') } | Select-Object -Last 1
@@ -305,6 +352,10 @@ function Install-TranslationFiles {
             throw
         }
         if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Recurse -Force -ErrorAction SilentlyContinue }
+        # Downloaded next to Kadr (from its settings): the pack is unpacked, the archives can go.
+        if ($downloads.StartsWith($InstallDir, [StringComparison]::OrdinalIgnoreCase)) {
+            Remove-Item -LiteralPath $downloads -Recurse -Force -ErrorAction SilentlyContinue
+        }
     } finally {
         if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
     }
@@ -319,12 +370,21 @@ function Install-Translation {
     } catch {
         $why = $_.Exception.Message
         Write-Warning "Офлайн-перевод не установлен: $why"
-        Report "warn translation $why. Пока переводит Google; повторите установку позже, чтобы добавить офлайн-перевод."
+        Report "warn translation $why. Пока переводит Google; докачать офлайн-перевод можно в настройках Kadr."
     }
 }
 
 Report 'step prepare'
 Assert-Admin
+
+if ($TranslationOnly) {
+    # From Kadr's settings: Kadr keeps running and picks the translator up at its next request.
+    if (-not (Test-Path $Target)) { throw 'Kadr ещё не установлен.' }
+    Report 'ok prepare'
+    Install-Translation
+    Report 'finish'
+    return
+}
 
 if ($PaddleOnly) {
     # Kadr keeps running: it picks PaddleOCR up at its next recognition.
@@ -429,6 +489,19 @@ if ($Recognition -eq 'paddle') {
 # Из этой консоли Kadr стартовал бы с правами администратора. Через explorer он запускается
 # с обычными правами, и Windows выдаёт ему uiAccess.
 if ($WithTranslation) { Install-Translation }
+# This script with the translator's list and worker, next to Kadr: «Скачать офлайн-перевод» in its
+# settings runs it later with -TranslationOnly, without the setup.
+try {
+    $setupDir = Join-Path $InstallDir 'setup'
+    New-Item -ItemType Directory -Path $setupDir -Force | Out-Null
+    Copy-Item -LiteralPath $PSCommandPath -Destination (Join-Path $setupDir 'install.ps1') -Force
+    foreach ($name in 'translation-manifest.json', 'translation-worker.py') {
+        $source = Join-Path $PSScriptRoot $name
+        if (Test-Path -LiteralPath $source) { Copy-Item -LiteralPath $source -Destination (Join-Path $setupDir $name) -Force }
+    }
+} catch {
+    Write-Warning "Файлы для докачки перевода не скопированы: $($_.Exception.Message)"
+}
 # A dedicated per-app driver profile; optional and never changes global/game settings.
 try {
     $nvidiaSource = Join-Path $PSScriptRoot 'nvidia-profile.cs'

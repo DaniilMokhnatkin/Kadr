@@ -3,7 +3,7 @@ $ErrorActionPreference='Stop'
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'install.ps1'),[ref]$tokens,[ref]$errors)
 if ($errors.Count) {throw $errors[0]}
-foreach ($name in 'Test-TranslationAsset','Get-TranslationAsset','Test-VcRuntime','Install-TranslationFiles','Install-Translation') {
+foreach ($name in 'Save-Download','Test-TranslationAsset','Get-TranslationAsset','Test-VcRuntime','Install-TranslationFiles','Install-Translation') {
     $fn=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true)
     if (-not $fn) {throw "install.ps1 has no $name"}
     . ([scriptblock]::Create($fn.Extent.Text))
@@ -22,7 +22,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'translation-manifest.json') -Destination $TranslationManifest
     $TranslationWorker=Join-Path $PSScriptRoot 'translation-worker.py'
     $TranslationCache=Join-Path $root 'dist\translation-downloads'
-    function Invoke-WebRequest {throw 'Offline component test must not access the network'}
+    function Save-Download {throw "Offline component test must not access the network"}
     $manifest=Get-Content -LiteralPath $TranslationManifest -Raw -Encoding UTF8 | ConvertFrom-Json
     foreach ($asset in $manifest.assets) {
         if ($asset.kind -eq 'wheel' -and $asset.name -notlike '*-cp313-cp313-win_amd64.whl') {throw 'Wrong Python ABI in translation manifest'}

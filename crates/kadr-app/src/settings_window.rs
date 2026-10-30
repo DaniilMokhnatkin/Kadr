@@ -84,6 +84,8 @@ enum Hit {
     Key(usize),
     OpenFile,
     Report,
+    /// «Скачать» under «Переводчик», while the offline translator is missing.
+    Offline,
 }
 
 struct Layout {
@@ -101,6 +103,13 @@ struct Layout {
     sections: [f32; 4],
     scale: f32,
     height: f32,
+}
+
+/// The hint line under «Переводчик»: the offline translator's status and «Скачать».
+fn offline_hint(l: &Layout) -> D2D_RECT_F {
+    let (r, s) = (l.choices[2], l.scale);
+    let t = track(r, s, CHOICES[2].2.len());
+    rect(r.left + 16.0 * s, r.top + ROW * s * 0.5, t.left - 8.0 * s, r.bottom - 4.0 * s)
 }
 
 /// The segmented control's track at the right of a row.
@@ -338,8 +347,48 @@ struct State {
     scroll: Spring,
     /// When «Скопировать отчёт» was last pressed: the link says «Отчёт скопирован» a moment.
     reported: Option<f64>,
+    /// «Скачать офлайн-перевод»: the install running, or how the last one ended.
+    offline: Option<crate::offline_setup::Job>,
+    offline_error: Option<String>,
 }
 impl State {
+    /// What the line under «Переводчик» says about the offline translator, and whether a click
+    /// there starts the download; `None` when it is installed and there is nothing to say.
+    fn offline_line(&self) -> Option<(String, bool)> {
+        use crate::offline_setup::Status;
+        if let Some(job) = &self.offline {
+            return Some(match job.status() {
+                Status::Running(what) => (what.clone(), false),
+                _ => ("Проверка…".into(), false),
+            });
+        }
+        if crate::translate_local::available() {
+            return None;
+        }
+        Some(match &self.offline_error {
+            Some(e) => (format!("Не скачалось: {e} · Повторить"), true),
+            None => ("Офлайн не установлен · Скачать ≈400 МБ".into(), true),
+        })
+    }
+    fn offline_hit(&self, l: &Layout, x: f32, y: f32) -> Option<Hit> {
+        (self.offline_line().is_some_and(|(_, click)| click) && inside(offline_hint(l), x, y)).then_some(Hit::Offline)
+    }
+    /// The download running: take in what it has written, and let it go once it is over.
+    fn poll_offline(&mut self) {
+        use crate::offline_setup::Status;
+        let Some(job) = &mut self.offline else { return };
+        match job.poll().clone() {
+            Status::Running(_) => {}
+            Status::Done => {
+                self.offline = None;
+                self.offline_error = None;
+            }
+            Status::Failed(e) => {
+                self.offline = None;
+                self.offline_error = Some(e);
+            }
+        }
+    }
     fn layout(&self, width: f32) -> Layout {
         scrolled_layout(width, self.scale, self.scroll.value(self.now()))
     }
@@ -513,6 +562,8 @@ pub fn show(instance: HINSTANCE, host: HWND, message: u32, config: &Config) {
                 tracking: false,
                 scroll: Spring::with(0.0, Curve::GLIDE),
                 reported: None,
+                offline: None,
+                offline_error: None,
             })
         });
     }
@@ -609,10 +660,12 @@ fn paint_window(hwnd: HWND) {
         if glass::ensure(&mut st.surface, device, hwnd).is_err() || !ensure_fonts(st) {
             return;
         }
+        st.poll_offline();
         let st = &*st;
         let device = st.device.as_ref().unwrap();
         let size = client_size(hwnd);
-        let moving = glass::frame(device, st.surface.as_ref().unwrap(), || paint(device, st, size));
+        let moving =
+            glass::frame(device, st.surface.as_ref().unwrap(), || paint(device, st, size)) || st.offline.is_some();
         if moving {
             unsafe {
                 let _ = InvalidateRect(Some(hwnd), None, false);
@@ -718,7 +771,14 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
             let top = rect(r.left + 16.0 * s, r.top + 4.0 * s, t.left - 8.0 * s, r.top + ROW * s * 0.55);
             let bottom = rect(r.left + 16.0 * s, r.top + ROW * s * 0.5, t.left - 8.0 * s, r.bottom - 4.0 * s);
             text(gpu, &f.label, label, top, theme.text);
-            text(gpu, &f.hint, hint, bottom, theme.text_muted);
+            match st.offline_line().filter(|_| row == 2) {
+                Some((line, true)) => {
+                    let ink = mix(theme.accent, theme.on_selected, glow(Hit::Offline));
+                    text(gpu, &f.hint, &line, bottom, ink);
+                }
+                Some((line, false)) => text(gpu, &f.hint, &line, bottom, theme.text_muted),
+                None => text(gpu, &f.hint, hint, bottom, theme.text_muted),
+            }
         }
         fill(gpu, theme.tint, t, 8.0 * s);
         let at = st.slides[row].value(now);
@@ -891,7 +951,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                         st.tracking = true;
                     }
                     let custom = !st.config.save.folder.trim().is_empty();
-                    let h = hit(&st.layout(width()), x, y, custom);
+                    let l = st.layout(width());
+                    let h = hit(&l, x, y, custom).or_else(|| st.offline_hit(&l, x, y));
                     st.set_hover(h);
                 }
             });
@@ -937,11 +998,13 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let (x, y) = point();
             let (mut pick, mut hide) = (false, false);
             let mut report = None;
+            let mut download = false;
             STATE.with(|s| {
                 let Ok(mut state) = s.try_borrow_mut() else { return };
                 let Some(st) = state.as_mut() else { return };
                 let custom = !st.config.save.folder.trim().is_empty();
-                let mut h = hit(&st.layout(width()), x, y, custom);
+                let l = st.layout(width());
+                let mut h = hit(&l, x, y, custom).or_else(|| st.offline_hit(&l, x, y));
                 // The report link is hidden while a key is recorded or an error is shown.
                 if h == Some(Hit::Report) && (st.error.is_some() || st.capturing.is_some()) {
                     h = None;
@@ -994,10 +1057,28 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                         report = Some(crate::report::build(&st.config));
                         st.reported = Some(st.now());
                     }
+                    Some(Hit::Offline) => download = true,
                     None => {}
                 }
             });
             // Hiding and the dialog make Windows call back into `proc`: no borrow may be held across them.
+            if download {
+                // The UAC prompt runs a message loop of its own: the job is stored once it is back.
+                let started = crate::offline_setup::start(hwnd);
+                STATE.with(|s| {
+                    if let Ok(mut guard) = s.try_borrow_mut()
+                        && let Some(st) = guard.as_mut()
+                    {
+                        match started {
+                            Ok(job) => {
+                                st.offline = Some(job);
+                                st.offline_error = None;
+                            }
+                            Err(e) => st.offline_error = Some(e),
+                        }
+                    }
+                });
+            }
             if let Some(text) = report
                 && let Err(e) = kadr_export::clipboard::put_text(hwnd, &text)
             {
@@ -1150,6 +1231,8 @@ pub fn preview(scale: f32) -> windows::core::Result<kadr_doc::Image> {
         tracking: false,
         scroll: Spring::with(0.0, Curve::GLIDE),
         reported: None,
+        offline: None,
+        offline_error: None,
     };
     if !ensure_fonts(&mut st) {
         return Err(windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL));

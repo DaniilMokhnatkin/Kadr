@@ -173,6 +173,8 @@ struct App {
     /// The steps of the running (or last) install: ids into STEPS, and their state.
     plan: Vec<usize>,
     steps: Vec<Step>,
+    /// What a running step is doing right now, e.g. «Загрузка 120 из 440 МБ».
+    live: Option<(String, String)>,
     declined: bool,
     failed: Option<String>,
     progress: Spring,
@@ -338,6 +340,7 @@ impl App {
                         self.steps[i] = Step::Warn(text, t);
                     }
                 }
+                Report::Progress(id, text) => self.live = Some((id, text)),
                 Report::Error(text) => self.failed = Some(text),
                 Report::Finish => finished = true,
             }
@@ -355,8 +358,16 @@ impl App {
             self.slide.target_at(DONE as f32, t, t + 0.6);
         }
     }
+    /// Windows' OCR packs did not install: only that calls for PaddleOCR.
     fn warned(&self) -> bool {
-        self.steps.iter().any(|s| matches!(s, Step::Warn(..)))
+        self.warning(|id| id.starts_with("ocr-")).is_some()
+    }
+    /// The first warning of a step whose id passes `which`.
+    fn warning(&self, which: impl Fn(&str) -> bool) -> Option<&str> {
+        self.plan.iter().zip(&self.steps).find_map(|(&i, s)| match s {
+            Step::Warn(text, _) if which(STEPS[i].0) => Some(text.as_str()),
+            _ => None,
+        })
     }
     fn glow(&mut self, h: Hit) -> &mut Spring {
         if let Some(i) = self.glow.iter().position(|(k, _)| *k == h) {
@@ -620,6 +631,7 @@ fn main() {
             payload: install::payload(),
             task: None,
             plan: Vec::new(),
+            live: None,
             paddle: true,
             choice: spring(Curve::GLIDE),
             adding_paddle: false,
@@ -1258,7 +1270,7 @@ fn draw_page(
             fill(gpu, fade(theme.group, alpha), g, 14.0 * s);
             stroke(gpu, fade(theme.hairline, 0.7 * alpha), inflate(g, -0.5), 14.0 * s, 1.0);
             let t = now(app);
-            for (n, (_, title, note)) in app.plan.iter().map(|&i| STEPS[i]).enumerate() {
+            for (n, (id, title, note)) in app.plan.iter().map(|&i| STEPS[i]).enumerate() {
                 let row = rect(g.left, g.top + n as f32 * 46.0 * s, g.right, g.top + (n + 1) as f32 * 46.0 * s);
                 if n > 0 {
                     fill(
@@ -1289,7 +1301,8 @@ fn draw_page(
                     }
                     Step::Running(_) => {
                         spinner(device, center, 9.0 * s, t, fade(theme.accent, alpha), 2.2 * s);
-                        (theme.text, note.to_string())
+                        let live = app.live.as_ref().filter(|(step, _)| step == id).map(|(_, text)| text.clone());
+                        (theme.text, live.unwrap_or_else(|| note.to_string()))
                     }
                     Step::Done(since) => {
                         let k = art::pop(art::phase(t, *since, 0.45));
@@ -1383,10 +1396,8 @@ fn draw_page(
             }
             if offer {
                 // Windows' OCR did not install: say what that means and why PaddleOCR is offered.
-                let reason = app.steps.iter().find_map(|s| match s {
-                    Step::Warn(text, _) => Some(text.trim().trim_end_matches('.').to_string()),
-                    _ => None,
-                });
+                let reason =
+                    app.warning(|id| id.starts_with("ocr-")).map(|text| text.trim().trim_end_matches('.').to_string());
                 let (r1, a1) = lifted(rect(60.0 * s, 160.0 * s, w - 60.0 * s, 200.0 * s), 3);
                 text(gpu, &f.title_center, "Распознавание Windows не установилось", r1, fade(theme.text, a1));
                 let why = match reason.filter(|r| !r.is_empty()) {
@@ -1442,6 +1453,20 @@ fn draw_page(
                     gpu,
                     &f.lead_center,
                     "Распознавание текста не установилось — «Текст», «Перевод» и «Цензура» пока не работают. Чтобы добавить PaddleOCR, запустите установщик ещё раз и выберите его.",
+                    r3,
+                    fade(rgb(0xff9f0a, 1.0), a3),
+                );
+            } else if failed.is_none()
+                && let Some(why) = app.warning(|id| id == "translation")
+            {
+                let (r3, a3) = lifted(rect(90.0 * s, 384.0 * s, w - 90.0 * s, 440.0 * s), 5);
+                let why: String = why.split(". Пока").next().unwrap_or(why).chars().take(120).collect();
+                text(
+                    gpu,
+                    &f.lead_center,
+                    &format!(
+                        "Офлайн-перевод не установился: {why}. Пока Kadr переводит через Google; докачать модели можно в «Настройках» Kadr."
+                    ),
                     r3,
                     fade(rgb(0xff9f0a, 1.0), a3),
                 );
@@ -1659,6 +1684,7 @@ fn snapshots(folder: &std::path::Path, scale: f32) -> windows::core::Result<()> 
             payload: Err(String::new()),
             task: None,
             plan: Vec::new(),
+            live: None,
             paddle: true,
             choice: spring(Curve::GLIDE),
             adding_paddle: false,

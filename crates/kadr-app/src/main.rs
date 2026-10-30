@@ -24,6 +24,7 @@ mod m2;
 mod motion_bench;
 mod ocr;
 mod ocr_paddle;
+mod offline_setup;
 mod pin_window;
 mod qr;
 mod recent_window;

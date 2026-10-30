@@ -56,6 +56,8 @@ pub enum Report {
     Ok(String),
     Skip(String),
     Warn(String, String),
+    /// A running step's current detail.
+    Progress(String, String),
     Error(String),
     Finish,
 }
@@ -69,6 +71,7 @@ pub fn parse(line: &str) -> Option<Report> {
         "ok" => Report::Ok(id()),
         "skip" => Report::Skip(id()),
         "warn" => Report::Warn(id(), rest.split_once(' ').map_or("", |(_, t)| t).to_string()),
+        "progress" => Report::Progress(id(), rest.split_once(' ').map_or("", |(_, t)| t).to_string()),
         "error" => Report::Error(rest.to_string()),
         "finish" => Report::Finish,
         _ => return None,
