@@ -83,6 +83,8 @@ const WM_APP_TEXT: u32 = WM_APP + 10;
 const WM_APP_SETTINGS: u32 = WM_APP + 11;
 const WM_APP_RECORD: u32 = WM_APP + 12;
 const WM_APP_VIEWER: u32 = WM_APP + 13;
+/// The update check found something (or, asked from the tray, nothing).
+const WM_APP_UPDATE: u32 = WM_APP + 14;
 /// The long-screenshot panel was pressed.
 const TIMER_HOOK_CHECK: usize = 1;
 const TIMER_DRAFT: usize = 2;
@@ -96,6 +98,7 @@ const CMD_FULLSCREEN: usize = 15;
 const CMD_LAST_REGION: usize = 16;
 const CMD_CONFIG: usize = 17;
 const CMD_RECENT: usize = 18;
+const CMD_UPDATE: usize = 19;
 
 const HOST_CLASS: PCWSTR = w!("KadrHost");
 
@@ -293,6 +296,10 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
                 "Некоторые хоткеи заняты",
                 &format!("{}\nОбласть: Ctrl+Shift+F12 или значок Kadr в трее", conflicts.join("; ")),
             );
+        }
+        // Benchmarks and design runs stay offline; a resident Kadr looks for updates daily.
+        if bench.is_none() {
+            crate::update::watch(hwnd, WM_APP_UPDATE);
         }
         APP.with(|cell| *cell.borrow_mut() = Some(app));
         if let Some(count) = bench {
@@ -577,6 +584,7 @@ impl App {
             let _ = AppendMenuW(menu, MF_STRING | check(self.warm), CMD_WARM, w!("Прогретый дубликатор"));
             let _ = AppendMenuW(menu, MF_STRING | check(self.hook.is_some()), CMD_HOOK, w!("Наблюдатель LL-хука"));
             let _ = AppendMenuW(menu, MF_STRING, CMD_LOG, w!("Открыть лог"));
+            let _ = AppendMenuW(menu, MF_STRING, CMD_UPDATE, w!("Проверить обновления"));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(menu, MF_STRING, CMD_EXIT, w!("Выход"));
             let cursor = cursor_pos();
@@ -593,6 +601,7 @@ impl App {
             CMD_FULLSCREEN => self.capture_mode(Mode::Fullscreen, 0, "трей"),
             CMD_LAST_REGION => self.capture_mode(Mode::LastRegion, 0, "трей"),
             CMD_CONFIG => crate::settings_window::show(self.instance, self.hwnd, WM_APP_SETTINGS, &self.config),
+            CMD_UPDATE => crate::update::check_now(),
             CMD_WARM => {
                 self.set_warm(!self.warm);
                 log_info!("дубликатор: {}", self.mode());
@@ -1154,6 +1163,34 @@ impl App {
         }
     }
 
+    /// What the update check found: a bubble by the tray says so.
+    fn on_update(&mut self) {
+        use crate::bubble::Content;
+        for event in crate::update::take_events() {
+            let content = match event {
+                crate::update::Event::Found(release) => {
+                    log_info!("обновления: доступна {}", release.version);
+                    let notes = if release.notes.is_empty() {
+                        format!("Kadr {} готов к установке.", release.version)
+                    } else {
+                        release.notes.clone()
+                    };
+                    Content::Update { version: release.version, notes }
+                }
+                crate::update::Event::Current => Content::Info(
+                    "Обновлений нет".into(),
+                    format!("У вас последняя версия Kadr — {}.", env!("CARGO_PKG_VERSION")),
+                ),
+                crate::update::Event::Failed(e) => Content::Failed(e),
+            };
+            if crate::bubble::is_open() {
+                crate::bubble::update(content, None);
+            } else {
+                crate::bubble::open(self.instance, tray_corner(), content);
+            }
+        }
+    }
+
     /// The viewer's buttons, and its return to the corner.
     fn on_viewer(&mut self) {
         for request in crate::viewer::take_requests() {
@@ -1457,6 +1494,7 @@ unsafe extern "system" fn host_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         WM_APP_TEXT => with_app(App::on_text_result),
         WM_APP_SETTINGS => with_app(App::on_settings_window),
         WM_APP_RECORD => with_app(App::on_record),
+        WM_APP_UPDATE => with_app(App::on_update),
         WM_APP_VIEWER => with_app(App::on_viewer),
         WM_APP_PIN => with_app(App::on_pin),
         WM_RENDERFORMAT => with_app(|app| {
@@ -1654,4 +1692,16 @@ pub(crate) fn choose_theme(config: &Config) {
         config::Theme::Light => Some(false),
         config::Theme::Dark => Some(true),
     });
+}
+
+/// Where the tray is: the bottom right of the main monitor's work area, for the update bubble.
+fn tray_corner() -> DocRect {
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint};
+    let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+    unsafe {
+        let monitor = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+        let _ = GetMonitorInfoW(monitor, &mut mi);
+    }
+    let w = mi.rcWork;
+    DocRect::new(w.right - 1, w.bottom - 1, w.right, w.bottom)
 }

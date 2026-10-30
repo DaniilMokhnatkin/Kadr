@@ -32,6 +32,13 @@ pub enum Content {
     Copied(String),
     /// A QR code's contents, already in the clipboard; a web link gets «Открыть».
     Qr(String),
+    /// A newer Kadr: its version and release notes; the button installs it.
+    Update {
+        version: String,
+        notes: String,
+    },
+    /// A plain message: its header and text.
+    Info(String, String),
     Failed(String),
 }
 
@@ -92,6 +99,8 @@ fn header(content: &Content) -> String {
         Content::Translated { from, to, .. } => format!("{} → {}", language(from), language(to)),
         Content::Copied(_) => "Текст скопирован".into(),
         Content::Qr(_) => "QR-код скопирован".into(),
+        Content::Update { version, .. } => format!("Доступна версия {version}"),
+        Content::Info(header, _) => header.clone(),
         Content::Failed(_) => "Не получилось".into(),
     }
 }
@@ -100,6 +109,8 @@ fn body(content: &Content) -> &str {
     match content {
         Content::Working(_) => "",
         Content::Translated { text, .. } | Content::Copied(text) | Content::Qr(text) | Content::Failed(text) => text,
+        Content::Update { notes, .. } => notes,
+        Content::Info(_, text) => text,
     }
 }
 
@@ -412,7 +423,7 @@ fn paint(device: &Device, st: &State) -> bool {
         }
     }
     // Copy: only when there is something to copy; turns into a confirmation for a moment.
-    if matches!(st.content, Content::Translated { .. } | Content::Copied(_) | Content::Qr(_)) {
+    if matches!(st.content, Content::Translated { .. } | Content::Copied(_) | Content::Qr(_) | Content::Update { .. }) {
         let hover = sample(&st.hover_copy);
         fill(gpu, fade(mix(theme.tint, theme.tint_strong, hover), a), copy, 8.0 * s);
         let opens = matches!(&st.content, Content::Qr(t) if crate::qr::link(t).is_some());
@@ -532,7 +543,11 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     if inside(close, x, y) {
                         hide = true;
                     } else if inside(copy, x, y) {
-                        if let Content::Qr(code) = &st.content
+                        if matches!(st.content, Content::Update { .. }) {
+                            crate::update::install();
+                            st.content = Content::Working("Скачиваю обновление…");
+                            place(st);
+                        } else if let Content::Qr(code) = &st.content
                             && let Some(url) = crate::qr::link(code)
                         {
                             let url = kadr_win::wide(url);

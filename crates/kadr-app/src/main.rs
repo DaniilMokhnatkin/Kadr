@@ -17,6 +17,7 @@ mod chrome;
 mod config_watch;
 mod gif_writer;
 mod glass;
+mod http;
 mod icons;
 mod interaction_bench;
 #[cfg(test)]
@@ -38,6 +39,7 @@ mod snapshot;
 mod thumbnail;
 mod translate;
 mod translate_local;
+mod update;
 mod viewer;
 
 use std::error::Error;

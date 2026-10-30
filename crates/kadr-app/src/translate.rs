@@ -1,8 +1,5 @@
 //! Translation through Google's keyless web endpoint. Only the recognised text is sent (in the
 //! request body, never in the URL); the screenshot stays on this computer.
-use std::ffi::c_void;
-use windows::Win32::Networking::WinHttp::*;
-use windows::core::{PCWSTR, w};
 
 static CHOSEN: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 pub fn choose(engine: kadr_store::config::TranslationEngine) {
@@ -127,7 +124,7 @@ fn translate_google(text: &str, to: &str) -> Result<Translation, String> {
     for k in 0..ENDPOINTS.len() {
         let index = (first + k) % ENDPOINTS.len();
         let (host, path, read) = ENDPOINTS[index];
-        let path = kadr_win::wide(&format!("{path}{to}"));
+        let path = format!("{path}{to}");
         match post(host, &path, body.as_bytes()) {
             Ok((200, response)) => match read(&response) {
                 Some(mut t) => {
@@ -150,101 +147,11 @@ fn translate_google(text: &str, to: &str) -> Result<Translation, String> {
     Err(last)
 }
 
-struct Handle(*mut c_void);
-impl Drop for Handle {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            unsafe {
-                let _ = WinHttpCloseHandle(self.0);
-            }
-        }
-    }
-}
-
 /// The status code and the body.
-fn post(host: &str, path: &[u16], body: &[u8]) -> Result<(u32, String), String> {
-    let fail =
-        |what: &str| format!("Нет связи с переводчиком ({what}): {}", windows::core::Error::from_thread().message());
-    unsafe {
-        let session = Handle(WinHttpOpen(
-            w!(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
-            ),
-            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-            PCWSTR::null(),
-            PCWSTR::null(),
-            0,
-        ));
-        if session.0.is_null() {
-            return Err(fail("сеанс"));
-        }
-        let _ = WinHttpSetTimeouts(session.0, 5000, 5000, 5000, 8000);
-        // Windows 10 offers old TLS and HTTP/1.1 unless asked; Google throttles such clients first.
-        // TLS 1.3 is unknown to older builds, so fall back to 1.2 alone when it is refused.
-        let option = |id: u32, value: u32| {
-            WinHttpSetOption(Some(session.0 as *const c_void), id, Some(&value.to_ne_bytes())).is_ok()
-        };
-        if !option(
-            WINHTTP_OPTION_SECURE_PROTOCOLS,
-            WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3,
-        ) {
-            option(WINHTTP_OPTION_SECURE_PROTOCOLS, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2);
-        }
-        option(WINHTTP_OPTION_ENABLE_HTTP_PROTOCOL, WINHTTP_PROTOCOL_FLAG_HTTP2);
-        let host = kadr_win::wide(host);
-        let connect = Handle(WinHttpConnect(session.0, PCWSTR(host.as_ptr()), INTERNET_DEFAULT_HTTPS_PORT, 0));
-        if connect.0.is_null() {
-            return Err(fail("сервер"));
-        }
-        let request = Handle(WinHttpOpenRequest(
-            connect.0,
-            w!("POST"),
-            PCWSTR(path.as_ptr()),
-            PCWSTR::null(),
-            PCWSTR::null(),
-            std::ptr::null(),
-            WINHTTP_FLAG_SECURE,
-        ));
-        if request.0.is_null() {
-            return Err(fail("запрос"));
-        }
-        let headers: Vec<u16> =
-            "Content-Type: application/x-www-form-urlencoded;charset=UTF-8\r\n".encode_utf16().collect();
-        WinHttpSendRequest(
-            request.0,
-            Some(&headers),
-            Some(body.as_ptr() as *const c_void),
-            body.len() as u32,
-            body.len() as u32,
-            0,
-        )
-        .map_err(|_| fail("отправка"))?;
-        WinHttpReceiveResponse(request.0, std::ptr::null_mut()).map_err(|_| fail("ответ"))?;
-        let mut status = 0u32;
-        let mut size = size_of::<u32>() as u32;
-        let _ = WinHttpQueryHeaders(
-            request.0,
-            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-            PCWSTR::null(),
-            Some(&mut status as *mut u32 as *mut c_void),
-            &mut size,
-            std::ptr::null_mut(),
-        );
-        let mut out = Vec::new();
-        loop {
-            let mut available = 0u32;
-            WinHttpQueryDataAvailable(request.0, &mut available).map_err(|_| fail("чтение"))?;
-            if available == 0 || out.len() > 4 << 20 {
-                break;
-            }
-            let mut chunk = vec![0u8; available as usize];
-            let mut read = 0u32;
-            WinHttpReadData(request.0, chunk.as_mut_ptr() as *mut c_void, available, &mut read)
-                .map_err(|_| fail("чтение"))?;
-            out.extend_from_slice(&chunk[..read as usize]);
-        }
-        Ok((status, String::from_utf8_lossy(&out).into_owned()))
-    }
+fn post(host: &str, path: &str, body: &[u8]) -> Result<(u32, String), String> {
+    let headers = "Content-Type: application/x-www-form-urlencoded;charset=UTF-8\r\n";
+    let (status, out) = crate::http::request("POST", host, path, headers, body, 4 << 20, "переводчиком")?;
+    Ok((status, String::from_utf8_lossy(&out).into_owned()))
 }
 
 /// application/x-www-form-urlencoded.
@@ -465,7 +372,7 @@ mod tests {
     fn live_every_spare_endpoint_translates_on_its_own() {
         let body = format!("q={}", encode("The weather is nice today.\nSecond line"));
         for (host, path, read) in ENDPOINTS {
-            let (status, response) = post(host, &kadr_win::wide(&format!("{path}ru")), body.as_bytes()).unwrap();
+            let (status, response) = post(host, &format!("{path}ru"), body.as_bytes()).unwrap();
             assert_eq!(status, 200, "{host}");
             let t = read(&response).unwrap_or_else(|| panic!("{host}: {response}"));
             assert_eq!(t.from, "en", "{host}");
