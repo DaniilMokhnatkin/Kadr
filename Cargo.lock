@@ -138,7 +138,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "kadr-app"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "gif",
  "kadr-capture",
@@ -159,7 +159,7 @@ dependencies = [
 
 [[package]]
 name = "kadr-capture"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "kadr-doc",
  "kadr-render",
@@ -169,7 +169,7 @@ dependencies = [
 
 [[package]]
 name = "kadr-doc"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "png",
  "serde",
@@ -177,7 +177,7 @@ dependencies = [
 
 [[package]]
 name = "kadr-editor"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "kadr-doc",
  "kadr-render",
@@ -186,7 +186,7 @@ dependencies = [
 
 [[package]]
 name = "kadr-export"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "kadr-doc",
  "kadr-win",
@@ -196,7 +196,7 @@ dependencies = [
 
 [[package]]
 name = "kadr-render"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "kadr-doc",
  "kadr-win",
@@ -206,7 +206,7 @@ dependencies = [
 
 [[package]]
 name = "kadr-setup"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "kadr-doc",
  "kadr-render",
@@ -218,7 +218,7 @@ dependencies = [
 
 [[package]]
 name = "kadr-store"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "kadr-doc",
  "serde",
@@ -227,7 +227,7 @@ dependencies = [
 
 [[package]]
 name = "kadr-win"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "windows",
 ]
