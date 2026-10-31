@@ -1,8 +1,9 @@
 //! Video of one screen area with the computer's sound, into an MP4. The picture comes from DXGI
 //! desktop duplication (the cursor drawn in with GDI, since duplication leaves it out), the sound
-//! from WASAPI loopback (whatever the speakers play), and Media Foundation's own H.264 and AAC
-//! encoders write the file — nothing beyond Windows itself. Everything runs on one worker thread
-//! with its own capture device, so the app stays responsive and the sink writer is never shared.
+//! from WASAPI loopback (whatever the speakers play; the microphone mixed in on request), and Media
+//! Foundation's own H.264 and AAC encoders write the file — nothing beyond Windows itself. Everything
+//! runs on one worker thread with its own capture device, so the app stays responsive and the sink
+//! writer is never shared.
 use crate::gif_writer::GifWriter;
 use kadr_doc::{Image, Rect};
 use kadr_win::{log_info, log_warn};
@@ -61,8 +62,9 @@ impl Recording {
     }
 }
 
-/// Starts recording `region` (desktop pixels) into `path`; `notify` is called from the worker.
-pub fn start(region: Rect, path: PathBuf, notify: impl Fn(Event) + Send + 'static) -> Recording {
+/// Starts recording `region` (desktop pixels) into `path`, with the microphone mixed in when
+/// `microphone`; `notify` is called from the worker.
+pub fn start(region: Rect, path: PathBuf, microphone: bool, notify: impl Fn(Event) + Send + 'static) -> Recording {
     let stop = Arc::new(AtomicBool::new(false));
     let cancel = Arc::new(AtomicBool::new(false));
     let (s, c) = (stop.clone(), cancel.clone());
@@ -70,7 +72,7 @@ pub fn start(region: Rect, path: PathBuf, notify: impl Fn(Event) + Send + 'stati
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         }
-        let result = record(region, &path, &s, &c, &notify);
+        let result = record(region, &path, microphone, &s, &c, &notify);
         if c.load(Ordering::Relaxed) {
             let _ = std::fs::remove_file(&path);
         }
@@ -89,6 +91,7 @@ pub fn fit(region: Rect, monitor: Rect) -> Option<Rect> {
 fn record(
     region: Rect,
     path: &std::path::Path,
+    microphone: bool,
     stop: &AtomicBool,
     cancel: &AtomicBool,
     notify: &dyn Fn(Event),
@@ -123,7 +126,7 @@ fn record(
     // A `.gif` path: a silent animation for chats, at a calmer pace; anything else is MP4 with sound.
     let gif = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("gif"));
     let frame = if gif { GIF_FRAME } else { FRAME };
-    let mut sound = if gif { None } else { Loopback::start_in_time() };
+    let mut sound = if gif { None } else { Sound::start(microphone) };
     let sink = if gif {
         Sink::Gif(GifWriter::new(path, w, h).map_err(|e| Error::new(windows::Win32::Foundation::E_FAIL, e))?)
     } else {
@@ -142,7 +145,7 @@ fn record(
         "запись{}: {w}×{h}, {} к/с, звук {}",
         if gif { " GIF" } else { "" },
         10_000_000 / frame,
-        sound.as_ref().map_or("нет".to_string(), |s| format!("{} Гц", s.rate))
+        sound.as_ref().map_or("нет".to_string(), Sound::describe)
     );
 
     let origin = out.bounds();
@@ -448,46 +451,18 @@ impl Writer {
     }
 }
 
-/// The computer's sound, as the speakers get it, turned into 16-bit stereo.
-struct Loopback {
+/// One sound input read as float stereo: what the speakers play (WASAPI loopback) or the default
+/// microphone.
+struct Source {
     client: IAudioClient,
     capture: IAudioCaptureClient,
-    rate: u32,
     channels: usize,
     float: bool,
-    /// Stereo frames handed to the encoder so far: their count is the audio clock.
-    written: u64,
 }
 
-impl Loopback {
-    /// The sound, unless asking for it hangs: an antivirus that guards audio capture can hold the
-    /// call for good. Then the video goes without sound instead of never starting.
-    fn start_in_time() -> Option<Self> {
-        /// Made on one thread of the multithreaded apartment, used on another: WASAPI's objects
-        /// allow that, though the bindings cannot know it.
-        struct Handed(Result<Loopback>);
-        unsafe impl Send for Handed {}
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            unsafe {
-                let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-            }
-            let _ = tx.send(Handed(Self::start()));
-        });
-        match rx.recv_timeout(Duration::from_secs(3)).map(|h| h.0) {
-            Ok(Ok(sound)) => Some(sound),
-            Ok(Err(e)) => {
-                log_warn!("запись: звук недоступен: {e}");
-                None
-            }
-            Err(_) => {
-                log_warn!("запись: звук не ответил за 3 с (его может держать антивирус) — видео без звука");
-                None
-            }
-        }
-    }
-
-    fn start() -> Result<Self> {
+impl Source {
+    /// What the speakers play, in the engine's own format; its sample rate.
+    fn speakers() -> Result<(Self, u32)> {
         unsafe {
             let devices: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
             let device = devices.GetDefaultAudioEndpoint(eRender, eConsole)?;
@@ -515,8 +490,135 @@ impl Loopback {
                     format!("формат звука {rate} Гц, {bits} бит, {channels} кан. не поддерживается"),
                 ));
             }
-            Ok(Self { client, capture, rate, channels, float, written: 0 })
+            Ok((Self { client, capture, channels, float }, rate))
         }
+    }
+
+    /// The default microphone, which Windows converts to float stereo at `rate` for us.
+    fn microphone(rate: u32) -> Result<Self> {
+        unsafe {
+            let devices: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+            let device = devices.GetDefaultAudioEndpoint(eCapture, eConsole)?;
+            let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
+            let format = WAVEFORMATEX {
+                wFormatTag: WAVE_FORMAT_IEEE_FLOAT as u16,
+                nChannels: 2,
+                nSamplesPerSec: rate,
+                nAvgBytesPerSec: rate * 8,
+                nBlockAlign: 8,
+                wBitsPerSample: 32,
+                cbSize: 0,
+            };
+            let flags = AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+            client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 10_000_000, 0, &format, None)?;
+            let capture = client.GetService::<IAudioCaptureClient>()?;
+            client.Start()?;
+            Ok(Self { client, capture, channels: 2, float: true })
+        }
+    }
+
+    /// Every packet waiting, appended to `out` as interleaved float stereo.
+    fn read(&self, out: &mut Vec<f32>) -> Result<()> {
+        unsafe {
+            while self.capture.GetNextPacketSize()? != 0 {
+                let (mut data, mut frames, mut flags) = (std::ptr::null_mut(), 0u32, 0u32);
+                self.capture.GetBuffer(&mut data, &mut frames, &mut flags, None, None)?;
+                let silent = flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0;
+                for frame in 0..frames as usize {
+                    for c in 0..2 {
+                        out.push(if silent {
+                            0.0
+                        } else {
+                            let i = frame * self.channels + c.min(self.channels - 1);
+                            if self.float {
+                                *(data as *const f32).add(i)
+                            } else {
+                                *(data as *const i16).add(i) as f32 / 32768.0
+                            }
+                        });
+                    }
+                }
+                self.capture.ReleaseBuffer(frames)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Source {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = self.client.Stop();
+        }
+    }
+}
+
+/// `open`, unless it hangs: an antivirus that guards audio capture can hold the call for good.
+/// Then the video goes without that sound instead of never starting.
+fn in_time<T: 'static>(what: &str, open: impl FnOnce() -> Result<T> + Send + 'static) -> Option<T> {
+    /// Made on one thread of the multithreaded apartment, used on another: WASAPI's objects
+    /// allow that, though the bindings cannot know it.
+    struct Handed<T>(Result<T>);
+    unsafe impl<T> Send for Handed<T> {}
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        }
+        let _ = tx.send(Handed(open()));
+    });
+    match rx.recv_timeout(Duration::from_secs(3)).map(|h| h.0) {
+        Ok(Ok(source)) => Some(source),
+        Ok(Err(e)) => {
+            log_warn!("запись: {what} недоступен: {e}");
+            None
+        }
+        Err(_) => {
+            log_warn!("запись: {what} не ответил за 3 с (его может держать антивирус) — пишу без него");
+            None
+        }
+    }
+}
+
+/// Adds the waiting microphone samples to `main`, one for one. The microphone may run a little
+/// ahead or behind the speakers' clock: no more than `limit` samples are kept waiting, the oldest
+/// go first, and when it falls behind the rest of `main` stays as it is.
+fn mix(main: &mut [f32], waiting: &mut std::collections::VecDeque<f32>, limit: usize) {
+    let excess = waiting.len().saturating_sub(limit + main.len());
+    waiting.drain(..excess);
+    let take = main.len().min(waiting.len());
+    for (sample, mic) in main.iter_mut().zip(waiting.drain(..take)) {
+        *sample += mic;
+    }
+}
+
+/// The recording's sound track, 16-bit stereo: the speakers (or, without them, the microphone)
+/// set the clock, and the microphone, when wanted, is mixed in.
+struct Sound {
+    main: Source,
+    microphone: Option<Source>,
+    /// Microphone samples (interleaved stereo) not yet mixed in.
+    waiting: std::collections::VecDeque<f32>,
+    rate: u32,
+    /// Stereo frames handed to the encoder so far: their count is the audio clock.
+    written: u64,
+}
+
+impl Sound {
+    fn start(microphone: bool) -> Option<Self> {
+        let speakers = in_time("звук компьютера", Source::speakers);
+        let rate = speakers.as_ref().map_or(48_000, |(_, rate)| *rate);
+        let mic = if microphone { in_time("микрофон", move || Source::microphone(rate)) } else { None };
+        let (main, microphone) = match (speakers, mic) {
+            (Some((speakers, _)), mic) => (speakers, mic),
+            (None, Some(mic)) => (mic, None),
+            (None, None) => return None,
+        };
+        Some(Self { main, microphone, waiting: Default::default(), rate, written: 0 })
+    }
+
+    fn describe(&self) -> String {
+        format!("{} Гц{}", self.rate, if self.microphone.is_some() { ", с микрофоном" } else { "" })
     }
 
     /// Hands every packet waiting to the encoder; silence where Windows sent none, so sound and
@@ -533,58 +635,36 @@ impl Loopback {
 
     fn drain_with(&mut self, writer: &Writer, elapsed: Duration, slack: u64) -> Result<()> {
         let Some(stream) = writer.audio else { return Ok(()) };
-        let mut pcm: Vec<i16> = Vec::new();
-        unsafe {
-            loop {
-                if self.capture.GetNextPacketSize()? == 0 {
-                    break;
+        let mut samples: Vec<f32> = Vec::new();
+        self.main.read(&mut samples)?;
+        if let Some(mic) = &self.microphone {
+            let mut voice = Vec::new();
+            match mic.read(&mut voice) {
+                Ok(()) => self.waiting.extend(voice),
+                Err(e) => {
+                    log_warn!("запись: микрофон прервался: {e}");
+                    self.microphone = None;
                 }
-                let (mut data, mut frames, mut flags) = (std::ptr::null_mut(), 0u32, 0u32);
-                self.capture.GetBuffer(&mut data, &mut frames, &mut flags, None, None)?;
-                let silent = flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0;
-                for frame in 0..frames as usize {
-                    let sample = |c: usize| -> f32 {
-                        if silent {
-                            return 0.0;
-                        }
-                        let i = frame * self.channels + c.min(self.channels - 1);
-                        if self.float {
-                            *(data as *const f32).add(i)
-                        } else {
-                            *(data as *const i16).add(i) as f32 / 32768.0
-                        }
-                    };
-                    for c in 0..2 {
-                        pcm.push((sample(c).clamp(-1.0, 1.0) * 32767.0) as i16);
-                    }
-                }
-                self.capture.ReleaseBuffer(frames)?;
             }
         }
         // Behind the wall clock by more than `slack`: nothing was playing.
         let due = (elapsed.as_secs_f64() * self.rate as f64) as u64;
-        let have = self.written + pcm.len() as u64 / 2;
+        let have = self.written + samples.len() as u64 / 2;
         if have + slack < due {
-            pcm.splice(0..0, std::iter::repeat_n(0i16, ((due - have) * 2) as usize));
+            samples.splice(0..0, std::iter::repeat_n(0.0, ((due - have) * 2) as usize));
         }
-        if pcm.is_empty() {
+        mix(&mut samples, &mut self.waiting, self.rate as usize * 2 * 3 / 10);
+        if samples.is_empty() {
             return Ok(());
         }
-        let frames = pcm.len() as u64 / 2;
+        let frames = samples.len() as u64 / 2;
         let time = (self.written * 10_000_000 / self.rate as u64) as i64;
         let duration = (frames * 10_000_000 / self.rate as u64) as i64;
-        let bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let bytes: Vec<u8> =
+            samples.iter().flat_map(|s| ((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes()).collect();
         writer.write(stream, &bytes, time, duration)?;
         self.written += frames;
         Ok(())
-    }
-}
-
-impl Drop for Loopback {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = self.client.Stop();
-        }
     }
 }
 
@@ -602,10 +682,36 @@ mod tests {
     /// A real two-second recording of the top-left corner of the screen, with sound if any.
     #[test]
     fn records_a_short_clip_into_a_playable_mp4() {
-        let path = std::env::temp_dir().join(format!("kadr-record-{}.mp4", std::process::id()));
+        record_clip(false);
+    }
+
+    /// The same with the microphone asked for: mixed in when there is one, and when there is none
+    /// (or Windows does not allow it) the video is still recorded.
+    #[test]
+    fn records_with_the_microphone_or_without_one() {
+        record_clip(true);
+    }
+
+    #[test]
+    fn the_microphone_is_mixed_in_one_for_one_and_never_lags_far_behind() {
+        let mut waiting: std::collections::VecDeque<f32> = [0.25, 0.5, 0.25, 0.5].into_iter().collect();
+        let mut main = vec![0.5, 0.0, 0.5, 0.0, 0.1, 0.1];
+        mix(&mut main, &mut waiting, 100);
+        assert_eq!(main, [0.75, 0.5, 0.75, 0.5, 0.1, 0.1], "what has not arrived yet leaves the speakers alone");
+        assert!(waiting.is_empty());
+        // Far ahead of the clock: only the newest `limit` samples beyond this block are kept.
+        let mut waiting: std::collections::VecDeque<f32> = (0..10).map(|i| i as f32).collect();
+        let mut main = vec![0.0; 2];
+        mix(&mut main, &mut waiting, 4);
+        assert_eq!(main, [4.0, 5.0]);
+        assert_eq!(waiting.into_iter().collect::<Vec<_>>(), [6.0, 7.0, 8.0, 9.0]);
+    }
+
+    fn record_clip(microphone: bool) {
+        let path = std::env::temp_dir().join(format!("kadr-record-{}-{microphone}.mp4", std::process::id()));
         let (tx, rx) = std::sync::mpsc::channel();
         let ticks = tx.clone();
-        let rec = start(Rect::new(0, 0, 320, 240), path.clone(), move |e| match e {
+        let rec = start(Rect::new(0, 0, 320, 240), path.clone(), microphone, move |e| match e {
             Event::Tick(_) => {
                 let _ = ticks.send(None);
             }
@@ -642,7 +748,7 @@ mod tests {
     fn records_a_gif_that_loops_for_about_as_long_as_it_ran() {
         let path = std::env::temp_dir().join(format!("kadr-record-{}.gif", std::process::id()));
         let (tx, rx) = std::sync::mpsc::channel();
-        let rec = start(Rect::new(0, 0, 320, 240), path.clone(), move |e| {
+        let rec = start(Rect::new(0, 0, 320, 240), path.clone(), false, move |e| {
             if let Event::Done(r) = e {
                 let _ = tx.send(r);
             }

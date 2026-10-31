@@ -33,7 +33,7 @@ use windows::core::{PCWSTR, w};
 
 pub enum Request {
     /// The edited configuration, ready to be written.
-    Save(Config),
+    Save(Box<Config>),
     /// Global hotkeys off while a new combination is being recorded, back on afterwards.
     Suspend(bool),
     OpenFile,
@@ -45,7 +45,7 @@ const ROW: f32 = 46.0;
 const SECTION: f32 = 34.0;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
-const TOGGLES: [&str; 9] = [
+const TOGGLES: [&str; 10] = [
     "Запускать вместе с Windows",
     "Миниатюра после снимка",
     "Миниатюра и после копирования",
@@ -54,9 +54,10 @@ const TOGGLES: [&str; 9] = [
     "Бегущий пунктир",
     "Помнить несохранённые снимки",
     "История буфера по Win+V",
+    "Микрофон в записи",
     "Мгновенный захват",
 ];
-const TOGGLE_HINTS: [&str; 9] = [
+const TOGGLE_HINTS: [&str; 10] = [
     "",
     "Перетащите её в чат или нажмите, чтобы открыть",
     "Выключите — появится только после «Сохранить»",
@@ -65,6 +66,7 @@ const TOGGLE_HINTS: [&str; 9] = [
     "Рамка выделения и выбранные объекты",
     "До 25 снимков, зашифрованно",
     "Закрепление и поиск, остаётся после перезагрузки",
+    "Голос подмешивается к звуку компьютера в MP4",
     "≈8 мс вместо ≈23 мс, чуть больше памяти",
 ];
 const KEYS: [&str; 5] = ["Выделить область", "Монитор под курсором", "Активное окно", "Последняя область", "Недавние"];
@@ -94,7 +96,7 @@ enum Hit {
 
 struct Layout {
     close: D2D_RECT_F,
-    toggles: [D2D_RECT_F; 9],
+    toggles: [D2D_RECT_F; TOGGLES.len()],
     choices: [D2D_RECT_F; 4],
     folder: D2D_RECT_F,
     folder_button: D2D_RECT_F,
@@ -141,7 +143,7 @@ fn layout(width: f32, s: f32) -> Layout {
         *y += 18.0 * s;
         out
     };
-    let toggles: [D2D_RECT_F; 9] = rows(9, 0, &mut y).try_into().unwrap();
+    let toggles: [D2D_RECT_F; TOGGLES.len()] = rows(TOGGLES.len(), 0, &mut y).try_into().unwrap();
     let choices: [D2D_RECT_F; 4] = rows(4, 1, &mut y).try_into().unwrap();
     let folder = rows(1, 2, &mut y)[0];
     let keys: [D2D_RECT_F; 5] = rows(5, 3, &mut y).try_into().unwrap();
@@ -254,6 +256,7 @@ fn toggle_value(c: &Config, i: usize, auto: bool) -> bool {
         5 => c.appearance.marching_ants,
         6 => c.recent.enabled,
         7 => c.clipboard.enabled,
+        8 => c.capture.microphone,
         _ => c.capture.warm,
     }
 }
@@ -342,7 +345,7 @@ struct State {
     auto: bool,
     scale: f32,
     epoch: Instant,
-    knobs: [Spring; 9],
+    knobs: [Spring; TOGGLES.len()],
     /// Where each segmented control's highlight sits (choice index, gliding).
     slides: [Spring; 4],
     hover: Option<Hit>,
@@ -450,7 +453,7 @@ impl State {
         match kadr_store::config::Config::parse(&kadr_store::config::render(&self.config)) {
             Ok(_) => {
                 self.error = None;
-                self.send(Request::Save(self.config.clone()));
+                self.send(Request::Save(Box::new(self.config.clone())));
             }
             Err(e) => self.error = Some(e),
         }
@@ -559,7 +562,7 @@ pub fn show(instance: HINSTANCE, host: HWND, message: u32, config: &Config) {
                 auto: false,
                 scale: 1.0,
                 epoch: Instant::now(),
-                knobs: [knob(), knob(), knob(), knob(), knob(), knob(), knob(), knob(), knob()],
+                knobs: std::array::from_fn(|_| knob()),
                 slides: [knob(), knob(), knob(), knob()],
                 hover: None,
                 glow: Vec::new(),
@@ -1035,6 +1038,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                             5 => st.config.appearance.marching_ants ^= true,
                             6 => st.config.recent.enabled ^= true,
                             7 => st.config.clipboard.enabled ^= true,
+                            8 => st.config.capture.microphone ^= true,
                             _ => st.config.capture.warm ^= true,
                         }
                         st.sync_knobs(false);
@@ -1231,6 +1235,7 @@ pub fn preview(scale: f32) -> windows::core::Result<kadr_doc::Image> {
             knob(true),
             knob(true),
             knob(false),
+            knob(true),
         ],
         slides: [
             Spring::with(0.0, Curve::GLIDE),

@@ -49,7 +49,7 @@ impl App {
         let name = kadr_export::file::timestamp_name().replacen("Screenshot", "Video", 1);
         let path = folder.join(format!("{name}.{}", self.config.capture.video.name()));
         let (tx, host) = (self.record.tx.clone(), self.hwnd.0 as isize);
-        let recording = recorder::start(region, path, move |event| {
+        let recording = recorder::start(region, path, self.config.capture.microphone, move |event| {
             let _ = tx.send(event);
             unsafe {
                 let _ = PostMessageW(Some(HWND(host as *mut _)), WM_APP_RECORD, WPARAM(0), LPARAM(0));

@@ -244,6 +244,19 @@ fn decode(bytes: &[u8]) -> Option<Clip> {
 mod tests {
     use super::*;
 
+    /// Files in `root` once deletions have gone through: an antivirus scanning a file just written
+    /// keeps a deleted one listed for a moment. Waits up to 2 s for `expected`, then gives the count.
+    fn files_settled(root: &std::path::Path, expected: usize) -> usize {
+        let count = || fs::read_dir(root).map_or(0, Iterator::count);
+        for _ in 0..40 {
+            if count() == expected {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        count()
+    }
+
     struct TestCrypto;
     impl Crypto for TestCrypto {
         fn seal(&self, data: &[u8]) -> io::Result<Vec<u8>> {
@@ -312,10 +325,10 @@ mod tests {
             })
             .collect();
         assert_eq!(left, ["5", "4", "3", "0"], "three newest plus the pinned one");
-        assert_eq!(fs::read_dir(&root).unwrap().count(), 4);
+        assert_eq!(files_settled(&root, 4), 4);
         clips.clear().unwrap();
         assert_eq!(clips.items().len(), 1);
-        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        assert_eq!(files_settled(&root, 1), 1);
         clips.remove(first).unwrap();
         assert!(clips.items().is_empty());
         let _ = fs::remove_dir_all(&root);
@@ -344,7 +357,7 @@ mod tests {
             clips.add(text(&format!("n{i}")), 200 + i).unwrap();
         }
         assert_eq!(count(&clips), (4, 3));
-        assert_eq!(fs::read_dir(&root).unwrap().count(), 7);
+        assert_eq!(files_settled(&root, 7), 7);
         clips.set_limits(Limits { entries: 2, images: 1 }).unwrap();
         assert_eq!(count(&clips), (2, 1));
         let _ = fs::remove_dir_all(&root);
@@ -357,7 +370,7 @@ mod tests {
         fs::write(root.join("0000000000000001.clip"), b"garbage").unwrap();
         let clips = Clips::open(root.clone(), TestCrypto, Limits::default()).unwrap();
         assert!(clips.items().is_empty());
-        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        assert_eq!(files_settled(&root, 0), 0);
         let _ = fs::remove_dir_all(&root);
     }
 }
