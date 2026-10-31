@@ -21,79 +21,85 @@ pub struct Translation {
     pub to: String,
 }
 
-/// What a reader on a Russian system wants: foreign lines in Russian, Russian lines untouched.
-/// Text that is all Russian goes to English instead, so the button still does something useful.
-pub fn for_reader(text: &str) -> Result<Translation, String> {
-    plan_and_translate(text, translate)
+/// What goes over each block of text on the screen: its translation, or `None` when the block is
+/// already in the reader's language or comes back unchanged (a nickname, a number).
+pub struct Blocks {
+    pub texts: Vec<Option<String>>,
+    /// Detected source language, e.g. "en".
+    pub from: String,
+    /// Target language, "ru" or "en".
+    pub to: String,
 }
 
-/// A line is Russian when most of its words are written wholly in Cyrillic.
+/// What a reader on a Russian system wants: foreign blocks in Russian, Russian ones untouched.
+/// When there is nothing foreign, everything goes to English, so the button still does something.
+pub fn for_reader(blocks: &[String]) -> Result<Blocks, String> {
+    plan(blocks, translate)
+}
+
+fn cyrillic(c: char) -> bool {
+    let c = c.to_lowercase().next().unwrap_or(c);
+    ('а'..='я').contains(&c) || "ёєіїўђћјљњџ".contains(c)
+}
+
+/// Latin letters that look like Cyrillic ones; recognisers put them into Russian words.
+const LOOK_ALIKES: &str = "aceopxyABCEHKMOPTX";
+
+/// A line is Russian when most of its words are Cyrillic. A word read with Latin look-alikes in it
+/// («Кoманда» with a Latin o) still counts; Cyrillic read as Latin («CKonhp0BaTb») does not.
 fn russian(line: &str) -> bool {
     let words: Vec<&str> =
         line.split(|c: char| !c.is_alphanumeric()).filter(|w| w.chars().any(char::is_alphabetic)).collect();
-    let cyrillic = |c: char| {
-        let c = c.to_lowercase().next().unwrap_or(c);
-        ('а'..='я').contains(&c) || "ёєіїўђћјљњџ".contains(c)
-    };
-    let whole = words.iter().filter(|w| w.chars().all(|c| c.is_alphabetic() && cyrillic(c))).count();
+    let cyrillic_word =
+        |w: &&&str| w.chars().any(cyrillic) && w.chars().all(|c| cyrillic(c) || LOOK_ALIKES.contains(c));
+    let whole = words.iter().filter(cyrillic_word).count();
     !words.is_empty() && whole * 2 > words.len()
 }
 
-fn plan_and_translate(
-    text: &str,
-    translate: impl Fn(&str, &str) -> Result<Translation, String>,
-) -> Result<Translation, String> {
-    let lines: Vec<&str> = text.split('\n').collect();
-    let foreign = |l: &str| l.chars().any(char::is_alphabetic) && !russian(l);
-    if !lines.iter().any(|l| foreign(l)) {
-        return translate(text, "en");
+fn plan(blocks: &[String], translate: impl Fn(&str, &str) -> Result<Translation, String>) -> Result<Blocks, String> {
+    let lettered: Vec<usize> = (0..blocks.len()).filter(|&i| blocks[i].chars().any(char::is_alphabetic)).collect();
+    if lettered.is_empty() {
+        return Err("В выделении не нашлось текста".into());
     }
-    // Runs of foreign lines are translated (context helps); the rest stays as is.
-    let mut runs: Vec<(usize, usize)> = Vec::new();
-    for (i, line) in lines.iter().enumerate() {
-        if foreign(line) {
-            match runs.last_mut() {
-                Some((_, end)) if *end == i => *end = i + 1,
-                _ => runs.push((i, i + 1)),
-            }
+    let foreign: Vec<usize> = lettered.iter().copied().filter(|&i| !russian(&blocks[i])).collect();
+    if !foreign.is_empty() {
+        let done = batch(blocks, &foreign, "ru", &translate)?;
+        // Google read it as Russian after all (look-alike letters), or nothing changed (names):
+        // then the text is Russian for the reader, and English is what is useful.
+        if !done.from.starts_with("ru") && done.texts.iter().any(Option::is_some) {
+            return Ok(done);
         }
     }
-    let texts: Vec<String> = runs.iter().map(|&(a, b)| lines[a..b].join("\n")).collect();
-    // All runs in one request: fewer calls, and fewer 429s from Google. When the lines do not come
-    // back one for one, each run goes on its own so nothing lands in the wrong place.
-    let all = translate(&texts.join("\n"), "ru")?;
+    batch(blocks, &lettered, "en", &translate)
+}
+
+/// `wanted` blocks in one request, a line each; when the lines do not come back one for one, each
+/// block goes on its own so nothing lands over the wrong text.
+fn batch(
+    blocks: &[String],
+    wanted: &[usize],
+    to: &str,
+    translate: &impl Fn(&str, &str) -> Result<Translation, String>,
+) -> Result<Blocks, String> {
+    let texts: Vec<String> = wanted.iter().map(|&i| blocks[i].replace('\n', " ")).collect();
+    let all = translate(&texts.join("\n"), to)?;
     let back: Vec<&str> = all.text.split('\n').collect();
-    let total: usize = runs.iter().map(|(a, b)| b - a).sum();
-    let translated: Vec<String> = if runs.len() == 1 {
-        vec![all.text.clone()]
-    } else if back.len() == total {
-        let mut at = 0;
-        runs.iter()
-            .map(|(a, b)| {
-                at += b - a;
-                back[at - (b - a)..at].join("\n")
-            })
-            .collect()
+    let done: Vec<String> = if texts.len() == 1 {
+        vec![all.text.replace('\n', " ")]
+    } else if back.len() == texts.len() {
+        back.iter().map(|s| s.to_string()).collect()
     } else {
-        texts.iter().map(|t| translate(t, "ru").map(|t| t.text)).collect::<Result<_, _>>()?
+        texts.iter().map(|t| translate(t, to).map(|t| t.text.replace('\n', " "))).collect::<Result<_, _>>()?
     };
-    let mut out = Vec::new();
-    let mut next = runs.iter().zip(&translated).peekable();
-    let mut i = 0;
-    while i < lines.len() {
-        match next.peek() {
-            Some(((a, b), text)) if *a == i => {
-                out.push((*text).clone());
-                i = *b;
-                next.next();
-            }
-            _ => {
-                out.push(lines[i].to_string());
-                i += 1;
-            }
+    let key = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect::<String>();
+    let mut out = vec![None; blocks.len()];
+    for ((&i, original), t) in wanted.iter().zip(&texts).zip(done) {
+        let t = t.trim();
+        if !t.is_empty() && key(t) != key(original) {
+            out[i] = Some(t.to_string());
         }
     }
-    Ok(Translation { text: out.join("\n"), from: all.from, to: "ru".into() })
+    Ok(Blocks { texts: out, from: all.from, to: to.into() })
 }
 
 /// Blocking: call from a worker thread. `to` is a language code such as "ru".
@@ -322,50 +328,73 @@ mod tests {
         assert!(parse_short("<html>429</html>").is_none());
         assert!(parse_short("[]").is_none());
     }
-    /// Stand-in translator: tags what it got, records calls.
+    /// Stand-in translator: tags each line it got, records calls; Russian lines come back as they are.
     fn fake(
         calls: &std::cell::RefCell<Vec<(String, String)>>,
     ) -> impl Fn(&str, &str) -> Result<Translation, String> + '_ {
         move |text, to| {
             calls.borrow_mut().push((text.to_string(), to.to_string()));
-            Ok(Translation {
-                text: format!("[{to}] {text}"),
-                from: if to == "en" { "ru" } else { "en" }.into(),
-                to: to.into(),
-            })
+            let lines: Vec<String> = text.split('\n').map(|l| format!("[{to}] {l}")).collect();
+            Ok(Translation { text: lines.join("\n"), from: if to == "en" { "ru" } else { "en" }.into(), to: to.into() })
         }
     }
-    #[test]
-    fn russian_lines_stay_and_only_foreign_runs_are_translated() {
-        let calls = std::cell::RefCell::new(Vec::new());
-        let text = "Заголовок на русском\nThe quick fox\njumps over\n\nЕщё строка по-русски\nSee you";
-        let t = plan_and_translate(text, fake(&calls)).unwrap();
-        // The fake tags the start of each request: one request carried both runs.
-        assert_eq!(t.text, "Заголовок на русском\n[ru] The quick fox\njumps over\n\nЕщё строка по-русски\nSee you");
-        assert_eq!((t.from.as_str(), t.to.as_str()), ("en", "ru"));
-        assert_eq!(calls.borrow().as_slice(), [("The quick fox\njumps over\nSee you".into(), "ru".into())]);
+    fn blocks(texts: &[&str]) -> Vec<String> {
+        texts.iter().map(|t| t.to_string()).collect()
     }
     #[test]
-    fn when_lines_come_back_merged_each_run_is_translated_on_its_own() {
+    fn russian_blocks_stay_and_foreign_ones_go_in_one_request() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let input = blocks(&["Заголовок на русском", "The quick fox\njumps over", "Ещё строка по-русски", "See you"]);
+        let t = plan(&input, fake(&calls)).unwrap();
+        assert_eq!(t.texts, [None, Some("[ru] The quick fox jumps over".into()), None, Some("[ru] See you".into())]);
+        assert_eq!((t.from.as_str(), t.to.as_str()), ("en", "ru"));
+        assert_eq!(calls.borrow().as_slice(), [("The quick fox jumps over\nSee you".into(), "ru".into())]);
+    }
+    #[test]
+    fn when_lines_come_back_merged_each_block_is_translated_on_its_own() {
         let calls = std::cell::RefCell::new(Vec::new());
         let merging = |text: &str, to: &str| {
             calls.borrow_mut().push(text.to_string());
-            Ok(Translation { text: format!("<{}>", text.replace('\n', " ")), from: "en".into(), to: to.into() })
+            Ok(Translation { text: format!("ru:{}", text.replace('\n', " ")), from: "en".into(), to: to.into() })
         };
-        let t = plan_and_translate("One\nДва\nThree\nfour", merging).unwrap();
-        assert_eq!(t.text, "<One>\nДва\n<Three four>");
-        assert_eq!(calls.borrow().len(), 3, "the batch, then each run");
+        let t = plan(&blocks(&["One", "Два", "Three four"]), merging).unwrap();
+        assert_eq!(t.texts, [Some("ru:One".into()), None, Some("ru:Three four".into())]);
+        assert_eq!(calls.borrow().len(), 3, "the batch, then each block");
     }
     #[test]
-    fn all_russian_text_goes_to_english_and_a_mostly_russian_line_is_russian() {
+    fn nothing_foreign_goes_to_english_and_a_mostly_russian_line_is_russian() {
         let calls = std::cell::RefCell::new(Vec::new());
-        let t = plan_and_translate("Привет, мир\nНажмите кнопку Copy", fake(&calls)).unwrap();
+        let t = plan(&blocks(&["Привет, мир", "Нажмите кнопку Copy", "2026"]), fake(&calls)).unwrap();
         assert_eq!(t.to, "en");
         assert_eq!(calls.borrow()[0], ("Привет, мир\nНажмите кнопку Copy".to_string(), "en".to_string()));
+        assert_eq!(t.texts[2], None, "no letters, nothing to put over it");
         assert!(russian("если там есть хоть чуток русского OK"));
         assert!(!russian("Click Отмена to close the dialog"));
         assert!(!russian("CKonhp0BaTb TeKCT"));
         assert!(!russian("2026 · 12:30"));
+        assert!(plan(&blocks(&["12:30", "—"]), fake(&calls)).is_err());
+    }
+    /// The «Русский → Русский» bug: Russian read with Latin look-alikes was sent to be translated
+    /// into Russian, and Google answered with the same Russian text.
+    #[test]
+    fn russian_with_latin_look_alikes_is_russian_and_never_goes_ru_to_ru() {
+        assert!(russian("Кoманда 1"), "Latin o inside");
+        assert!(russian("HАБЛЮДАТЕЛЬ"), "Latin H inside");
+        assert!(!russian("аnеrurkiоlа"), "a Latin nickname with Cyrillic look-alikes is not Russian");
+        let calls = std::cell::RefCell::new(Vec::new());
+        // Google sees Russian where the planner saw a foreign block, and echoes it back.
+        let echo = |text: &str, to: &str| {
+            calls.borrow_mut().push(to.to_string());
+            let text = if to == "ru" { text.to_string() } else { format!("EN {text}") };
+            Ok(Translation { text, from: "ru".into(), to: to.into() })
+        };
+        let t = plan(&blocks(&["Кoмaндa", "StarKoff"]), echo).unwrap();
+        assert_eq!((t.from.as_str(), t.to.as_str()), ("ru", "en"));
+        assert_eq!(calls.borrow().as_slice(), ["ru", "en"]);
+        // Names that come back unchanged get nothing over them.
+        let names = |text: &str, to: &str| Ok(Translation { text: text.into(), from: "en".into(), to: to.into() });
+        let t = plan(&blocks(&["HAILUN", "petre"]), names).unwrap();
+        assert_eq!(t.texts, [None, None]);
     }
     #[test]
     #[ignore = "network: run with --ignored"]
@@ -390,29 +419,17 @@ mod tests {
     #[test]
     #[ignore = "network: run with --ignored"]
     fn live_reader_translation_keeps_russian_and_turns_all_russian_into_english() {
-        let mixed = for_reader(
-            "Сохранить как
-The file was saved.",
-        )
-        .unwrap();
+        let mixed = for_reader(&blocks(&["Сохранить как", "The file was saved."])).unwrap();
+        assert_eq!(mixed.texts[0], None);
         assert!(
-            mixed.text.starts_with(
-                "Сохранить как
-"
-            ),
-            "{}",
-            mixed.text
+            mixed.texts[1].as_deref().is_some_and(|t| t.contains("Файл") || t.contains("файл")),
+            "{:?}",
+            mixed.texts
         );
         assert_eq!(mixed.to, "ru");
-        let russian = for_reader("Погода сегодня хорошая.").unwrap();
+        let russian = for_reader(&blocks(&["Погода сегодня хорошая."])).unwrap();
         assert_eq!((russian.from.as_str(), russian.to.as_str()), ("ru", "en"));
-        assert!(russian.text.to_lowercase().contains("weather"), "{}", russian.text);
-        println!(
-            "{}
----
-{}",
-            mixed.text, russian.text
-        );
+        assert!(russian.texts[0].as_deref().unwrap().to_lowercase().contains("weather"), "{:?}", russian.texts);
     }
     #[test]
     fn form_encoding_keeps_unicode_and_reserved_characters_safe() {

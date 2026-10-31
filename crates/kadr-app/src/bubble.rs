@@ -1,4 +1,4 @@
-//! Text bubble next to the recognised text: the translation (or the copied text) on acrylic,
+//! Text bubble next to the recognised text: the copied text (or a message) on acrylic,
 //! with a copy button. It opens with a soft pop, waits with breathing dots, and closes on Esc,
 //! on × or as soon as the user clicks elsewhere.
 use crate::glass::{self, Device, Surface, client_size, fade, fill, inflate, inside, mix, rect, scaled_about, text};
@@ -24,11 +24,6 @@ use windows::core::{PCWSTR, w};
 #[derive(Clone)]
 pub enum Content {
     Working(&'static str),
-    Translated {
-        text: String,
-        from: String,
-        to: String,
-    },
     Copied(String),
     /// A QR code's contents, already in the clipboard; a web link gets «Открыть».
     Qr(String),
@@ -73,7 +68,7 @@ thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
 }
 
-fn language(code: &str) -> String {
+pub(crate) fn language(code: &str) -> String {
     match code.split('-').next().unwrap_or(code) {
         "en" => "Английский".into(),
         "de" => "Немецкий".into(),
@@ -96,7 +91,6 @@ fn language(code: &str) -> String {
 fn header(content: &Content) -> String {
     match content {
         Content::Working(what) => (*what).into(),
-        Content::Translated { from, to, .. } => format!("{} → {}", language(from), language(to)),
         Content::Copied(_) => "Текст скопирован".into(),
         Content::Qr(_) => "QR-код скопирован".into(),
         Content::Update { version, .. } => format!("Доступна версия {version}"),
@@ -108,7 +102,7 @@ fn header(content: &Content) -> String {
 fn body(content: &Content) -> &str {
     match content {
         Content::Working(_) => "",
-        Content::Translated { text, .. } | Content::Copied(text) | Content::Qr(text) | Content::Failed(text) => text,
+        Content::Copied(text) | Content::Qr(text) | Content::Failed(text) => text,
         Content::Update { notes, .. } => notes,
         Content::Info(_, text) => text,
     }
@@ -423,7 +417,7 @@ fn paint(device: &Device, st: &State) -> bool {
         }
     }
     // Copy: only when there is something to copy; turns into a confirmation for a moment.
-    if matches!(st.content, Content::Translated { .. } | Content::Copied(_) | Content::Qr(_) | Content::Update { .. }) {
+    if matches!(st.content, Content::Copied(_) | Content::Qr(_) | Content::Update { .. }) {
         let hover = sample(&st.hover_copy);
         fill(gpu, fade(mix(theme.tint, theme.tint_strong, hover), a), copy, 8.0 * s);
         let opens = matches!(&st.content, Content::Qr(t) if crate::qr::link(t).is_some());
@@ -457,7 +451,7 @@ fn paint(device: &Device, st: &State) -> bool {
 
 fn copy_text(st: &mut State) {
     let value = match &st.content {
-        Content::Translated { text, .. } | Content::Copied(text) | Content::Qr(text) => text.clone(),
+        Content::Copied(text) | Content::Qr(text) => text.clone(),
         _ => return,
     };
     if kadr_export::clipboard::put_text(st.hwnd, &value).is_ok() {
@@ -615,18 +609,9 @@ mod tests {
     use super::*;
     #[test]
     fn header_names_the_language_and_the_state() {
-        assert_eq!(
-            header(&Content::Translated { text: "x".into(), from: "en".into(), to: "ru".into() }),
-            "Английский → Русский"
-        );
-        assert_eq!(
-            header(&Content::Translated { text: "x".into(), from: "zh-CN".into(), to: "ru".into() }),
-            "Китайский → Русский"
-        );
-        assert_eq!(
-            header(&Content::Translated { text: "x".into(), from: "ru".into(), to: "en".into() }),
-            "Русский → Английский"
-        );
+        assert_eq!(language("en"), "Английский");
+        assert_eq!(language("zh-CN"), "Китайский");
+        assert_eq!(language("ru"), "Русский");
         assert_eq!(header(&Content::Copied("x".into())), "Текст скопирован");
         assert_eq!(body(&Content::Working("Перевожу")), "");
     }

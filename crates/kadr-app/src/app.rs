@@ -169,6 +169,8 @@ pub struct App {
     thumb_pending: Option<crate::thumbnail::Shot>,
     /// Bubble waiting for the overlay to leave: where to show it and what it says so far.
     bubble_pending: Option<(DocRect, crate::bubble::Content)>,
+    /// The translation lens waiting for the overlay to leave: the picture and what goes over it.
+    lens_pending: Option<(Arc<Image>, crate::lens::Content)>,
     smart: smart::Smart,
     /// Long screenshot in progress, and the area waiting for the overlay to leave first.
     text_tx: Sender<text::TextResult>,
@@ -280,6 +282,7 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
             pending_config: None,
             thumb_pending: None,
             bubble_pending: None,
+            lens_pending: None,
             smart: Default::default(),
             text_tx,
             text_rx,

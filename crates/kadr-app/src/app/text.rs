@@ -1,19 +1,17 @@
-//! Text from the screen: copy it, or translate it into Russian. Recognition (and the network call
-//! for translation) runs on a worker; the overlay leaves at once and the bubble shows progress.
-//! Blur in the selection is applied before recognition, so blurred text is never read or sent.
+//! Text from the screen: copy it, or translate it in place. Recognition (and the network call
+//! for translation) runs on a worker; the overlay leaves at once, and the bubble (copy) or the
+//! lens (translation) shows progress. Blur in the selection is applied before recognition, so
+//! blurred text is never read or sent.
 use super::*;
 use crate::bubble::{self, Content};
+use crate::lens;
 
 pub(super) enum TextResult {
     Copied(String),
     /// A QR code in the selection, read instead of the text.
     Qr(String),
-    Translated {
-        text: String,
-        from: String,
-        to: String,
-        anchor: Option<DocRect>,
-    },
+    /// What goes over the lens; a narrower picture when Alt+click found its paragraph.
+    Lens(lens::Content, Option<Arc<Image>>),
     /// «Скрыть данные»: the search generation and the areas found.
     Smart(u64, std::result::Result<Vec<DocRect>, String>),
     /// The censor's blurs are computed: show them.
@@ -78,43 +76,26 @@ impl App {
     }
 
     fn run_text_job(&mut self, image: Image, job: Job, click: Option<DocPoint>, anchor: DocRect) {
-        let working = match job {
-            Job::Copy => "Читаю выделение…",
-            Job::Translate => "Перевожу…",
-        };
-        self.bubble_pending = Some((anchor, Content::Working(working)));
+        let image = Arc::new(image);
+        match job {
+            Job::Copy => self.bubble_pending = Some((anchor, Content::Working("Читаю выделение…"))),
+            Job::Translate => {
+                bubble::close();
+                self.lens_pending = Some((image.clone(), lens::Content::Working));
+            }
+        }
         let (tx, host) = (self.text_tx.clone(), self.hwnd.0 as isize);
         std::thread::spawn(move || {
             unsafe {
                 let _ = CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
             }
-            let result = (|| -> std::result::Result<TextResult, String> {
-                if job == Job::Copy
-                    && click.is_none()
-                    && let Some(code) = crate::qr::decode(&image)
-                {
-                    return Ok(TextResult::Qr(code));
-                }
-                let lines = crate::ocr::recognize(&image).map_err(|e| format!("Распознавание: {}", e.message()))?;
-                let (text, rect) = match click {
-                    Some(p) => crate::ocr::paragraph_at(&lines, p).ok_or("Под курсором не нашлось текста")?,
-                    None => {
-                        let text = crate::ocr::text(&lines);
-                        if text.trim().is_empty() {
-                            return Err("В выделении не нашлось текста".into());
-                        }
-                        (text, anchor)
-                    }
-                };
-                Ok(match job {
-                    Job::Copy => TextResult::Copied(text),
-                    Job::Translate => {
-                        let t = crate::translate::for_reader(&text)?;
-                        TextResult::Translated { text: t.text, from: t.from, to: t.to, anchor: click.map(|_| rect) }
-                    }
-                })
-            })()
-            .unwrap_or_else(TextResult::Failed);
+            let result = match job {
+                Job::Copy => copy_job(&image).unwrap_or_else(TextResult::Failed),
+                Job::Translate => match translate_job(&image, click) {
+                    Ok((content, narrower)) => TextResult::Lens(content, narrower),
+                    Err(e) => TextResult::Lens(lens::Content::Failed(e), None),
+                },
+            };
             let _ = tx.send(result);
             unsafe {
                 let _ = PostMessageW(Some(HWND(host as *mut _)), WM_APP_TEXT, WPARAM(0), LPARAM(0));
@@ -124,7 +105,7 @@ impl App {
 
     pub(super) fn on_text_result(&mut self) {
         while let Ok(result) = self.text_rx.try_recv() {
-            let result = match result {
+            let (content, anchor) = match result {
                 TextResult::Smart(job, found) => {
                     self.on_smart_found(job, found);
                     continue;
@@ -133,9 +114,22 @@ impl App {
                     self.on_smart_ready(job, shapes);
                     continue;
                 }
-                other => other,
-            };
-            let (content, anchor) = match result {
+                TextResult::Lens(content, narrower) => {
+                    if let lens::Content::Failed(e) = &content {
+                        log_warn!("перевод с экрана: {e}");
+                    }
+                    match &mut self.lens_pending {
+                        // Still leaving: the lens opens with the result already in it.
+                        Some((image, c)) => {
+                            *c = content;
+                            if let Some(narrower) = narrower {
+                                *image = narrower;
+                            }
+                        }
+                        None => lens::update(content, narrower),
+                    }
+                    continue;
+                }
                 TextResult::Copied(text) => {
                     self.remember_copy(crate::clip_history::Raw::Text(text.clone()));
                     match clipboard::put_text(self.hwnd, &text) {
@@ -154,11 +148,6 @@ impl App {
                     log_info!("QR-код скопирован: {} символов", code.chars().count());
                     (Content::Qr(code), None)
                 }
-                TextResult::Translated { text, from, to, anchor } => {
-                    log_info!("перевод с «{from}»: {} символов", text.chars().count());
-                    (Content::Translated { text, from, to }, anchor)
-                }
-                TextResult::Smart(..) | TextResult::SmartReady(..) => continue,
                 TextResult::Failed(e) => {
                     log_warn!("текст с экрана: {e}");
                     (Content::Failed(e), None)
@@ -181,5 +170,56 @@ impl App {
         if let Some((anchor, content)) = self.bubble_pending.take() {
             bubble::open(self.instance, anchor, content);
         }
+        if let Some((image, content)) = self.lens_pending.take() {
+            lens::open(self.instance, image, content);
+        }
     }
+}
+
+fn copy_job(image: &Image) -> std::result::Result<TextResult, String> {
+    if let Some(code) = crate::qr::decode(image) {
+        return Ok(TextResult::Qr(code));
+    }
+    let lines = crate::ocr::recognize(image).map_err(|e| format!("Распознавание: {}", e.message()))?;
+    let text = crate::ocr::text(&lines);
+    if text.trim().is_empty() {
+        return Err("В выделении не нашлось текста".into());
+    }
+    Ok(TextResult::Copied(text))
+}
+
+/// The blocks of the selection (or the paragraph under the Alt+click, with the picture narrowed
+/// to it) and their translations.
+fn translate_job(
+    image: &Image,
+    click: Option<DocPoint>,
+) -> std::result::Result<(lens::Content, Option<Arc<Image>>), String> {
+    let lines = crate::ocr::recognize(image).map_err(|e| format!("Распознавание: {}", e.message()))?;
+    let mut blocks = crate::ocr::blocks(&lines);
+    let mut narrower = None;
+    if let Some(p) = click {
+        let around = |b: &crate::ocr::Block, by: i32| {
+            DocRect::new(b.rect.left - by, b.rect.top - by, b.rect.right + by, b.rect.bottom + by)
+        };
+        let half_line = |b: &crate::ocr::Block| b.rect.height() / b.lines.max(1) as i32 / 2;
+        let block = blocks
+            .iter()
+            .find(|b| around(b, half_line(b)).contains(p))
+            .cloned()
+            .ok_or("Под курсором не нашлось текста")?;
+        let area = around(&block, half_line(&block).max(8)).intersect(&image.rect).unwrap_or(image.rect);
+        narrower = Some(Arc::new(Image::compose([image], area)));
+        blocks = vec![block];
+    }
+    if blocks.is_empty() {
+        return Err("В выделении не нашлось текста".into());
+    }
+    let texts: Vec<String> = blocks.iter().map(|b| b.text.clone()).collect();
+    let t = crate::translate::for_reader(&texts)?;
+    let blocks = blocks
+        .into_iter()
+        .zip(t.texts)
+        .map(|(b, translated)| lens::Block { rect: b.rect, lines: b.lines, original: b.text, translated })
+        .collect();
+    Ok((lens::Content::Ready { blocks, from: t.from, to: t.to }, narrower))
 }

@@ -22,6 +22,7 @@ mod glass;
 mod http;
 mod icons;
 mod interaction_bench;
+mod lens;
 #[cfg(test)]
 mod m2;
 mod motion_bench;

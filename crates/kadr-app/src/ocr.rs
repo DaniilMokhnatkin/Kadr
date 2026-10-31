@@ -4,7 +4,7 @@
 //!
 //! With Windows' OCR each installed recognizer language is tried and the readings are merged word
 //! by word, so English text is read well on a Russian system and the other way round.
-use kadr_doc::{Image, Point, Rect};
+use kadr_doc::{Image, Rect};
 use windows::Globalization::Language;
 use windows::Graphics::Imaging::{BitmapAlphaMode, BitmapPixelFormat, SoftwareBitmap};
 use windows::Media::Ocr::OcrEngine;
@@ -322,46 +322,88 @@ fn same_block(a: &Line, b: &Line) -> bool {
     (-h / 2..=h).contains(&gap) && aligned
 }
 
-/// The paragraph under `p`: its line plus the neighbours that continue it above and below.
-/// Joined with spaces, since a wrapped paragraph is one sentence for the translator.
-pub fn paragraph_at(lines: &[Line], p: Point) -> Option<(String, Rect)> {
-    let near = |l: &Line| {
-        let r = l.rect;
-        let pad = r.height() / 2;
-        Rect::new(r.left - pad, r.top - pad, r.right + pad, r.bottom + pad).contains(p)
-    };
-    let hit = lines.iter().position(near)?;
-    let (mut first, mut last) = (hit, hit);
-    while first > 0 && same_block(&lines[first - 1], &lines[first]) {
-        first -= 1;
+/// A piece of text to translate in place: wrapped lines of one paragraph, joined with spaces.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Block {
+    pub text: String,
+    pub rect: Rect,
+    pub lines: usize,
+}
+
+/// Lines grouped into paragraphs. A line joins the one above only when that one was wrapped: long,
+/// reaching the paragraph's right edge, and not ending a sentence (unless the next goes on in lower case).
+/// So a menu or a list of names keeps one block per line and each translation stays in its row.
+pub fn blocks(lines: &[Line]) -> Vec<Block> {
+    let mut out: Vec<Block> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if line.text.trim().is_empty() {
+            continue;
+        }
+        let continues = i > 0 && out.last().is_some() && {
+            let (a, block) = (&lines[i - 1], out.last().unwrap());
+            let h = a.rect.height().max(line.rect.height()).max(1);
+            let right = block.rect.right.max(line.rect.right);
+            let lower = line.text.trim_start().chars().next().is_some_and(char::is_lowercase);
+            // A wrapped line is long and reaches the right edge; a sentence ending there closes the
+            // paragraph unless the next line goes on in lower case. Short lines are a list (names, menus).
+            let wrapped = a.text.chars().count() >= 18
+                && a.rect.right >= right - 2 * h
+                && (lower || !a.text.trim_end().ends_with(['.', ':', '!', '?', ';']));
+            same_block(a, line) && wrapped
+        };
+        match out.last_mut() {
+            Some(block) if continues => {
+                block.text.push(' ');
+                block.text.push_str(line.text.trim());
+                block.rect = block.rect.union(&line.rect);
+                block.lines += 1;
+            }
+            _ => out.push(Block { text: line.text.trim().into(), rect: line.rect, lines: 1 }),
+        }
     }
-    while last + 1 < lines.len() && same_block(&lines[last], &lines[last + 1]) {
-        last += 1;
-    }
-    let block = &lines[first..=last];
-    let text = block.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join(" ");
-    let rect = block.iter().skip(1).fold(block[0].rect, |r, l| r.union(&l.rect));
-    Some((text, rect))
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn blocks_join_wrapped_paragraphs_and_keep_lists_line_by_line() {
+        let lines = vec![
+            line("Settings", 10, 10, 120, 34),
+            line("The quick brown fox", 10, 80, 400, 100),
+            line("jumps over the lazy dog.", 10, 104, 420, 124),
+            line("New game", 10, 170, 120, 190),
+            line("Load", 10, 194, 70, 214),
+            line("anerurkiola", 10, 218, 160, 238),
+            line("gorkahornasg", 10, 242, 170, 262),
+        ];
+        let b = blocks(&lines);
+        let texts: Vec<&str> = b.iter().map(|b| b.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "Settings",
+                "The quick brown fox jumps over the lazy dog.",
+                "New game",
+                "Load",
+                "anerurkiola",
+                "gorkahornasg"
+            ]
+        );
+        assert_eq!((b[1].rect, b[1].lines), (Rect::new(10, 80, 420, 124), 2));
+    }
     fn line(text: &str, l: i32, t: i32, r: i32, b: i32) -> Line {
         Line { text: text.into(), rect: Rect::new(l, t, r, b), words: Vec::new() }
     }
     #[test]
-    fn paragraph_under_the_click_joins_its_wrapped_lines_only() {
+    fn copied_text_keeps_lines_of_a_block_and_blank_lines_between_blocks() {
         let lines = vec![
             line("Title", 10, 10, 200, 40),
             line("The quick brown fox", 10, 80, 400, 100),
             line("jumps over the lazy dog.", 10, 104, 420, 124),
             line("Another paragraph", 10, 170, 300, 190),
         ];
-        let (text, rect) = paragraph_at(&lines, Point::new(50, 110)).unwrap();
-        assert_eq!(text, "The quick brown fox jumps over the lazy dog.");
-        assert_eq!(rect, Rect::new(10, 80, 420, 124));
-        assert_eq!(paragraph_at(&lines, Point::new(600, 600)), None);
         assert_eq!(text_of(&lines), "Title\n\nThe quick brown fox\njumps over the lazy dog.\n\nAnother paragraph");
     }
     #[test]
