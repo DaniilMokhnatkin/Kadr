@@ -117,11 +117,45 @@ fn parse(json: &str) -> Option<Release> {
     let asset = v["assets"].as_array()?.iter().find(|a| a["name"].as_str() == Some(ASSET))?;
     let url = asset["browser_download_url"].as_str()?.to_string();
     let expected_url = format!("https://github.com/{}/releases/download/{tag}/{ASSET}", REPO?);
-    if url != expected_url { return None; }
+    if url != expected_url {
+        return None;
+    }
     let sha256 = asset["digest"].as_str()?.strip_prefix("sha256:")?.to_ascii_lowercase();
-    if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) { return None; }
-    let notes: String = v["body"].as_str().unwrap_or("").lines().take(6).collect::<Vec<_>>().join("\n");
-    Some(Release { version, notes: notes.trim().to_string(), url, sha256 })
+    if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let notes = readable_notes(v["body"].as_str().unwrap_or(""));
+    Some(Release { version, notes, url, sha256 })
+}
+
+/// Release notes as a person reads them: no Markdown marks, no links, no GitHub's automatic
+/// «Full Changelog: …/compare/…» line; a plain sentence when nothing is left.
+fn readable_notes(body: &str) -> String {
+    let lines: Vec<String> = body
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            // The tag's own title, «Kadr 1.0.5»: the bubble already names the version.
+            let title = line.strip_prefix("Kadr ").is_some_and(|v| version_parts(v).is_some());
+            if title || line.contains("Full Changelog") || line.contains("/compare/") || line.starts_with("http") {
+                return None;
+            }
+            let line = line.trim_start_matches('#').trim().replace("**", "").replace("__", "").replace('`', "");
+            // Generated entries end with «by @someone in https://…».
+            let line = line.split(" in https://").next().unwrap_or_default();
+            let line = line.split(" by @").next().unwrap_or_default().trim().to_string();
+            let line = match line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+                Some(rest) => format!("• {rest}"),
+                None => line,
+            };
+            (!line.is_empty()).then_some(line)
+        })
+        .take(6)
+        .collect();
+    if lines.is_empty() {
+        return "Исправления и улучшения. Kadr скачает установщик, проверит его и обновится.".into();
+    }
+    lines.join("\n")
 }
 
 /// «0.10.1» is newer than «0.9.3»: numbers, not text.
@@ -129,7 +163,8 @@ fn version_parts(version: &str) -> Option<[u64; 3]> {
     let mut p = version.split('.');
     let number = |part: &str| {
         (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()) && (part == "0" || !part.starts_with('0')))
-            .then(|| part.parse().ok()).flatten()
+            .then(|| part.parse().ok())
+            .flatten()
     };
     let result = [number(p.next()?)?, number(p.next()?)?, number(p.next()?)?];
     p.next().is_none().then_some(result)
@@ -233,11 +268,24 @@ mod tests {
                        "digest":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]}"#;
         let r = parse(json).unwrap();
         assert_eq!(r.version, "0.2.0");
-        assert_eq!(r.notes, "Что нового:\n- GIF\n- QR");
+        assert_eq!(r.notes, "Что нового:\n• GIF\n• QR");
         assert!(r.url.ends_with("/Kadr-Setup.exe"));
         assert_eq!(r.sha256, "a".repeat(64));
         assert!(parse(&json.replace("\"prerelease\":false", "\"prerelease\":true")).is_none());
         assert!(parse(&json.replace("Kadr-Setup.exe\",\"browser", "Other.exe\",\"browser")).is_none());
+    }
+
+    /// What 1.0.1–1.0.3 showed in the update bubble: GitHub's automatic line, not news.
+    #[test]
+    fn notes_lose_github_boilerplate_and_markdown() {
+        let generated = "**Full Changelog**: https://github.com/DaniilMokhnatkin/Kadr/compare/v1.0.2...v1.0.3";
+        assert_eq!(
+            readable_notes(generated),
+            "Исправления и улучшения. Kadr скачает установщик, проверит его и обновится."
+        );
+        assert_eq!(readable_notes("Kadr 1.0.5\n\n• Быстрее перевод"), "• Быстрее перевод");
+        let mixed = "## What's Changed\n* **Перевод** прямо на экране by @someone in https://github.com/x/y/pull/1\n\n- Без `чёрного` экрана\nhttps://example.com";
+        assert_eq!(readable_notes(mixed), "What's Changed\n• Перевод прямо на экране\n• Без чёрного экрана");
     }
 
     #[test]
@@ -248,9 +296,11 @@ mod tests {
     #[test]
     fn rejects_non_numeric_versions_and_unverified_downloads() {
         let sha = "a".repeat(64);
-        let release = |tag: &str, url: &str, digest: &str| format!(
-            r#"{{"tag_name":"{tag}","assets":[{{"name":"Kadr-Setup.exe","browser_download_url":"{url}","digest":"{digest}"}}]}}"#
-        );
+        let release = |tag: &str, url: &str, digest: &str| {
+            format!(
+                r#"{{"tag_name":"{tag}","assets":[{{"name":"Kadr-Setup.exe","browser_download_url":"{url}","digest":"{digest}"}}]}}"#
+            )
+        };
         let repo = REPO.unwrap();
         let url = format!("https://github.com/{repo}/releases/download/v1.0.1/Kadr-Setup.exe");
         assert!(parse(&release("v1.0.1", &url, &format!("sha256:{sha}"))).is_some());
@@ -265,8 +315,11 @@ mod tests {
     fn previous_release_finds_next_stable_release_once() {
         let tag = "v1.0.0";
         let sha = "0123456789abcdef".repeat(4);
-        let payload = format!(r#"{{"tag_name":"{tag}","draft":false,"prerelease":false,
-          "assets":[{{"name":"Kadr-Setup.exe","browser_download_url":"https://github.com/{}/releases/download/{tag}/Kadr-Setup.exe","digest":"sha256:{sha}"}}]}}"#, REPO.unwrap());
+        let payload = format!(
+            r#"{{"tag_name":"{tag}","draft":false,"prerelease":false,
+          "assets":[{{"name":"Kadr-Setup.exe","browser_download_url":"https://github.com/{}/releases/download/{tag}/Kadr-Setup.exe","digest":"sha256:{sha}"}}]}}"#,
+            REPO.unwrap()
+        );
         let release = parse(&payload).unwrap();
         assert!(newer(&release.version, "0.1.0"));
         assert!(!newer(&release.version, "1.0.0"));
@@ -277,11 +330,24 @@ mod tests {
     #[ignore = "network: downloads the published installer but never runs it"]
     fn live_latest_release_download_passes_integrity_check_without_installing() {
         let path = format!("/repos/{}/releases/latest", REPO.unwrap());
-        let (status, body) = crate::http::request("GET", "api.github.com", &path,
-            "Accept: application/vnd.github+json\r\n", &[], 1 << 20, "GitHub").unwrap();
+        let (status, body) = crate::http::request(
+            "GET",
+            "api.github.com",
+            &path,
+            "Accept: application/vnd.github+json\r\n",
+            &[],
+            1 << 20,
+            "GitHub",
+        )
+        .unwrap();
         assert_eq!(status, 200);
         let release = parse(&String::from_utf8_lossy(&body)).expect("numeric version and verifiable GitHub asset");
         let bytes = installer_bytes(&release).unwrap();
-        println!("Verified Kadr {}: {} bytes, SHA-256 {}. Installer not started.", release.version, bytes.len(), release.sha256);
+        println!(
+            "Verified Kadr {}: {} bytes, SHA-256 {}. Installer not started.",
+            release.version,
+            bytes.len(),
+            release.sha256
+        );
     }
 }

@@ -58,7 +58,7 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
             if (-not ($existing | ConvertFrom-Json).isDraft) { throw 'A published release is never overwritten.' }
           } else {
-            gh release create $tag --repo $repo --verify-tag --draft --title "Kadr $($tag.Substring(1))" --generate-notes
+            gh release create $tag --repo $repo --verify-tag --draft --title "Kadr $($tag.Substring(1))" --notes-from-tag
             if ($LASTEXITCODE -ne 0) { throw 'Could not create draft release.' }
           }
           $file = Get-Item -LiteralPath dist/Kadr-Setup.exe

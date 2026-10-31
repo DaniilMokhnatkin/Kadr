@@ -421,7 +421,9 @@ fn paint(device: &Device, st: &State) -> bool {
         let hover = sample(&st.hover_copy);
         fill(gpu, fade(mix(theme.tint, theme.tint_strong, hover), a), copy, 8.0 * s);
         let opens = matches!(&st.content, Content::Qr(t) if crate::qr::link(t).is_some());
-        let label = if opens {
+        let label = if matches!(st.content, Content::Update { .. }) {
+            "Обновить"
+        } else if opens {
             "Открыть"
         } else if st.copied {
             "Скопировано"
