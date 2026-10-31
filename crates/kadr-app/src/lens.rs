@@ -13,7 +13,8 @@ use std::time::Instant;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, ID2D1Bitmap1,
+    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_NONE,
+    D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, ID2D1Bitmap1,
 };
 use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Gdi::{
@@ -59,6 +60,9 @@ struct Fit {
     /// The patch that hides the original, in picture pixels.
     patch: D2D_RECT_F,
     at: (f32, f32),
+    /// The font size used, and the one that matches the original letters.
+    size: f32,
+    start: f32,
 }
 
 struct Shown {
@@ -224,9 +228,28 @@ fn measure(device: &Device, f: &IDWriteTextFormat, value: &str, width: f32) -> O
     }
 }
 
-/// The translation laid out over its block: as large as the original letters, smaller when it is
-/// longer, then wider (to the picture's edge), and taller only as the last resort.
-fn fit(device: &Device, shown: &Shown, picture: Rect) -> Option<Fit> {
+/// How far block `i` may grow without covering another: right to the edge of its column (the
+/// widest block starting at the same left; a lone block, the picture's edge) but not into a block
+/// beside it, and down to the next block under it. Desktop pixels: (right, bottom).
+fn room(rects: &[(Rect, usize)], i: usize, picture: Rect) -> (i32, i32) {
+    let (r, lines) = rects[i];
+    let line = (r.height() / lines.max(1) as i32).max(1);
+    let others = || rects.iter().enumerate().filter(move |(j, _)| *j != i).map(|(_, (o, _))| *o);
+    let column = others().filter(|o| (o.left - r.left).abs() <= 3 * line).map(|o| o.right).max().unwrap_or(picture.right);
+    let beside =
+        others().filter(|o| o.left >= r.right && o.top < r.bottom && o.bottom > r.top).map(|o| o.left - line / 2);
+    let right = beside.min().map_or(column, |b| column.min(b)).max(r.right).min(picture.right);
+    let below =
+        others().filter(|o| o.top >= r.bottom - line / 3 && o.left < right && o.right > r.left).map(|o| o.top - 2);
+    let bottom = below.min().unwrap_or(picture.bottom).max(r.bottom).min(picture.bottom);
+    (right, bottom)
+}
+
+/// The translation laid out over its block: as large as the original letters and as wide as its
+/// column; when longer, a little smaller, then taller into the free space under it, then smaller
+/// still. It never spreads over other text: what does not fit at the smallest size is clipped.
+/// `forced`: this size and no search (to match its neighbours).
+fn fit(device: &Device, shown: &Shown, picture: Rect, (right, bottom): (i32, i32), forced: Option<f32>) -> Option<Fit> {
     let value = shown.block.translated.as_deref()?;
     let r = shown.block.rect;
     let (x, y) = ((r.left - picture.left) as f32, (r.top - picture.top) as f32);
@@ -234,37 +257,67 @@ fn fit(device: &Device, shown: &Shown, picture: Rect) -> Option<Fit> {
     let line = h / shown.block.lines.max(1) as f32;
     let start = (line * 0.8).clamp(8.0, 120.0);
     let weight = if shown.bold { DWRITE_FONT_WEIGHT_SEMI_BOLD } else { DWRITE_FONT_WEIGHT_NORMAL };
-    let room = (picture.right - r.left) as f32;
-    let attempt = |size: f32, width: f32| {
+    let width = ((right - r.left) as f32).max(w);
+    let tall = ((bottom - r.top) as f32).max(h);
+    let attempt = |size: f32| {
         let f = format(device, size, weight)?;
         unsafe {
             let _ = f.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
         }
         measure(device, &f, value, width)
     };
-    let mut chosen = None;
-    'search: for (width, floor) in [(w, 0.72), (room.max(w), 0.5)] {
+    let mut chosen = forced.and_then(|size| attempt(size).map(|(l, mw, mh)| (l, mw, mh, size)));
+    'search: for (limit, floor) in [(h * 1.1, 0.84), (tall, 0.72), (tall, 0.66)] {
         let mut size = start;
-        while size >= (start * floor).max(8.0) {
-            if let Some((layout, mw, mh)) = attempt(size, width)
-                && mh <= h * 1.12
+        while chosen.is_none() && size >= (start * floor).max(8.0) {
+            if let Some((layout, mw, mh)) = attempt(size)
+                && mh <= limit
                 && mw <= width + 0.5
             {
-                chosen = Some((layout, mw, mh));
+                chosen = Some((layout, mw, mh, size));
                 break 'search;
             }
-            size *= 0.93;
+            size *= 0.95;
         }
     }
-    let (layout, mw, mh) = match chosen {
+    let smallest = (start * 0.66).max(8.0);
+    let (layout, mw, mh, size) = match chosen {
         Some(found) => found,
-        None => attempt((start * 0.5).max(8.0), room.max(w))?,
+        None => attempt(smallest).map(|(l, mw, mh)| (l, mw, mh, smallest))?,
     };
     let pad = (line * 0.14).clamp(1.5, 8.0);
     let (pw, ph) = (picture.width() as f32, picture.height() as f32);
-    let patch =
-        rect((x - pad).max(0.0), (y - pad).max(0.0), (x + w.max(mw) + pad).min(pw), (y + h.max(mh) + pad).min(ph));
-    Some(Fit { layout, patch, at: (x, y + ((h - mh) / 2.0).max(0.0)) })
+    // Up to the room, but always over the whole original.
+    let max_right = (x + width).max(x + w + pad);
+    let max_bottom = (y + tall).max(y + h + pad);
+    let patch = rect(
+        (x - pad).max(0.0),
+        (y - pad).max(0.0),
+        (x + w.max(mw) + pad).min(max_right).min(pw),
+        (y + h.max(mh) + pad).min(max_bottom).min(ph),
+    );
+    Some(Fit { layout, patch, at: (x, y + ((h - mh) / 2.0).max(0.0)), size, start })
+}
+
+/// One size for text of one style in one column (a list, the paragraphs of an article): the
+/// smallest any of them needed, though not below 0.8 of their median, so a single long line does
+/// not shrink the whole list; that line keeps its own smaller size. `None`: keep its own.
+fn common_sizes(fits: &[Option<(f32, f32, i32, f32)>]) -> Vec<Option<f32>> {
+    fits.iter()
+        .map(|me| {
+            let (size, start, left, line) = (*me)?;
+            let mut peers: Vec<f32> = fits
+                .iter()
+                .flatten()
+                .filter(|(_, s, l, _)| (s / start - 1.0).abs() < 0.12 && (l - left).abs() as f32 <= 3.0 * line)
+                .map(|(size, ..)| *size)
+                .collect();
+            peers.sort_by(f32::total_cmp);
+            let floor = peers[peers.len() / 2] * 0.8;
+            let common = peers[0].max(floor);
+            (size > common * 1.02).then_some(common)
+        })
+        .collect()
 }
 
 // ---- geometry ------------------------------------------------------------------------------
@@ -430,8 +483,23 @@ fn lay_out(st: &mut State) {
         return;
     }
     let (Some(device), Some(image)) = (st.device.as_ref(), st.image.as_ref()) else { return };
-    for b in &mut st.blocks {
-        b.fit = fit(device, b, image.rect);
+    let rects: Vec<(Rect, usize)> = st.blocks.iter().map(|b| (b.block.rect, b.block.lines)).collect();
+    for (i, b) in st.blocks.iter_mut().enumerate() {
+        b.fit = fit(device, b, image.rect, room(&rects, i, image.rect), None);
+    }
+    let sizes: Vec<_> = st
+        .blocks
+        .iter()
+        .map(|b| {
+            let line = b.block.rect.height() as f32 / b.block.lines.max(1) as f32;
+            b.fit.as_ref().map(|f| (f.size, f.start, b.block.rect.left, line))
+        })
+        .collect();
+    for (i, common) in common_sizes(&sizes).into_iter().enumerate() {
+        if let Some(size) = common {
+            let b = &st.blocks[i];
+            st.blocks[i].fit = fit(device, b, image.rect, room(&rects, i, image.rect), Some(size));
+        }
     }
     st.laid_out = true;
 }
@@ -671,6 +739,7 @@ fn paint(device: &Device, st: &State) -> bool {
                 if a > 0.0 {
                     fill(gpu, fade(b.background, a), patch, 3.0 * s);
                     unsafe {
+                        ctx.PushAxisAlignedClip(&patch, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
                         gpu.brush.SetColor(&fade(b.ink, a));
                         ctx.DrawTextLayout(
                             Vector2 { X: fit.at.0 + ox, Y: fit.at.1 + oy },
@@ -678,6 +747,7 @@ fn paint(device: &Device, st: &State) -> bool {
                             &gpu.brush,
                             D2D1_DRAW_TEXT_OPTIONS_CLIP,
                         );
+                        ctx.PopAxisAlignedClip();
                     }
                 }
                 if hover > 0.0 {
@@ -1017,12 +1087,88 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
 /// Text drawn into the preview: value, x, y, wrap width, size, weight, colour, its translation.
 type Sample = (&'static str, f32, f32, f32, f32, DWRITE_FONT_WEIGHT, u32, &'static str);
 
-/// A synthetic dark game panel and a light card, translated, with the pointer over one block.
-pub fn preview(scale: f32) -> windows::core::Result<Image> {
+/// A news page in a game launcher: paragraphs and a dense changelog, where the Russian is longer.
+const NEWS: [Sample; 8] = [
+    ("Hello, Forts fans!", 20.0, 16.0, 760.0, 24.0, DWRITE_FONT_WEIGHT_BOLD, 0xffffff, "Добрый день, фанаты Forts!"),
+    (
+        "In this update we are making balance changes, mostly to the Firebird weapons. We made the Water Cannon available in multiplayer and skirmish. The Firebird commander can build two, the rest just one, and it fires burning shots.",
+        20.0,
+        60.0,
+        760.0,
+        15.0,
+        DWRITE_FONT_WEIGHT_NORMAL,
+        0xc6d4df,
+        "В этом обновлении мы вносим изменения в баланс, в основном в оружие Жар-птицы. Водомёт теперь доступен в многопользовательском режиме и в перестрелке. Командир Жар-птицы может построить два, остальные — только один, и он стреляет пылающими снарядами.",
+    ),
+    (
+        "In ranked matches you can now reveal your name either while loading or at the end of the match. Both players must agree for this to work.",
+        20.0,
+        140.0,
+        760.0,
+        15.0,
+        DWRITE_FONT_WEIGHT_NORMAL,
+        0xc6d4df,
+        "В рейтинговых матчах теперь можно раскрыть своё имя во время загрузки или в конце матча. Чтобы это сработало, согласиться должны оба игрока.",
+    ),
+    (
+        "Changelog 1.39.0 r22735",
+        20.0,
+        206.0,
+        760.0,
+        20.0,
+        DWRITE_FONT_WEIGHT_SEMI_BOLD,
+        0xffffff,
+        "Список изменений 1.39.0 r22735",
+    ),
+    (
+        "Added: AntiAirFireTimeMin, which overrides AntiAirFireLeadTimeMin so domed AA weapons fire with fewer restrictions.",
+        20.0,
+        246.0,
+        780.0,
+        13.0,
+        DWRITE_FONT_WEIGHT_NORMAL,
+        0xc6d4df,
+        "Добавлено: AntiAirFireTimeMin, которое переопределяет AntiAirFireLeadTimeMin, чтобы купольные зенитные орудия стреляли с меньшими ограничениями.",
+    ),
+    (
+        "Added: AntiAirInclude and AntiAirExclude ammo properties.",
+        20.0,
+        268.0,
+        780.0,
+        13.0,
+        DWRITE_FONT_WEIGHT_NORMAL,
+        0xc6d4df,
+        "Добавлено: свойства боеприпасов AntiAirInclude и AntiAirExclude.",
+    ),
+    (
+        "Added: AntiAirIncludeConditions ammo property to target specific AA ammo based on projectile data.",
+        20.0,
+        290.0,
+        780.0,
+        13.0,
+        DWRITE_FONT_WEIGHT_NORMAL,
+        0xc6d4df,
+        "Добавлено: свойство боеприпасов AntiAirIncludeConditions, позволяющее целиться в конкретные боеприпасы ПВО по данным снаряда.",
+    ),
+    (
+        "Fixed many desyncs, mission problems and security issues.",
+        20.0,
+        312.0,
+        780.0,
+        13.0,
+        DWRITE_FONT_WEIGHT_NORMAL,
+        0xc6d4df,
+        "Исправлено множество рассинхронизаций, проблем с миссиями и уязвимостей.",
+    ),
+];
+
+/// A synthetic dark game panel and a light card (or, `long`, a news page), translated, with the
+/// pointer over one block.
+pub fn preview(scale: f32, long: bool) -> windows::core::Result<Image> {
     let device = Device::new("lens-preview")?;
     let s = scale;
-    let (w, h) = ((760.0 * s) as u32, (300.0 * s) as u32);
-    let samples: [Sample; 6] = [
+    let (w, h) = if long { ((820.0 * s) as u32, (345.0 * s) as u32) } else { ((760.0 * s) as u32, (300.0 * s) as u32) };
+    let card: [Sample; 6] = [
         ("Team settings", 24.0, 22.0, 400.0, 24.0, DWRITE_FONT_WEIGHT_BOLD, 0xffffff, "Настройки команды"),
         (
             "Choose a map and invite your friends. The match starts when everyone is ready.",
@@ -1039,13 +1185,18 @@ pub fn preview(scale: f32) -> windows::core::Result<Image> {
         ("Наблюдатель", 24.0, 240.0, 300.0, 17.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, 0xffffff, ""),
         ("Save changes", 476.0, 132.0, 240.0, 16.0, DWRITE_FONT_WEIGHT_MEDIUM, 0x1b1f24, "Сохранить изменения"),
     ];
+    let samples: &[Sample] = if long { &NEWS } else { &card };
     let mut blocks = Vec::new();
     let picture = glass::render_offscreen(&device, w, h, || {
         let gpu = &device.gpu;
-        fill(gpu, glass::rgb(0x1e2430, 1.0), rect(0.0, 0.0, w as f32, h as f32), 0.0);
-        fill(gpu, glass::rgb(0x2a3242, 1.0), rect(12.0 * s, 136.0 * s, 330.0 * s, 222.0 * s), 8.0 * s);
-        fill(gpu, glass::rgb(0xf3f4f6, 1.0), rect(452.0 * s, 104.0 * s, 736.0 * s, 196.0 * s), 12.0 * s);
-        for (value, x, y, width, size, weight, ink, translated) in samples {
+        if long {
+            fill(gpu, glass::rgb(0x1b2838, 1.0), rect(0.0, 0.0, w as f32, h as f32), 0.0);
+        } else {
+            fill(gpu, glass::rgb(0x1e2430, 1.0), rect(0.0, 0.0, w as f32, h as f32), 0.0);
+            fill(gpu, glass::rgb(0x2a3242, 1.0), rect(12.0 * s, 136.0 * s, 330.0 * s, 222.0 * s), 8.0 * s);
+            fill(gpu, glass::rgb(0xf3f4f6, 1.0), rect(452.0 * s, 104.0 * s, 736.0 * s, 196.0 * s), 12.0 * s);
+        }
+        for (value, x, y, width, size, weight, ink, translated) in samples.iter().copied() {
             let Some(f) = format(&device, size * s, weight) else { continue };
             let Some((layout, mw, mh)) = measure(&device, &f, value, width * s) else { continue };
             let mut m = DWRITE_TEXT_METRICS::default();
@@ -1084,7 +1235,7 @@ pub fn preview(scale: f32) -> windows::core::Result<Image> {
         b.appear.snap(1.0);
     }
     prepare(&mut st);
-    let pointer = st.blocks.iter().position(|b| b.block.original == "Save changes");
+    let pointer = st.blocks.iter().position(|b| b.block.original == if long { NEWS[2].0 } else { "Save changes" });
     if let Some(i) = pointer {
         st.hover = Some(Hit::Block(i));
         st.blocks[i].hover.snap(1.0);
@@ -1161,5 +1312,39 @@ mod tests {
         assert_eq!(label(&st.content), "Английский → Русский");
         toggle_original(&mut st);
         assert_eq!(whole_text(&st), "Settings\nStarKoff");
+    }
+    /// The Steam news case: translations spread to the screen edge and over the next lines.
+    #[test]
+    fn room_stops_at_the_column_the_block_beside_and_the_line_below() {
+        let picture = Rect::new(0, 0, 1600, 1000);
+        let rects = [
+            (Rect::new(20, 100, 600, 116), 1), // a short line of a list
+            (Rect::new(20, 122, 900, 138), 1), // the widest line: the column's edge
+            (Rect::new(20, 144, 300, 160), 1),
+            (Rect::new(1000, 98, 1200, 118), 1), // another panel to the right
+        ];
+        assert_eq!(room(&rects, 0, picture), (900, 120), "to the column's edge, down to the next line");
+        assert_eq!(room(&rects, 2, picture), (900, 1000), "the last one may grow down");
+        assert_eq!(room(&rects, 3, picture), (1600, 1000));
+        let beside = [(Rect::new(20, 100, 600, 116), 1), (Rect::new(700, 100, 900, 116), 1)];
+        assert_eq!(room(&beside, 0, picture).0, 692, "stops before the block beside it");
+    }
+    #[test]
+    fn one_style_in_one_column_gets_one_size_but_one_long_line_does_not_shrink_all() {
+        // (size it fitted at, natural size, left, line height)
+        let list = [
+            Some((13.0, 13.0, 20, 17.0)),
+            Some((11.5, 13.0, 20, 17.0)),
+            Some((12.0, 13.0, 20, 17.0)),
+            Some((9.0, 13.0, 20, 17.0)),  // one very long line
+            Some((20.0, 20.0, 20, 25.0)), // a heading: another style
+            None,
+        ];
+        let common = common_sizes(&list);
+        // Median 12 → floor 9.6: the list goes to 9.6, the long line keeps its 9.
+        assert_eq!(common[0], Some(12.0 * 0.8));
+        assert_eq!(common[1], Some(12.0 * 0.8));
+        assert_eq!(common[3], None);
+        assert_eq!((common[4], common[5]), (None, None));
     }
 }

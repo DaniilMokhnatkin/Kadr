@@ -344,10 +344,14 @@ pub fn blocks(lines: &[Line]) -> Vec<Block> {
             let h = a.rect.height().max(line.rect.height()).max(1);
             let right = block.rect.right.max(line.rect.right);
             let lower = line.text.trim_start().chars().next().is_some_and(char::is_lowercase);
-            // A wrapped line is long and reaches the right edge; a sentence ending there closes the
+            // A wrapped line is long, and the next line's first word would not have fitted after it
+            // (ragged right edges differ by up to a word). A sentence ending there closes the
             // paragraph unless the next line goes on in lower case. Short lines are a list (names, menus).
-            let wrapped = a.text.chars().count() >= 18
-                && a.rect.right >= right - 2 * h
+            let chars = a.text.chars().count();
+            let letter = a.rect.width() as f32 / chars.max(1) as f32;
+            let first = line.text.split_whitespace().next().map_or(0, |w| w.chars().count());
+            let wrapped = chars >= 18
+                && a.rect.right as f32 + (first + 1) as f32 * letter >= (right - h) as f32
                 && (lower || !a.text.trim_end().ends_with(['.', ':', '!', '?', ';']));
             same_block(a, line) && wrapped
         };
@@ -392,6 +396,28 @@ mod tests {
             ]
         );
         assert_eq!((b[1].rect, b[1].lines), (Rect::new(10, 80, 420, 124), 2));
+    }
+    /// The Steam news case: a ragged paragraph whose first line ends far from the widest one,
+    /// because the next word was long. Then a list of changes, one sentence a line.
+    #[test]
+    fn a_ragged_paragraph_stays_one_block_and_sentence_lines_do_not_join() {
+        let lines = vec![
+            line("In this update we are making balance changes, mostly to Firebird. We made the", 0, 0, 640, 16),
+            line(
+                "Waterblaster available in multiplayer and skirmish. The Firebird commander can build",
+                0,
+                22,
+                700,
+                38,
+            ),
+            line("two, the rest one.", 0, 44, 150, 60),
+            line("Added: AntiAirFireTimeMin, which overrides AntiAirFireLeadTimeMin.", 0, 90, 560, 106),
+            line("Added: AntiAirInclude and AntiAirExclude ammo properties, for weapons that", 0, 112, 600, 128),
+            line("target them.", 0, 134, 100, 150),
+        ];
+        let b = blocks(&lines);
+        assert_eq!(b.iter().map(|b| b.lines).collect::<Vec<_>>(), [3, 1, 2]);
+        assert_eq!(b[0].rect, Rect::new(0, 0, 700, 60));
     }
     fn line(text: &str, l: i32, t: i32, r: i32, b: i32) -> Line {
         Line { text: text.into(), rect: Rect::new(l, t, r, b), words: Vec::new() }

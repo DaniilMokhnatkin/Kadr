@@ -197,10 +197,12 @@ pub fn design_set(dir: &str) -> Result<(), Box<dyn Error>> {
             dir.join(format!("clipboard-{}.png", (scale * 100.0) as i32)),
             kadr_doc::pixels::encode_png(&crate::clip_window::preview(thumb.clone(), scale)?)?,
         )?;
-        std::fs::write(
-            dir.join(format!("lens-{}.png", (scale * 100.0) as i32)),
-            kadr_doc::pixels::encode_png(&crate::lens::preview(scale)?)?,
-        )?;
+        for (name, long) in [("lens", false), ("lens-long", true)] {
+            std::fs::write(
+                dir.join(format!("{name}-{}.png", (scale * 100.0) as i32)),
+                kadr_doc::pixels::encode_png(&crate::lens::preview(scale, long)?)?,
+            )?;
+        }
         for (name, e, crop) in [("viewer", 1.0, false), ("viewer-opening", 0.45, false), ("viewer-crop", 1.0, true)] {
             std::fs::write(
                 dir.join(format!("{name}-{}.png", (scale * 100.0) as i32)),
