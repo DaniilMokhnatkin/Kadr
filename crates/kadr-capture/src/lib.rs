@@ -11,7 +11,7 @@ pub use windows_list::{foreground_window, top_level_windows};
 
 use windows::Win32::Foundation::{E_FAIL, RECT};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE,
+    D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE,
     D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING, ID3D11Device,
     ID3D11DeviceContext, ID3D11Texture2D,
 };
@@ -21,7 +21,10 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_OUTDUPL_FRAME_INFO, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput1, IDXGIOutput5, IDXGIOutputDuplication,
     IDXGIResource,
 };
-use windows::Win32::Graphics::Gdi::HMONITOR;
+use windows::Win32::Graphics::Gdi::{
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
+    DeleteDC, DeleteObject, GetDC, HMONITOR, ReleaseDC, SRCCOPY, SelectObject,
+};
 use windows::core::{Error, Interface, Result};
 
 use kadr_doc::{Image, Rect};
@@ -39,6 +42,8 @@ pub struct Output {
     /// Наша копия последнего кадра на GPU — её и рисует оверлей.
     pub frame: Option<ID3D11Texture2D>,
     normalized: Option<Image>,
+    /// The duplicator gives this monitor no picture here: it is captured through GDI.
+    gdi: bool,
 }
 
 /// Адаптер, к которому подключены мониторы. GPU-контекст для него создаёт вызывающий.
@@ -82,6 +87,7 @@ pub fn enumerate() -> Result<(Vec<Adapter>, Vec<Output>)> {
                 dup: None,
                 frame: None,
                 normalized: None,
+                gdi: false,
             });
         }
     }
@@ -99,6 +105,10 @@ impl Output {
 
     /// Снимает текущий кадр в `self.frame`. Возвращает, сколько мс ушло на создание дубликатора.
     pub fn capture(&mut self, device: &ID3D11Device, context: &ID3D11DeviceContext) -> Result<f64> {
+        if self.gdi {
+            self.capture_gdi(device)?;
+            return Ok(0.0);
+        }
         let mut dup_ms = 0.0;
         for attempt in 0..2 {
             let fresh = self.dup.is_none();
@@ -107,28 +117,188 @@ impl Output {
                 self.dup = Some(self.duplicate(device)?);
                 dup_ms += perf::ms(t, perf::now());
             }
-            let dup = self.dup.as_ref().unwrap();
             // Свежий дубликатор сразу отдаёт полный кадр — ждём его. Прогретый без изменений на
             // экране кадра не даст, и тогда актуальна наша прошлая копия.
             let can_reuse = !fresh && self.frame.is_some();
-            let timeout = if can_reuse { 0 } else { 500 };
-            let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
-            let mut resource: Option<IDXGIResource> = None;
-            match unsafe { dup.AcquireNextFrame(timeout, &mut info, &mut resource) } {
-                Ok(()) => {
-                    let copied = self.copy_frame(device, context, resource);
-                    unsafe {
-                        let _ = self.dup.as_ref().unwrap().ReleaseFrame();
+            let mut timeout = if can_reuse { 0 } else { 500 };
+            let mut waited = 0;
+            loop {
+                let dup = self.dup.as_ref().unwrap();
+                let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
+                let mut resource: Option<IDXGIResource> = None;
+                match unsafe { dup.AcquireNextFrame(timeout, &mut info, &mut resource) } {
+                    // Некоторые драйверы первым кадром отдают только курсор, без картинки
+                    // рабочего стола (её ещё нет — получится чёрный экран): ждём настоящую.
+                    Ok(()) if info.LastPresentTime == 0 && !can_reuse => {
+                        unsafe {
+                            let _ = dup.ReleaseFrame();
+                        }
+                        if waited == 4 {
+                            return self.fallback(device, "дубликатор не дал картинку рабочего стола").map(|()| dup_ms);
+                        }
+                        waited += 1;
+                        timeout = 100;
                     }
-                    return copied.map(|()| dup_ms);
+                    Ok(()) => {
+                        let copied = self.copy_frame(device, context, resource);
+                        unsafe {
+                            let _ = self.dup.as_ref().unwrap().ReleaseFrame();
+                        }
+                        copied?;
+                        if !can_reuse && self.blank(device, context) {
+                            return self.fallback(device, "дубликатор отдал чёрный кадр").map(|()| dup_ms);
+                        }
+                        return Ok(dup_ms);
+                    }
+                    Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT && can_reuse => return Ok(dup_ms),
+                    Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => {
+                        return self.fallback(device, "дубликатор не прислал кадр").map(|()| dup_ms);
+                    }
+                    // Смена режима, secure desktop, полноэкранное приложение: пересоздаём один раз.
+                    Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST && attempt == 0 => {
+                        self.dup = None;
+                        break;
+                    }
+                    Err(e) => return Err(e),
                 }
-                Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT && can_reuse => return Ok(dup_ms),
-                // Смена режима, secure desktop, полноэкранное приложение: пересоздаём один раз.
-                Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST && attempt == 0 => self.dup = None,
-                Err(e) => return Err(e),
             }
         }
         Err(Error::from(DXGI_ERROR_ACCESS_LOST))
+    }
+
+    /// The duplicator gave no picture: this monitor through GDI instead. If GDI sees one, the
+    /// duplicator is what fails here (some drivers and hybrid graphics), and the monitor stays on
+    /// GDI until Kadr restarts; a picture black either way is just a black screen.
+    fn fallback(&mut self, device: &ID3D11Device, why: &str) -> Result<()> {
+        self.capture_gdi(device)?;
+        if self.normalized.as_ref().is_some_and(|image| !blank_pixels(&image.bgra)) {
+            kadr_win::log_warn!("захват {}: {why}; снимаю этот монитор через GDI", self.name);
+            self.gdi = true;
+            self.dup = None;
+        }
+        Ok(())
+    }
+
+    /// Whether the frame just copied is black all over, looked at in nine small patches.
+    fn blank(&self, device: &ID3D11Device, context: &ID3D11DeviceContext) -> bool {
+        if let Some(image) = &self.normalized {
+            return blank_pixels(&image.bgra);
+        }
+        let Some(frame) = &self.frame else { return true };
+        const TILE: u32 = 8;
+        unsafe {
+            let mut desc = D3D11_TEXTURE2D_DESC::default();
+            frame.GetDesc(&mut desc);
+            if desc.Width < TILE * 3 || desc.Height < TILE * 3 {
+                return false;
+            }
+            let (w, h) = (desc.Width, desc.Height);
+            desc.Width = TILE * 3;
+            desc.Height = TILE * 3;
+            desc.Usage = D3D11_USAGE_STAGING;
+            desc.BindFlags = 0;
+            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+            desc.MiscFlags = 0;
+            let mut staging = None;
+            if device.CreateTexture2D(&desc, None, Some(&mut staging)).is_err() {
+                return false;
+            }
+            let Some(staging) = staging else { return false };
+            for gy in 0..3 {
+                for gx in 0..3 {
+                    let (x, y) = ((w - TILE) * (gx * 2 + 1) / 6, (h - TILE) * (gy * 2 + 1) / 6);
+                    let source = D3D11_BOX { left: x, top: y, front: 0, right: x + TILE, bottom: y + TILE, back: 1 };
+                    context.CopySubresourceRegion(&staging, 0, gx * TILE, gy * TILE, 0, frame, 0, Some(&source));
+                }
+            }
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            if context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)).is_err() {
+                return false;
+            }
+            let mut pixels = Vec::with_capacity((TILE * TILE * 9 * 4) as usize);
+            for row in 0..TILE * 3 {
+                let line = (mapped.pData as *const u8).add((row * mapped.RowPitch) as usize);
+                pixels.extend_from_slice(std::slice::from_raw_parts(line, (TILE * 3 * 4) as usize));
+            }
+            context.Unmap(&staging, 0);
+            blank_pixels(&pixels)
+        }
+    }
+
+    /// The monitor's pixels the old way, through the screen's device context: slower than the
+    /// duplicator, but every driver supports it.
+    fn capture_gdi(&mut self, device: &ID3D11Device) -> Result<()> {
+        let (w, h) = (self.width(), self.height());
+        let mut bgra = vec![0u8; (w.max(0) * h.max(0) * 4) as usize];
+        unsafe {
+            let screen = GetDC(None);
+            let memory = CreateCompatibleDC(Some(screen));
+            let info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: w,
+                    biHeight: -h,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut bits = std::ptr::null_mut();
+            let bitmap = CreateDIBSection(Some(memory), &info, DIB_RGB_COLORS, &mut bits, None, 0);
+            let copied = bitmap.as_ref().ok().map(|bitmap| {
+                let old = SelectObject(memory, (*bitmap).into());
+                let done =
+                    BitBlt(memory, 0, 0, w, h, Some(screen), self.rect.left, self.rect.top, SRCCOPY | CAPTUREBLT);
+                if done.is_ok() && !bits.is_null() {
+                    std::ptr::copy_nonoverlapping(bits as *const u8, bgra.as_mut_ptr(), bgra.len());
+                }
+                SelectObject(memory, old);
+                done
+            });
+            if let Ok(bitmap) = bitmap {
+                let _ = DeleteObject(bitmap.into());
+            }
+            let _ = DeleteDC(memory);
+            ReleaseDC(None, screen);
+            match copied {
+                Some(Ok(())) => {}
+                Some(Err(e)) => return Err(e),
+                None => return Err(Error::from(E_FAIL)),
+            }
+        }
+        for px in bgra.as_chunks_mut::<4>().0 {
+            px[3] = 255;
+        }
+        self.upload(device, Image::new(self.bounds(), bgra))
+    }
+
+    /// `image` (already upright) as the frame on the GPU, and kept for reading back.
+    fn upload(&mut self, device: &ID3D11Device, image: Image) -> Result<()> {
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: image.width(),
+            Height: image.height(),
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            ..Default::default()
+        };
+        let data = D3D11_SUBRESOURCE_DATA {
+            pSysMem: image.bgra.as_ptr().cast(),
+            SysMemPitch: image.width() * 4,
+            SysMemSlicePitch: 0,
+        };
+        let mut frame = None;
+        unsafe {
+            device.CreateTexture2D(&desc, Some(&data), Some(&mut frame))?;
+        }
+        self.frame = frame;
+        self.normalized = Some(image);
+        Ok(())
     }
 
     pub fn release_duplication(&mut self) {
@@ -179,26 +349,7 @@ impl Output {
             if image.rect != self.bounds() {
                 return Err(Error::from(E_FAIL));
             }
-            desc.Width = image.width();
-            desc.Height = image.height();
-            desc.Usage = D3D11_USAGE_DEFAULT;
-            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE.0 as u32;
-            desc.CPUAccessFlags = 0;
-            desc.MiscFlags = 0;
-            desc.MipLevels = 1;
-            desc.ArraySize = 1;
-            let data = D3D11_SUBRESOURCE_DATA {
-                pSysMem: image.bgra.as_ptr().cast(),
-                SysMemPitch: image.width() * 4,
-                SysMemSlicePitch: 0,
-            };
-            let mut frame = None;
-            unsafe {
-                device.CreateTexture2D(&desc, Some(&data), Some(&mut frame))?;
-            }
-            self.frame = frame;
-            self.normalized = Some(image);
-            return Ok(());
+            return self.upload(device, image);
         }
         self.normalized = None;
         let fits = self.frame.as_ref().is_some_and(|frame| {
@@ -221,6 +372,11 @@ impl Output {
         unsafe { context.CopyResource(frame, &source) };
         Ok(())
     }
+}
+
+/// Black all over: no pixel brighter than the faintest dark grey.
+fn blank_pixels(bgra: &[u8]) -> bool {
+    bgra.as_chunks::<4>().0.iter().all(|p| p[0] <= 2 && p[1] <= 2 && p[2] <= 2)
 }
 
 fn read_texture(
@@ -253,6 +409,54 @@ fn read_texture(
         context.Unmap(&staging, 0);
 
         Ok(Image::new(Rect::new(left, top, left + width as i32, top + height as i32), bgra))
+    }
+}
+
+#[cfg(test)]
+mod blank_tests {
+    use super::*;
+    use kadr_render::gpu::{Gpu, Shared};
+    fn texture(gpu: &Gpu, w: u32, h: u32, value: u8) -> ID3D11Texture2D {
+        let pixels: Vec<u8> = (0..w * h).flat_map(|_| [value, value, value, 255]).collect();
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: w,
+            Height: h,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            ..Default::default()
+        };
+        let data = D3D11_SUBRESOURCE_DATA { pSysMem: pixels.as_ptr().cast(), SysMemPitch: w * 4, SysMemSlicePitch: 0 };
+        let mut t = None;
+        unsafe { gpu.device.CreateTexture2D(&desc, Some(&data), Some(&mut t)).unwrap() };
+        t.unwrap()
+    }
+    /// The black screen on some PCs: the duplicator «succeeds» with an empty picture. Kadr sees
+    /// it, takes the monitor through GDI and stays on GDI; a dark but real picture is kept.
+    #[test]
+    fn a_black_frame_from_the_duplicator_is_replaced_by_the_gdi_picture() {
+        assert!(blank_pixels(&[0, 0, 0, 255, 2, 1, 0, 0]));
+        assert!(!blank_pixels(&[0, 0, 0, 255, 30, 30, 30, 255]));
+        let shared = Shared::new().unwrap();
+        let (adapters, mut outputs) = enumerate().unwrap();
+        let mut output = outputs.remove(0);
+        let gpu = Gpu::new(&shared, &adapters[output.gpu].adapter, "blank-test".into()).unwrap();
+        output.rotation = DXGI_MODE_ROTATION(1);
+        let (w, h) = (output.width() as u32, output.height() as u32);
+        output.copy_frame(&gpu.device, &gpu.context, Some(texture(&gpu, w, h, 0).cast().unwrap())).unwrap();
+        assert!(output.blank(&gpu.device, &gpu.context), "a black frame is blank");
+        output.copy_frame(&gpu.device, &gpu.context, Some(texture(&gpu, w, h, 24).cast().unwrap())).unwrap();
+        assert!(!output.blank(&gpu.device, &gpu.context), "a dark grey frame is a picture");
+        output.fallback(&gpu.device, "test").unwrap();
+        let image = output.read_pixels(&gpu.device, &gpu.context).unwrap();
+        assert_eq!(image.rect, output.bounds());
+        assert!(output.gdi && !blank_pixels(&image.bgra), "the desktop through GDI is a picture");
+        // From now on the monitor is taken through GDI, with no duplicator involved.
+        output.capture(&gpu.device, &gpu.context).unwrap();
+        assert!(output.dup.is_none());
     }
 }
 

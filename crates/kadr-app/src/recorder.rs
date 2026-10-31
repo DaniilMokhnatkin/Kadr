@@ -123,11 +123,7 @@ fn record(
     // A `.gif` path: a silent animation for chats, at a calmer pace; anything else is MP4 with sound.
     let gif = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("gif"));
     let frame = if gif { GIF_FRAME } else { FRAME };
-    let mut sound = if gif {
-        None
-    } else {
-        Loopback::start_in_time()
-    };
+    let mut sound = if gif { None } else { Loopback::start_in_time() };
     let sink = if gif {
         Sink::Gif(GifWriter::new(path, w, h).map_err(|e| Error::new(windows::Win32::Foundation::E_FAIL, e))?)
     } else {
