@@ -95,11 +95,87 @@ fn batch(
     let mut out = vec![None; blocks.len()];
     for ((&i, original), t) in wanted.iter().zip(&texts).zip(done) {
         let t = t.trim();
-        if !t.is_empty() && key(t) != key(original) {
+        if !t.is_empty() && key(t) != key(original) && !transliterated(original, t) {
             out[i] = Some(t.to_string());
         }
     }
     Ok(Blocks { texts: out, from: all.from, to: to.into() })
+}
+
+/// How a word sounds, in Latin letters: Cyrillic spelled out, look-alike sounds merged and double
+/// letters single, so «StarKoff» and «СтарКофф» come out the same.
+fn sound(s: &str) -> Vec<char> {
+    let mut out = String::new();
+    for c in s.chars().flat_map(char::to_lowercase) {
+        let piece = match c {
+            'а' => "a",
+            'б' => "b",
+            'в' | 'w' => "v",
+            'г' => "g",
+            'д' => "d",
+            'е' | 'ё' | 'э' => "e",
+            'ж' => "zh",
+            'з' => "z",
+            'и' | 'й' | 'ы' | 'y' => "i",
+            'к' | 'c' | 'q' => "k",
+            'л' => "l",
+            'м' => "m",
+            'н' => "n",
+            'о' => "o",
+            'п' => "p",
+            'р' => "r",
+            'с' => "s",
+            'т' => "t",
+            'у' => "u",
+            'ф' => "f",
+            'х' => "h",
+            'ц' => "ts",
+            'ч' => "ch",
+            'ш' | 'щ' => "sh",
+            'ю' => "iu",
+            'я' => "ia",
+            'x' => "ks",
+            'j' => "dzh",
+            c if c.is_ascii_alphanumeric() => {
+                out.push(c);
+                continue;
+            }
+            _ => "",
+        };
+        out.push_str(piece);
+    }
+    let mut chars: Vec<char> = out.replace("ph", "f").replace("th", "t").chars().collect();
+    chars.dedup();
+    chars
+}
+
+/// A name written in the other alphabet rather than translated («StarKoff» → «СтарКофф»,
+/// «Blender» → «Блендер»): the original stays, as a person would leave it.
+fn transliterated(original: &str, translated: &str) -> bool {
+    // Transliteration changes the alphabet; the same letters are a translation that kept a word.
+    let cyrillic_share = |s: &str| {
+        let letters = s.chars().filter(|c| c.is_alphabetic()).count().max(1);
+        s.chars().filter(|&c| cyrillic(c)).count() * 2 > letters
+    };
+    if cyrillic_share(original) == cyrillic_share(translated) {
+        return false;
+    }
+    let (a, b) = (sound(original), sound(translated));
+    if a.len() < 3 || b.is_empty() {
+        return false;
+    }
+    // Edit distance, one row at a time.
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut previous = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let next = (previous + usize::from(ca != cb)).min(row[j] + 1).min(row[j + 1] + 1);
+            previous = row[j + 1];
+            row[j + 1] = next;
+        }
+    }
+    row[b.len()] * 4 <= a.len().max(b.len())
 }
 
 /// Blocking: call from a worker thread. `to` is a language code such as "ru".
@@ -395,6 +471,28 @@ mod tests {
         let names = |text: &str, to: &str| Ok(Translation { text: text.into(), from: "en".into(), to: to.into() });
         let t = plan(&blocks(&["HAILUN", "petre"]), names).unwrap();
         assert_eq!(t.texts, [None, None]);
+    }
+    /// Names Google only wrote in Cyrillic stay as they are; real translations go over.
+    #[test]
+    fn transliterated_names_keep_their_original_spelling() {
+        for (name, cyrillic) in [
+            ("StarKoff", "СтарКофф"),
+            ("Blender", "Блендер"),
+            ("Valheim", "Вальхейм"),
+            ("Barotrauma", "Баротравма"),
+            ("Photoshop", "Фотошоп"),
+        ] {
+            assert!(transliterated(name, cyrillic), "{name} → {cyrillic}");
+        }
+        for (word, translation) in [
+            ("Settings", "Настройки"),
+            ("Escape from Tarkov", "Побег из Таркова"),
+            ("Cheers,", "Ура,"),
+            ("Add: (Firebird passive) Water Cannon shoots", "Добавлено: (пассивка Жар-птицы) Водомёт стреляет"),
+            ("OK", "ОК"),
+        ] {
+            assert!(!transliterated(word, translation), "{word} → {translation}");
+        }
     }
     #[test]
     #[ignore = "network: run with --ignored"]

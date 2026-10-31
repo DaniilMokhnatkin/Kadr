@@ -322,57 +322,128 @@ fn same_block(a: &Line, b: &Line) -> bool {
     (-h / 2..=h).contains(&gap) && aligned
 }
 
-/// A piece of text to translate in place: wrapped lines of one paragraph, joined with spaces.
+/// A piece of text to translate in place: one paragraph as it stands on the screen. Its items
+/// (a sentence run over wrapped lines, a list entry, a name) are separated by '\n'.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Block {
     pub text: String,
     pub rect: Rect,
     pub lines: usize,
+    /// Height of one line's letters, and the distance from one line to the next.
+    pub line_height: f32,
+    pub pitch: f32,
 }
 
-/// Lines grouped into paragraphs. A line joins the one above only when that one was wrapped: long,
-/// reaching the paragraph's right edge, and not ending a sentence (unless the next goes on in lower case).
-/// So a menu or a list of names keeps one block per line and each translation stays in its row.
-pub fn blocks(lines: &[Line]) -> Vec<Block> {
-    let mut out: Vec<Block> = Vec::new();
-    for (i, line) in lines.iter().enumerate() {
-        if line.text.trim().is_empty() {
-            continue;
-        }
-        let continues = i > 0 && out.last().is_some() && {
-            let (a, block) = (&lines[i - 1], out.last().unwrap());
-            let h = a.rect.height().max(line.rect.height()).max(1);
-            let right = block.rect.right.max(line.rect.right);
-            let lower = line.text.trim_start().chars().next().is_some_and(char::is_lowercase);
-            // A wrapped line is long, and the next line's first word would not have fitted after it
-            // (ragged right edges differ by up to a word). A sentence ending there closes the
-            // paragraph unless the next line goes on in lower case. Short lines are a list (names, menus).
-            let chars = a.text.chars().count();
-            let letter = a.rect.width() as f32 / chars.max(1) as f32;
-            let first = line.text.split_whitespace().next().map_or(0, |w| w.chars().count());
-            let wrapped = chars >= 18
-                && a.rect.right as f32 + (first + 1) as f32 * letter >= (right - h) as f32
-                && (lower || !a.text.trim_end().ends_with(['.', ':', '!', '?', ';']));
-            same_block(a, line) && wrapped
-        };
-        match out.last_mut() {
-            Some(block) if continues => {
-                block.text.push(' ');
-                block.text.push_str(line.text.trim());
-                block.rect = block.rect.union(&line.rect);
-                block.lines += 1;
+/// A list entry's mark: a bullet, «1.», «2)», or a short label such as «Add:» or «Fix:».
+fn marker(text: &str) -> bool {
+    let Some(first) = text.split_whitespace().next() else { return false };
+    let bullet = ["-", "–", "—", "•", "·", "*", "▪", "►"].contains(&first);
+    let number = first.len() <= 4
+        && first.ends_with(['.', ')'])
+        && first[..first.len() - 1].chars().all(|c| c.is_ascii_digit())
+        && first.len() > 1;
+    let label = first.ends_with(':') && (2..=12).contains(&first.chars().count());
+    bullet || number || label
+}
+
+/// Pieces of one row that the recognizer returned apart (wide spaces split them) are one line.
+fn rows(lines: &[Line]) -> Vec<Line> {
+    let mut sorted: Vec<&Line> = lines.iter().filter(|l| !l.text.trim().is_empty()).collect();
+    sorted.sort_by_key(|l| (l.rect.top, l.rect.left));
+    let mut out: Vec<Line> = Vec::new();
+    for line in sorted {
+        let joined = out.iter_mut().rev().take(6).find(|o| {
+            let h = o.rect.height().min(line.rect.height()).max(1);
+            let shared = o.rect.bottom.min(line.rect.bottom) - o.rect.top.max(line.rect.top);
+            let gap = line.rect.left - o.rect.right;
+            shared * 10 >= h * 6 && (0..=h * 2).contains(&gap)
+        });
+        match joined {
+            Some(o) => {
+                o.text = format!("{} {}", o.text.trim_end(), line.text.trim_start());
+                o.rect = o.rect.union(&line.rect);
+                o.words.extend(line.words.iter().cloned());
             }
-            _ => out.push(Block { text: line.text.trim().into(), rect: line.rect, lines: 1 }),
+            None => out.push(line.clone()),
         }
     }
     out
 }
 
+/// Lines grouped into paragraphs by where they stand, not by the recognizer's order: a line joins
+/// the paragraph whose last line is right above it, aligned, with letters of about the same size.
+/// Inside, a line goes on the item above when that one was wrapped (long, and the next line's
+/// first word would not have fitted after it) or when it goes on in lower case; a list mark or a
+/// short line above starts a new item. So prose becomes one text and a list keeps its rows.
+pub fn blocks(lines: &[Line]) -> Vec<Block> {
+    let rows = rows(lines);
+    let mut groups: Vec<Vec<&Line>> = Vec::new();
+    for line in &rows {
+        let h = line.rect.height().max(1);
+        let best = groups
+            .iter()
+            .enumerate()
+            .filter(|(_, g)| {
+                let last = g.last().unwrap();
+                let lh = last.rect.height().max(1);
+                // The gap a line break leaves: as in the paragraph so far, or small for its second
+                // line. A blank line between paragraphs is wider, and a heading's letters bigger.
+                let gap = line.rect.top - last.rect.bottom;
+                let allowed = match g.len() {
+                    1 => h.max(lh) * 4 / 5,
+                    n => ((last.rect.top - g[n - 2].rect.bottom).max(0) * 3 / 2 + 3).min(h.max(lh)),
+                };
+                let aligned = (last.rect.left - line.rect.left).abs() < h.max(lh) * 3
+                    || (last.rect.left < line.rect.right && line.rect.left < last.rect.right);
+                h.max(lh) * 100 <= h.min(lh) * 125 && aligned && (-h / 2..=allowed).contains(&gap)
+            })
+            .min_by_key(|(_, g)| line.rect.top - g.last().unwrap().rect.bottom)
+            .map(|(i, _)| i);
+        match best {
+            Some(i) => groups[i].push(line),
+            None => groups.push(vec![line]),
+        }
+    }
+    groups.into_iter().map(|g| paragraph(&g)).collect()
+}
+
+fn paragraph(lines: &[&Line]) -> Block {
+    let rect = lines.iter().skip(1).fold(lines[0].rect, |r, l| r.union(&l.rect));
+    let mut items: Vec<String> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let text = line.text.trim();
+        let continues = i > 0 && {
+            let a = lines[i - 1];
+            let h = a.rect.height().max(line.rect.height()).max(1);
+            let chars = a.text.chars().count();
+            let letter = a.rect.width() as f32 / chars.max(1) as f32;
+            let first = text.split_whitespace().next().map_or(0, |w| w.chars().count());
+            let lower = text.chars().next().is_some_and(char::is_lowercase);
+            let wrapped = chars >= 18 && a.rect.right as f32 + (first + 1) as f32 * letter >= (rect.right - h) as f32;
+            !marker(text) && ((lower && chars >= 14) || wrapped)
+        };
+        match items.last_mut() {
+            Some(item) if continues => {
+                item.push(' ');
+                item.push_str(text);
+            }
+            _ => items.push(text.to_string()),
+        }
+    }
+    let n = lines.len();
+    let line_height = lines.iter().map(|l| l.rect.height() as f32).sum::<f32>() / n as f32;
+    let pitch = if n > 1 { (lines[n - 1].rect.top - lines[0].rect.top) as f32 / (n - 1) as f32 } else { line_height };
+    Block { text: items.join("\n"), rect, lines: n, line_height, pitch: pitch.max(line_height) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn line(text: &str, l: i32, t: i32, r: i32, b: i32) -> Line {
+        Line { text: text.into(), rect: Rect::new(l, t, r, b), words: Vec::new() }
+    }
     #[test]
-    fn blocks_join_wrapped_paragraphs_and_keep_lists_line_by_line() {
+    fn blocks_are_whole_paragraphs_and_lists_keep_their_rows() {
         let lines = vec![
             line("Settings", 10, 10, 120, 34),
             line("The quick brown fox", 10, 80, 400, 100),
@@ -386,21 +457,15 @@ mod tests {
         let texts: Vec<&str> = b.iter().map(|b| b.text.as_str()).collect();
         assert_eq!(
             texts,
-            [
-                "Settings",
-                "The quick brown fox jumps over the lazy dog.",
-                "New game",
-                "Load",
-                "anerurkiola",
-                "gorkahornasg"
-            ]
+            ["Settings", "The quick brown fox jumps over the lazy dog.", "New game\nLoad\nanerurkiola\ngorkahornasg"]
         );
         assert_eq!((b[1].rect, b[1].lines), (Rect::new(10, 80, 420, 124), 2));
+        assert_eq!((b[1].line_height, b[1].pitch), (20.0, 24.0));
     }
     /// The Steam news case: a ragged paragraph whose first line ends far from the widest one,
-    /// because the next word was long. Then a list of changes, one sentence a line.
+    /// because the next word was long; then a change list whose entries start with «Add:».
     #[test]
-    fn a_ragged_paragraph_stays_one_block_and_sentence_lines_do_not_join() {
+    fn a_ragged_paragraph_is_one_text_and_a_change_list_keeps_its_entries() {
         let lines = vec![
             line("In this update we are making balance changes, mostly to Firebird. We made the", 0, 0, 640, 16),
             line(
@@ -411,16 +476,45 @@ mod tests {
                 38,
             ),
             line("two, the rest one.", 0, 44, 150, 60),
-            line("Added: AntiAirFireTimeMin, which overrides AntiAirFireLeadTimeMin.", 0, 90, 560, 106),
-            line("Added: AntiAirInclude and AntiAirExclude ammo properties, for weapons that", 0, 112, 600, 128),
+            line(
+                "Add: AntiAirFireTimeMin, which overrides AntiAirFireLeadTimeMin to make dome style AA fire",
+                0,
+                90,
+                700,
+                106,
+            ),
+            line("Add: AntiAirInclude and AntiAirExclude ammo properties, for weapons that", 0, 112, 600, 128),
             line("target them.", 0, 134, 100, 150),
         ];
         let b = blocks(&lines);
-        assert_eq!(b.iter().map(|b| b.lines).collect::<Vec<_>>(), [3, 1, 2]);
+        assert_eq!(b.iter().map(|b| b.lines).collect::<Vec<_>>(), [3, 3]);
         assert_eq!(b[0].rect, Rect::new(0, 0, 700, 60));
+        assert!(!b[0].text.contains('\n'), "{}", b[0].text);
+        assert_eq!(b[1].text.lines().count(), 2, "{}", b[1].text);
+        assert!(b[1].text.ends_with("for weapons that target them."), "{}", b[1].text);
     }
-    fn line(text: &str, l: i32, t: i32, r: i32, b: i32) -> Line {
-        Line { text: text.into(), rect: Rect::new(l, t, r, b), words: Vec::new() }
+    /// The recognizer's order is not the reading order, and it split a row at a wide space.
+    #[test]
+    fn paragraphs_come_from_where_lines_stand_not_from_the_recognizer_order() {
+        let lines = vec![
+            line("one, and hers will fire at flaming projectiles.", 0, 44, 380, 60),
+            line("Cheers,", 0, 120, 60, 136),
+            line("In this update we're dropping a volatile canister's worth of balance changes,", 0, 0, 620, 16),
+            line("the Water Cannon available in multiplayer and skirmish modes. The Firebird", 0, 22, 600, 38),
+            line("commander can build two while others only", 616, 22, 960, 38),
+            line("EWG", 0, 142, 36, 158),
+            line("mostly to the Firebird weapons. We've made", 632, 0, 980, 16),
+        ];
+        let b = blocks(&lines);
+        assert_eq!(b.len(), 2, "{b:#?}");
+        assert_eq!(b[0].lines, 3);
+        assert!(
+            b[0].text.starts_with("In this update") && b[0].text.ends_with("flaming projectiles."),
+            "{}",
+            b[0].text
+        );
+        assert!(!b[0].text.contains('\n'), "{}", b[0].text);
+        assert_eq!(b[1].text, "Cheers,\nEWG");
     }
     #[test]
     fn copied_text_keeps_lines_of_a_block_and_blank_lines_between_blocks() {

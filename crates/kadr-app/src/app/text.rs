@@ -201,7 +201,7 @@ fn translate_job(
         let around = |b: &crate::ocr::Block, by: i32| {
             DocRect::new(b.rect.left - by, b.rect.top - by, b.rect.right + by, b.rect.bottom + by)
         };
-        let half_line = |b: &crate::ocr::Block| b.rect.height() / b.lines.max(1) as i32 / 2;
+        let half_line = |b: &crate::ocr::Block| (b.line_height / 2.0) as i32;
         let block = blocks
             .iter()
             .find(|b| around(b, half_line(b)).contains(p))
@@ -211,15 +211,5 @@ fn translate_job(
         narrower = Some(Arc::new(Image::compose([image], area)));
         blocks = vec![block];
     }
-    if blocks.is_empty() {
-        return Err("В выделении не нашлось текста".into());
-    }
-    let texts: Vec<String> = blocks.iter().map(|b| b.text.clone()).collect();
-    let t = crate::translate::for_reader(&texts)?;
-    let blocks = blocks
-        .into_iter()
-        .zip(t.texts)
-        .map(|(b, translated)| lens::Block { rect: b.rect, lines: b.lines, original: b.text, translated })
-        .collect();
-    Ok((lens::Content::Ready { blocks, from: t.from, to: t.to }, narrower))
+    Ok((lens::translate(blocks)?, narrower))
 }

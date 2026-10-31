@@ -72,6 +72,20 @@ fn main() {
         }
         return;
     }
+    if let Some(i) = flag("--lens-check") {
+        let output = std::path::PathBuf::from(args.get(i + 1).map_or("lens-check.png", String::as_str));
+        let input = args.get(i + 2).filter(|a| !a.starts_with("--")).map(std::path::PathBuf::from);
+        let scale = flag("--scale").and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(1.0);
+        unsafe {
+            let _ =
+                windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        if let Err(e) = lens::check(&output, input.as_deref(), scale) {
+            eprintln!("lens check: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Some(i) = flag("--design-snapshots") {
         if let Err(e) = snapshot::design_set(args.get(i + 1).map_or("design-snapshots", String::as_str)) {
             kadr_win::log_warn!("design snapshots: {e}");

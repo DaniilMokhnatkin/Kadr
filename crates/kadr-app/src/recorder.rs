@@ -126,7 +126,7 @@ fn record(
     let mut sound = if gif {
         None
     } else {
-        Loopback::start().map_err(|e| log_warn!("запись: звук недоступен: {e}")).ok()
+        Loopback::start_in_time()
     };
     let sink = if gif {
         Sink::Gif(GifWriter::new(path, w, h).map_err(|e| Error::new(windows::Win32::Foundation::E_FAIL, e))?)
@@ -464,6 +464,33 @@ struct Loopback {
 }
 
 impl Loopback {
+    /// The sound, unless asking for it hangs: an antivirus that guards audio capture can hold the
+    /// call for good. Then the video goes without sound instead of never starting.
+    fn start_in_time() -> Option<Self> {
+        /// Made on one thread of the multithreaded apartment, used on another: WASAPI's objects
+        /// allow that, though the bindings cannot know it.
+        struct Handed(Result<Loopback>);
+        unsafe impl Send for Handed {}
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            unsafe {
+                let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            }
+            let _ = tx.send(Handed(Self::start()));
+        });
+        match rx.recv_timeout(Duration::from_secs(3)).map(|h| h.0) {
+            Ok(Ok(sound)) => Some(sound),
+            Ok(Err(e)) => {
+                log_warn!("запись: звук недоступен: {e}");
+                None
+            }
+            Err(_) => {
+                log_warn!("запись: звук не ответил за 3 с (его может держать антивирус) — видео без звука");
+                None
+            }
+        }
+    }
+
     fn start() -> Result<Self> {
         unsafe {
             let devices: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;

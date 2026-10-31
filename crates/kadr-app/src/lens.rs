@@ -11,11 +11,8 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use std::time::Instant;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
-use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
-use windows::Win32::Graphics::Direct2D::{
-    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, ID2D1Bitmap1,
-};
+use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F, D2D1_GRADIENT_STOP};
+use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CombineRgn, CreateRectRgn, DeleteObject, EndPaint, GetMonitorInfoW, HGDIOBJ, InvalidateRect,
@@ -26,7 +23,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_CONTROL, VK_ESCAPE, VK_SPACE,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{PCWSTR, w};
+use windows::core::{Interface, PCWSTR, w};
 use windows_numerics::Vector2;
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -42,6 +39,9 @@ pub struct Block {
     /// Desktop pixels.
     pub rect: Rect,
     pub lines: usize,
+    /// Height of one line's letters and the distance between lines, in pixels.
+    pub line_height: f32,
+    pub pitch: f32,
     pub original: String,
     /// `None`: it stays as it is (already in the reader's language, or a name).
     pub translated: Option<String>,
@@ -68,6 +68,10 @@ struct Fit {
 struct Shown {
     block: Block,
     background: D2D1_COLOR_F,
+    /// The backdrop at two opposite sides, and whether they are left and right (else top and bottom).
+    sides: (D2D1_COLOR_F, D2D1_COLOR_F, bool),
+    /// The patch's gradient between `sides`; made with the device.
+    brush: Option<ID2D1LinearGradientBrush>,
     ink: D2D1_COLOR_F,
     bold: bool,
     appear: Spring,
@@ -194,6 +198,39 @@ fn colours(image: &Image, r: Rect) -> ([u8; 3], [u8; 3], bool) {
     (background, ink, bold)
 }
 
+/// The background at two opposite sides of a block, along the axis where it changes more (a
+/// launcher's backdrop fades from side to side): the patch is a gradient between them, so it
+/// sits in the picture instead of on it. `true`: left to right.
+fn edges(image: &Image, r: Rect) -> ([u8; 3], [u8; 3], bool) {
+    let median = |points: Vec<Point>| {
+        let mut px: Vec<[u8; 3]> =
+            points.into_iter().filter_map(|p| image.pixel(p)).map(|p| [p[2], p[1], p[0]]).collect();
+        if px.is_empty() {
+            return None;
+        }
+        let mid = px.len() / 2;
+        Some([0, 1, 2].map(|c| px.select_nth_unstable_by_key(mid, |p| p[c]).1[c]))
+    };
+    let pad = 3;
+    let column = |x: i32| (r.top..r.bottom).map(|y| Point::new(x, y)).collect::<Vec<_>>();
+    let row = |y: i32| (r.left..r.right).map(|x| Point::new(x, y)).collect::<Vec<_>>();
+    let (left, right) = (median(column(r.left - pad)), median(column(r.right + pad - 1)));
+    let (top, bottom) = (median(row(r.top - pad)), median(row(r.bottom + pad - 1)));
+    let difference = |a: Option<[u8; 3]>, b: Option<[u8; 3]>| match (a, b) {
+        (Some(a), Some(b)) => a.iter().zip(&b).map(|(x, y)| x.abs_diff(*y) as u32).sum::<u32>(),
+        _ => 0,
+    };
+    let across = difference(left, right) >= difference(top, bottom);
+    let (a, b) = if across { (left, right) } else { (top, bottom) };
+    match (a, b) {
+        (Some(a), Some(b)) => (a, b, across),
+        _ => {
+            let (background, _, _) = colours(image, r);
+            (background, background, true)
+        }
+    }
+}
+
 fn color(c: [u8; 3]) -> D2D1_COLOR_F {
     D2D1_COLOR_F { r: c[0] as f32 / 255.0, g: c[1] as f32 / 255.0, b: c[2] as f32 / 255.0, a: 1.0 }
 }
@@ -255,20 +292,28 @@ fn fit(device: &Device, shown: &Shown, picture: Rect, (right, bottom): (i32, i32
     let r = shown.block.rect;
     let (x, y) = ((r.left - picture.left) as f32, (r.top - picture.top) as f32);
     let (w, h) = (r.width() as f32, r.height() as f32);
-    let line = h / shown.block.lines.max(1) as f32;
+    let line =
+        if shown.block.line_height > 0.0 { shown.block.line_height } else { h / shown.block.lines.max(1) as f32 };
+    let pitch = shown.block.pitch.max(line);
     let start = (line * 0.8).clamp(8.0, 120.0);
     let weight = if shown.bold { DWRITE_FONT_WEIGHT_SEMI_BOLD } else { DWRITE_FONT_WEIGHT_NORMAL };
     let width = ((right - r.left) as f32).max(w);
-    let tall = ((bottom - r.top) as f32).max(h);
+    // Lines spaced as in the original: n lines take n pitches, a little more than the box.
+    let leading = pitch - line;
+    // The room under it ends where the next text starts; the last line's leading may hang over.
+    let room = ((bottom - r.top) as f32).max(h);
+    let tall = room + leading * 0.5;
     let attempt = |size: f32| {
         let f = format(device, size, weight)?;
+        let spacing = (pitch * size / start).max(size * 1.15);
         unsafe {
             let _ = f.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+            let _ = f.SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, spacing, spacing * 0.8);
         }
         measure(device, &f, value, width)
     };
     let mut chosen = forced.and_then(|size| attempt(size).map(|(l, mw, mh)| (l, mw, mh, size)));
-    'search: for (limit, floor) in [(h * 1.1, 0.84), (tall, 0.72), (tall, 0.66)] {
+    'search: for (limit, floor) in [((h + leading) * 1.05, 0.84), (tall, 0.72), (tall, 0.66)] {
         let mut size = start;
         while chosen.is_none() && size >= (start * floor).max(8.0) {
             if let Some((layout, mw, mh)) = attempt(size)
@@ -286,18 +331,20 @@ fn fit(device: &Device, shown: &Shown, picture: Rect, (right, bottom): (i32, i32
         Some(found) => found,
         None => attempt(smallest).map(|(l, mw, mh)| (l, mw, mh, smallest))?,
     };
-    let pad = (line * 0.14).clamp(1.5, 8.0);
+    let pad = (line * 0.3).clamp(2.0, 12.0);
     let (pw, ph) = (picture.width() as f32, picture.height() as f32);
+    // Centred on the original when it fits; a longer text starts where the original did and grows down.
+    let top = y + ((h - mh) / 2.0).max(-leading / 2.0 - 1.0);
     // Up to the room, but always over the whole original.
     let max_right = (x + width).max(x + w + pad);
-    let max_bottom = (y + tall).max(y + h + pad);
+    let max_bottom = (y + room).max(y + h + pad);
     let patch = rect(
         (x - pad).max(0.0),
-        (y - pad).max(0.0),
+        (y.min(top) - pad).max(0.0),
         (x + w.max(mw) + pad).min(max_right).min(pw),
-        (y + h.max(mh) + pad).min(max_bottom).min(ph),
+        ((y + h).max(top + mh) + pad).min(max_bottom).min(ph),
     );
-    Some(Fit { layout, patch, at: (x, y + ((h - mh) / 2.0).max(0.0)), size, start })
+    Some(Fit { layout, patch, at: (x, top), size, start })
 }
 
 /// One size for text of one style in one column (a list, the paragraphs of an article): the
@@ -459,6 +506,7 @@ fn set_content(st: &mut State, content: Content) {
         let mut order = 0;
         for block in blocks {
             let (background, ink, bold) = colours(image, block.rect);
+            let (from, to, across) = edges(image, block.rect);
             let mut appear = Spring::with(0.0, Curve::POP).precise(0.002);
             if block.translated.is_some() {
                 appear.target_at(1.0, now, now + 0.04 * order as f64);
@@ -467,6 +515,8 @@ fn set_content(st: &mut State, content: Content) {
             st.blocks.push(Shown {
                 block: block.clone(),
                 background: color(background),
+                sides: (color(from), color(to), across),
+                brush: None,
                 ink: color(ink),
                 bold,
                 appear,
@@ -492,7 +542,7 @@ fn lay_out(st: &mut State) {
         .blocks
         .iter()
         .map(|b| {
-            let line = b.block.rect.height() as f32 / b.block.lines.max(1) as f32;
+            let line = b.block.line_height.max(1.0);
             b.fit.as_ref().map(|f| (f.size, f.start, b.block.rect.left, line))
         })
         .collect();
@@ -506,6 +556,42 @@ fn lay_out(st: &mut State) {
 }
 
 // ---- public --------------------------------------------------------------------------------
+
+/// The paragraphs found on the screen, translated for the reader. Blocking (network or the local
+/// translator): call from a worker. Each item of a paragraph (a sentence run, a list entry, a
+/// name) is a line for the translator; the paragraph is put back from its items, untranslated
+/// ones as they were.
+pub fn translate(blocks: Vec<crate::ocr::Block>) -> Result<Content, String> {
+    if blocks.is_empty() {
+        return Err("В выделении не нашлось текста".into());
+    }
+    let items: Vec<(usize, String)> = blocks
+        .iter()
+        .enumerate()
+        .flat_map(|(i, b)| b.text.split('\n').map(move |item| (i, item.to_string())))
+        .collect();
+    let t = crate::translate::for_reader(&items.iter().map(|(_, item)| item.clone()).collect::<Vec<_>>())?;
+    let mut parts: Vec<Vec<(String, Option<String>)>> = vec![Vec::new(); blocks.len()];
+    for ((i, item), translated) in items.into_iter().zip(t.texts) {
+        parts[i].push((item, translated));
+    }
+    let blocks = blocks
+        .into_iter()
+        .zip(parts)
+        .map(|(b, parts)| Block {
+            rect: b.rect,
+            lines: b.lines,
+            line_height: b.line_height,
+            pitch: b.pitch,
+            original: b.text,
+            translated: parts
+                .iter()
+                .any(|(_, t)| t.is_some())
+                .then(|| parts.iter().map(|(item, t)| t.as_deref().unwrap_or(item)).collect::<Vec<_>>().join("\n")),
+        })
+        .collect();
+    Ok(Content::Ready { blocks, from: t.from, to: t.to })
+}
 
 fn scale_at(r: Rect) -> f32 {
     let monitor = unsafe {
@@ -657,7 +743,40 @@ fn prepare(st: &mut State) {
     {
         st.bitmap = kadr_render::annotations::bitmap(&device.gpu, image).ok();
     }
+    if let Some(device) = st.device.as_ref() {
+        for b in st.blocks.iter_mut().filter(|b| b.brush.is_none() && b.block.translated.is_some()) {
+            b.brush = gradient(device, b.sides.0, b.sides.1);
+        }
+    }
     lay_out(st);
+}
+
+fn gradient(device: &Device, from: D2D1_COLOR_F, to: D2D1_COLOR_F) -> Option<ID2D1LinearGradientBrush> {
+    let ctx = &device.gpu.d2d;
+    let stops = [D2D1_GRADIENT_STOP { position: 0.0, color: from }, D2D1_GRADIENT_STOP { position: 1.0, color: to }];
+    unsafe {
+        let target: &ID2D1RenderTarget = ctx;
+        let stops = target.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).ok()?;
+        ctx.CreateLinearGradientBrush(&D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES::default(), None, &stops).ok()
+    }
+}
+
+/// A patch with soft edges: rings fading out around a solid core, so it melts into the picture
+/// around it instead of sitting on it as a box.
+fn soft_patch(device: &Device, brush: &ID2D1Brush, r: D2D_RECT_F, feather: f32, alpha: f32) {
+    let ctx = &device.gpu.d2d;
+    let steps = 5;
+    unsafe {
+        for k in (1..=steps).rev() {
+            let grow = feather * k as f32 / steps as f32;
+            brush.SetOpacity(alpha * 0.3);
+            let ring = D2D1_ROUNDED_RECT { rect: inflate(r, grow), radiusX: grow + 2.0, radiusY: grow + 2.0 };
+            ctx.FillRoundedRectangle(&ring, brush);
+        }
+        brush.SetOpacity(alpha);
+        ctx.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: r, radiusX: 2.0, radiusY: 2.0 }, brush);
+        brush.SetOpacity(1.0);
+    }
 }
 
 fn badge(device: &Device, f: &Fonts, theme: &Theme, center: (f32, f32), a: f32, s: f32) {
@@ -736,30 +855,58 @@ fn paint(device: &Device, st: &State) -> bool {
                     continue;
                 };
                 let a = sample(&b.appear).clamp(0.0, 1.0) * (1.0 - original);
+                if a <= 0.0 {
+                    continue;
+                }
                 let patch = shift(fit.patch);
-                if a > 0.0 {
-                    fill(gpu, fade(b.background, a), patch, 3.0 * s);
-                    unsafe {
-                        ctx.PushAxisAlignedClip(&patch, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-                        gpu.brush.SetColor(&fade(b.ink, a));
-                        ctx.DrawTextLayout(
-                            Vector2 { X: fit.at.0 + ox, Y: fit.at.1 + oy },
-                            &fit.layout,
-                            &gpu.brush,
-                            D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                        );
-                        ctx.PopAxisAlignedClip();
+                let feather = (b.block.line_height * 0.45).clamp(2.0, 14.0);
+                match &b.brush {
+                    Some(brush) => unsafe {
+                        let (across, (l, t, r, btm)) = (b.sides.2, (patch.left, patch.top, patch.right, patch.bottom));
+                        brush.SetStartPoint(Vector2 { X: l, Y: t });
+                        brush.SetEndPoint(if across { Vector2 { X: r, Y: t } } else { Vector2 { X: l, Y: btm } });
+                        soft_patch(device, brush, patch, feather, a);
+                    },
+                    None => {
+                        unsafe { gpu.brush.SetColor(&b.background) };
+                        soft_patch(device, &gpu.brush.cast().unwrap(), patch, feather, a);
                     }
                 }
+            }
+            // The words after all the patches: a neighbour's soft edge never covers them.
+            for b in &st.blocks {
+                let Some(fit) = &b.fit else { continue };
+                let a = sample(&b.appear).clamp(0.0, 1.0) * (1.0 - original);
+                if a <= 0.0 {
+                    continue;
+                }
+                let patch = shift(fit.patch);
+                unsafe {
+                    ctx.PushAxisAlignedClip(&patch, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                    gpu.brush.SetColor(&fade(b.ink, a));
+                    ctx.DrawTextLayout(
+                        Vector2 { X: fit.at.0 + ox, Y: fit.at.1 + oy },
+                        &fit.layout,
+                        &gpu.brush,
+                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                    );
+                    ctx.PopAxisAlignedClip();
+                }
+            }
+            for b in &st.blocks {
+                let Some(fit) = &b.fit else { continue };
+                let hover = sample(&b.hover);
                 if hover > 0.0 {
-                    stroke(gpu, fade(theme.accent, 0.9 * hover), inflate(patch, 2.0 * s), 5.0 * s, 1.5 * s);
+                    let ring = inflate(shift(fit.patch), 3.0 * s);
+                    fill(gpu, fade(theme.accent, 0.08 * hover), ring, 6.0 * s);
+                    stroke(gpu, fade(theme.accent, 0.85 * hover), ring, 6.0 * s, 1.5 * s);
                 }
             }
         }
         Content::Failed(_) => {}
     }
     // A hairline marks the frozen picture as Kadr's, not the live screen.
-    stroke(gpu, fade(theme.accent, 0.55 * appear), inflate(picture, -0.75 * s), 0.0, 1.5 * s);
+    stroke(gpu, fade(theme.accent, 0.4 * appear), inflate(picture, -0.5 * s), 0.0, 1.0 * s);
     if let Some((which, at)) = st.flash {
         let since = now - at;
         if since < FLASH {
@@ -1215,17 +1362,34 @@ pub fn preview(scale: f32, long: bool) -> windows::core::Result<Image> {
             blocks.push(Block {
                 rect: Rect::new(x, y, x + mw.ceil() as i32, y + mh.ceil() as i32),
                 lines: m.lineCount.max(1) as usize,
+                line_height: mh / m.lineCount.max(1) as f32 * 0.82,
+                pitch: mh / m.lineCount.max(1) as f32,
                 original: value.into(),
                 translated: (!translated.is_empty()).then(|| translated.into()),
             });
         }
     })?;
     let picture = Arc::new(Image::new(Rect::new(0, 0, w as i32, h as i32), picture.bgra));
+    let hover = if long { NEWS[2].0 } else { "Save changes" };
+    render(device, picture, Content::Ready { blocks, from: "en".into(), to: "ru".into() }, scale, Some(hover))
+}
+
+/// The lens as it would open over `picture`, fully appeared, the pointer over the block whose
+/// original is `hover`; the pill below it.
+fn render(
+    device: Device,
+    picture: Arc<Image>,
+    content: Content,
+    scale: f32,
+    hover: Option<&str>,
+) -> windows::core::Result<Image> {
+    let s = scale;
     let mut st = new_state(HWND::default(), scale);
     st.device = Some(device);
     st.image = Some(picture.clone());
-    set_content(&mut st, Content::Ready { blocks, from: "en".into(), to: "ru".into() });
-    let screen = Rect::new(0, 0, w as i32, h as i32 + (80.0 * s) as i32);
+    set_content(&mut st, content);
+    let r = picture.rect;
+    let screen = Rect::new(r.left, r.top, r.right, r.bottom + (80.0 * s) as i32);
     let width = pill_width(&mut st);
     let (window, pill) = arrange(picture.rect, screen, (width, PILL_H * s), s);
     st.picture_at = ((picture.rect.left - window.left) as f32, (picture.rect.top - window.top) as f32);
@@ -1236,8 +1400,7 @@ pub fn preview(scale: f32, long: bool) -> windows::core::Result<Image> {
         b.appear.snap(1.0);
     }
     prepare(&mut st);
-    let pointer = st.blocks.iter().position(|b| b.block.original == if long { NEWS[2].0 } else { "Save changes" });
-    if let Some(i) = pointer {
+    if let Some(i) = st.blocks.iter().position(|b| Some(b.block.original.as_str()) == hover) {
         st.hover = Some(Hit::Block(i));
         st.blocks[i].hover.snap(1.0);
     }
@@ -1245,6 +1408,136 @@ pub fn preview(scale: f32, long: bool) -> windows::core::Result<Image> {
     glass::render_offscreen(device, window.width() as u32, window.height() as u32, || {
         paint(device, &st);
     })
+}
+
+// ---- development check -----------------------------------------------------------------------
+
+/// The text of a game launcher's news page, as wide paragraphs and a change list.
+const PAGE: [(&str, f32, DWRITE_FONT_WEIGHT); 11] = [
+    ("G'day Forts fans!", 30.0, DWRITE_FONT_WEIGHT_BOLD),
+    (
+        "In this update we're dropping a volatile canister's worth of balance changes, mostly to the Firebird weapons. We've made the Water Cannon available in multiplayer and skirmish modes. The Firebird commander can build two while others only one, and hers will fire at flaming projectiles.",
+        15.0,
+        DWRITE_FONT_WEIGHT_NORMAL,
+    ),
+    (
+        "Co-op on Elimination has been refreshed with voting and weapons only mode. You can either reject a joining player altogether, or give them the ability to only fire and repair. The lobby can be set to 'Weapons Only' so there's no option of full control.",
+        15.0,
+        DWRITE_FONT_WEIGHT_NORMAL,
+    ),
+    (
+        "In ranked matches you can now opt-in to reveal your name either during loading, or at the end of the match. You can also chose to chat with your opponent. Both players must agree for this to work.",
+        15.0,
+        DWRITE_FONT_WEIGHT_NORMAL,
+    ),
+    (
+        "We've fixed a load of crashes, desyncs, mission problems, security issues, and other misc bugs. As always let us know if you find more.",
+        15.0,
+        DWRITE_FONT_WEIGHT_NORMAL,
+    ),
+    ("Cheers,\nEWG", 15.0, DWRITE_FONT_WEIGHT_NORMAL),
+    ("Change List 1.39.0 r22735", 26.0, DWRITE_FONT_WEIGHT_NORMAL),
+    ("Add: (Firebird passive) Water Cannon shoots at flaming projectiles", 15.0, DWRITE_FONT_WEIGHT_NORMAL),
+    (
+        "Add: AntiAirFireTimeMin to override AntiAirFireLeadTimeMin to make dome style AA weapons fire with less restriction",
+        15.0,
+        DWRITE_FONT_WEIGHT_NORMAL,
+    ),
+    (
+        "Add: AntiAirInclude and AntiAirExclude ammo properties which act the same as those in ai.lua to allow ammo specific AA targeting",
+        15.0,
+        DWRITE_FONT_WEIGHT_NORMAL,
+    ),
+    (
+        "Add: AntiAirIncludeConditions ammo property which allows ammo specific AA targeting based on projectile data",
+        15.0,
+        DWRITE_FONT_WEIGHT_NORMAL,
+    ),
+];
+
+/// The news page drawn at `scale` on a launcher's dim backdrop that warms from left to right.
+fn page(device: &Device, scale: f32) -> windows::core::Result<Image> {
+    let s = scale;
+    let (w, h) = ((840.0 * s) as u32, (700.0 * s) as u32);
+    let picture = glass::render_offscreen(device, w, h, || {
+        let gpu = &device.gpu;
+        if let Some(brush) = gradient(device, glass::rgb(0x343a4e, 1.0), glass::rgb(0x4a3d58, 1.0)) {
+            unsafe {
+                brush.SetStartPoint(Vector2 { X: 0.0, Y: 0.0 });
+                brush.SetEndPoint(Vector2 { X: w as f32, Y: 0.0 });
+                gpu.d2d.FillRectangle(&rect(0.0, 0.0, w as f32, h as f32), &brush);
+            }
+        }
+        let mut y = 20.0 * s;
+        for (value, size, weight) in PAGE {
+            let Some(f) = format(device, size * s, weight) else { continue };
+            unsafe {
+                let _ = f.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+            }
+            let Some((layout, _, mh)) = measure(device, &f, value, 800.0 * s) else { continue };
+            unsafe {
+                gpu.brush.SetColor(&glass::rgb(0xe6e9ef, 1.0));
+                gpu.d2d.DrawTextLayout(Vector2 { X: 20.0 * s, Y: y }, &layout, &gpu.brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
+            }
+            let list = value.starts_with("Add:");
+            y += mh + if list { 6.0 } else { 20.0 } * s;
+        }
+    })?;
+    Ok(Image::new(Rect::new(0, 0, w as i32, h as i32), picture.bgra))
+}
+
+/// Any picture Windows can open, as opaque BGRA.
+fn load(path: &std::path::Path) -> windows::core::Result<Image> {
+    use windows::Graphics::Imaging::{BitmapAlphaMode, BitmapDecoder, BitmapPixelFormat};
+    use windows::Security::Cryptography::CryptographicBuffer;
+    use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream};
+    let bytes = std::fs::read(path)
+        .map_err(|e| windows::core::Error::new(windows::Win32::Foundation::E_FAIL, e.to_string()))?;
+    let stream = InMemoryRandomAccessStream::new()?;
+    let writer = DataWriter::CreateDataWriter(&stream)?;
+    writer.WriteBytes(&bytes)?;
+    writer.StoreAsync()?.join()?;
+    writer.FlushAsync()?.join()?;
+    writer.DetachStream()?;
+    stream.Seek(0)?;
+    let decoder = BitmapDecoder::CreateAsync(&stream)?.join()?;
+    let bitmap = decoder.GetSoftwareBitmapConvertedAsync(BitmapPixelFormat::Bgra8, BitmapAlphaMode::Ignore)?.join()?;
+    let (w, h) = (bitmap.PixelWidth()?, bitmap.PixelHeight()?);
+    let buffer = windows::Storage::Streams::Buffer::Create((w * h * 4) as u32)?;
+    bitmap.CopyToBuffer(&buffer)?;
+    let mut data = windows::core::Array::<u8>::new();
+    CryptographicBuffer::CopyToByteArray(&buffer, &mut data)?;
+    let mut bgra = data.to_vec();
+    for px in bgra.as_chunks_mut::<4>().0 {
+        px[3] = 255;
+    }
+    Ok(Image::new(Rect::new(0, 0, w, h), bgra))
+}
+
+/// `kadr.exe --lens-check out.png [in.png]`: the real recognition and translation of a picture
+/// (or of the news page above), drawn as the lens would show it. Only the recognised text goes to
+/// the translator, as in Kadr itself. The paragraphs found are printed.
+pub fn check(output: &std::path::Path, input: Option<&std::path::Path>, scale: f32) -> Result<(), String> {
+    let device = Device::new("lens-check").map_err(|e| e.message())?;
+    let picture = match input {
+        Some(path) => load(path),
+        None => page(&device, scale),
+    }
+    .map_err(|e| format!("картинка: {}", e.message()))?;
+    let lines = crate::ocr::recognize(&picture).map_err(|e| format!("распознавание: {}", e.message()))?;
+    let blocks = crate::ocr::blocks(&lines);
+    for b in &blocks {
+        println!("[{} строк, {:?}] {}", b.lines, b.rect, b.text.replace('\n', " ⏎ "));
+    }
+    let content = translate(blocks)?;
+    if let Content::Ready { blocks, from, to } = &content {
+        println!("--- {from} → {to}");
+        for b in blocks {
+            println!("{}", b.translated.as_deref().unwrap_or("(как есть)").replace('\n', " ⏎ "));
+        }
+    }
+    let image = render(device, Arc::new(picture), content, scale, None).map_err(|e| e.message())?;
+    std::fs::write(output, kadr_doc::pixels::encode_png(&image).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -1297,6 +1590,8 @@ mod tests {
         let block = |o: &str, t: Option<&str>| Block {
             rect: Rect::new(0, 0, 10, 10),
             lines: 1,
+            line_height: 10.0,
+            pitch: 10.0,
             original: o.into(),
             translated: t.map(Into::into),
         };
