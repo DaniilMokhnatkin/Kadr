@@ -33,6 +33,8 @@ impl Curve {
     pub const TRACK: Curve = Curve { response: 0.16, damping: 1.0 };
     /// Screen dimming when the overlay opens.
     pub const DIM: Curve = Curve { response: 0.22, damping: 1.0 };
+    /// A tapped control gives under the finger and springs back with a small rebound.
+    pub const PRESS: Curve = Curve { response: 0.30, damping: 0.5 };
 
     fn omega(self) -> f32 {
         std::f32::consts::TAU / self.response.max(0.001)
@@ -121,6 +123,14 @@ impl Spring {
         self.started = start.max(now);
     }
 
+    /// A push of `velocity` from wherever the spring is now; it settles back to its goal. With
+    /// `Curve::PRESS` a velocity of about 38 peaks near 1 after ~60 ms and rebounds ~16 %.
+    pub fn kick(&mut self, velocity: f32, now: f64) {
+        (self.origin, self.velocity) = self.sample(now);
+        self.velocity += velocity;
+        self.started = now;
+    }
+
     pub fn snap(&mut self, value: f32) {
         self.origin = value;
         self.goal = value;
@@ -140,6 +150,21 @@ impl Spring {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The tap on a toolbar button: gives about 1 within a frame or four, rebounds a little past
+    /// rest (the swell that makes it feel physical), and is still within a second.
+    #[test]
+    fn a_kicked_press_gives_rebounds_and_settles() {
+        let mut s = Spring::with(0.0, Curve::PRESS).precise(0.001);
+        s.kick(38.0, 0.0);
+        let samples: Vec<(f64, f32)> = (0..=60).map(|i| (i as f64 * 0.01, s.value(i as f64 * 0.01))).collect();
+        let (at, peak) = samples.iter().copied().max_by(|a, b| a.1.total_cmp(&b.1)).unwrap();
+        assert!((0.85..1.15).contains(&peak), "peak {peak}");
+        assert!((0.03..0.1).contains(&at), "peak at {at}");
+        let rebound = samples.iter().map(|(_, v)| *v).fold(0.0f32, f32::min);
+        assert!((-0.3..-0.05).contains(&rebound), "rebound {rebound}");
+        assert_eq!(s.value(1.0), 0.0);
+        assert!(!s.active(1.0));
+    }
     #[test]
     fn motion_has_the_same_position_at_sixty_one_seventy_and_two_forty_hz() {
         for curve in [Curve::LAYOUT, Curve::POP, Curve::FADE] {

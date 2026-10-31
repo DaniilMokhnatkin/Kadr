@@ -37,6 +37,8 @@ struct Control {
     opacity: Spring,
     hover: Spring,
     selected: Spring,
+    /// A tap's give: kicked on press, springs back with a small rebound.
+    press: Spring,
     /// When the pointer arrived; tooltips wait for a resting pointer.
     hover_since: f64,
     live: bool,
@@ -54,6 +56,8 @@ pub(super) struct Button {
     pub opacity: f32,
     pub hover: f32,
     pub selected: f32,
+    /// How far the control gives under a tap: 0 at rest, about 1 at the deepest, below 0 on the rebound.
+    pub press: f32,
     pub live: bool,
     pub enabled: bool,
     pub property: bool,
@@ -236,8 +240,15 @@ impl State {
                     || c.opacity.active(now)
                     || c.hover.active(now)
                     || c.selected.active(now)
+                    || c.press.active(now)
                     || (c.live && c.hover.goal() > 0.5 && now - c.hover_since < TIP_DELAY + 0.2)
             })
+    }
+    /// A tap on `button`: it gives a little and springs back, so the press is felt, not only seen.
+    pub fn press(&mut self, button: ToolbarButton, now: f64) {
+        for c in self.controls.iter_mut().filter(|c| c.live && c.enabled && c.button == button) {
+            c.press.kick(38.0, now);
+        }
     }
     pub fn sample(
         &mut self,
@@ -283,6 +294,7 @@ impl State {
                         opacity: 1.0,
                         hover: f32::from(self.hovered == Some(*b)),
                         selected: f32::from(selected(*b, property(*b, id / 64), e)),
+                        press: 0.0,
                         live: true,
                         enabled: enabled(*b, e),
                         property: property(*b, id / 64),
@@ -321,6 +333,7 @@ impl State {
                     opacity: Spring::with(if fresh { 1.0 } else { 0.0 }, Curve::FADE_IN).precise(0.002),
                     hover: Spring::with(0.0, Curve::HOVER_IN).precise(0.002),
                     selected: Spring::with(0.0, Curve::FADE).precise(0.002),
+                    press: Spring::with(0.0, Curve::PRESS).precise(0.001),
                     hover_since: now,
                     live: true,
                     exiting: false,
@@ -412,6 +425,7 @@ impl State {
                     opacity: c.opacity.value(now).clamp(0.0, 1.0),
                     hover: c.hover.value(now).clamp(0.0, 1.0),
                     selected: c.selected.value(now).clamp(0.0, 1.0),
+                    press: c.press.value(now),
                     live: c.live,
                     enabled: c.enabled,
                     property: c.property,

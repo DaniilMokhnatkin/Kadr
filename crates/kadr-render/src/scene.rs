@@ -99,6 +99,12 @@ impl TextStyles {
     fn animation_time(&self) -> f64 {
         self.time_override.get().unwrap_or_else(|| self.epoch.elapsed().as_secs_f64())
     }
+    /// The toolbar button just pressed gives and springs back on the next frames.
+    pub fn press_toolbar(&self, button: ToolbarButton) {
+        if self.animate.get() {
+            self.motion.borrow_mut().press(button, self.animation_time());
+        }
+    }
     fn displayed(
         &self,
         target: &ToolbarLayout,
@@ -499,6 +505,8 @@ fn toolbar_layout(
     *text.toolbar.borrow_mut() = Some((key, layout.clone()));
     Ok(layout)
 }
+/// Room a labelled pill gives its icon before the caption: the icon sits in its own 32 px box.
+const PILL_ICON: f32 = 40.0;
 fn build_toolbar_layout(
     shared: &Shared,
     text: &TextStyles,
@@ -516,7 +524,7 @@ fn build_toolbar_layout(
     let pad = 12.0 * s;
     let gap = 4.0 * s;
     let side = 40.0 * s;
-    let panel_w = (if editor.is_some() { 760.0 } else { 544.0 } * s).min((w - 16.0 * s).max(1.0));
+    let panel_w = (if editor.is_some() { 984.0 } else { 728.0 } * s).min((w - 16.0 * s).max(1.0));
     let content_w = (panel_w - 2.0 * pad).max(side);
     let mut buttons = Vec::new();
     let empty = measure(shared, &text.button, "")?;
@@ -595,56 +603,82 @@ fn build_toolbar_layout(
             row(properties, gap)?;
         }
     }
-    let actions = if editor.is_some() {
+    // One system for the action row: icon buttons on the left, in groups with air between them;
+    // labelled pills of one kind on the right, ending with the primary «Копировать».
+    let groups: Vec<Vec<ToolbarButton>> = if editor.is_some() {
         vec![
-            ToolbarButton::Undo,
-            ToolbarButton::Redo,
-            ToolbarButton::Recent,
-            ToolbarButton::Pin,
-            ToolbarButton::Text,
-            ToolbarButton::Translate,
-            ToolbarButton::Record,
-            ToolbarButton::SaveAs,
-            ToolbarButton::Save,
-            ToolbarButton::Close,
-            ToolbarButton::Smart,
-            ToolbarButton::Copy,
+            vec![ToolbarButton::Close],
+            vec![ToolbarButton::Undo, ToolbarButton::Redo],
+            vec![
+                ToolbarButton::Recent,
+                ToolbarButton::Pin,
+                ToolbarButton::Text,
+                ToolbarButton::Record,
+                ToolbarButton::Save,
+            ],
         ]
     } else {
         vec![
-            ToolbarButton::Recent,
-            ToolbarButton::Pin,
-            ToolbarButton::Text,
-            ToolbarButton::Translate,
-            ToolbarButton::Record,
-            ToolbarButton::SaveAs,
-            ToolbarButton::Save,
-            ToolbarButton::Close,
-            ToolbarButton::Copy,
+            vec![ToolbarButton::Close],
+            vec![
+                ToolbarButton::Recent,
+                ToolbarButton::Pin,
+                ToolbarButton::Text,
+                ToolbarButton::Record,
+                ToolbarButton::Save,
+            ],
         ]
     };
-    row(
-        actions
-            .into_iter()
-            .map(|b| {
-                (
-                    b,
-                    match b {
-                        ToolbarButton::Copy => "Копировать".into(),
-                        ToolbarButton::Smart => smart_label(editor.map(|e| e.smart).unwrap_or_default()),
-                        _ => String::new(),
-                    },
-                    match b {
-                        ToolbarButton::Copy => (120.0 * s).min(content_w),
-                        // The one labelled action besides Copy: wide enough to read at a glance.
-                        ToolbarButton::Smart => (164.0 * s).min(content_w),
-                        _ => side,
-                    },
-                )
-            })
-            .collect(),
-        gap,
-    )?;
+    let pills: Vec<ToolbarButton> = if editor.is_some() {
+        vec![ToolbarButton::Translate, ToolbarButton::Smart, ToolbarButton::SaveAs, ToolbarButton::Copy]
+    } else {
+        vec![ToolbarButton::Translate, ToolbarButton::SaveAs, ToolbarButton::Copy]
+    };
+    let group_gap = 14.0 * s;
+    let mut left = pad;
+    for (g, group) in groups.iter().enumerate() {
+        if g > 0 {
+            left += group_gap - gap;
+        }
+        for &b in group {
+            if left + side > panel_w - pad + 0.1 && left > pad {
+                left = pad;
+                top += side + gap;
+            }
+            buttons.push((b, rect(left, top, left + side, top + side), empty.clone()));
+            left += side + gap;
+        }
+    }
+    let mut measured = Vec::new();
+    for &b in &pills {
+        let value = match b {
+            ToolbarButton::Smart => smart_label(editor.map(|e| e.smart).unwrap_or_default()),
+            other => other.label().trim_end_matches('…').to_string(),
+        };
+        let label = measure(shared, &text.button, &value)?;
+        // Icon, caption and even margins; «Цензура» keeps one width as its caption changes.
+        let mut width = PILL_ICON * s + label.w + 16.0 * s;
+        if b == ToolbarButton::Smart {
+            width = width.max(150.0 * s);
+        }
+        measured.push((b, width.ceil(), label));
+    }
+    let pills_w: f32 = measured.iter().map(|(_, w, _)| w).sum::<f32>() + 6.0 * s * (measured.len() - 1) as f32;
+    // No room beside the icons on a narrow screen: the pills take a row of their own.
+    if left - gap + group_gap + pills_w > panel_w - pad {
+        top += side + gap;
+    }
+    let mut right = panel_w - pad;
+    for (b, width, label) in measured.into_iter().rev() {
+        let width = width.min(content_w);
+        if right - width < pad - 0.1 && right < panel_w - pad {
+            right = panel_w - pad;
+            top += side + gap;
+        }
+        buttons.push((b, rect(right - width, top, right, top + side), label));
+        right -= width + 6.0 * s;
+    }
+    top += side + 8.0 * s;
     let panel_h = top - 8.0 * s + pad;
     let offset = 12.0 * s;
     let mut y = sel.bottom + offset;
@@ -772,6 +806,16 @@ fn draw_toolbar(
                 gpu.d2d.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             }
         }
+        // A tapped control gives under the finger and springs back: drawn smaller around its centre.
+        let pressed = (c.press.abs() > 0.001).then(|| unsafe {
+            let mut outer = Matrix3x2::default();
+            gpu.d2d.GetTransform(&mut outer);
+            let k = 1.0 - 0.07 * c.press;
+            let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+            let squeeze = Matrix3x2 { M11: k, M12: 0.0, M21: 0.0, M22: k, M31: cx * (1.0 - k), M32: cy * (1.0 - k) };
+            gpu.d2d.SetTransform(&(squeeze * outer));
+            outer
+        });
         if let ToolbarButton::Color(i) = button {
             let rgb = COLORS[*i];
             let ink = D2D1_COLOR_F { r: rgb[0] as f32 / 255.0, g: rgb[1] as f32 / 255.0, b: rgb[2] as f32 / 255.0, a };
@@ -788,26 +832,35 @@ fn draw_toolbar(
                 gpu.brush.SetColor(&fade(theme.hairline, a));
                 gpu.d2d.DrawEllipse(&e, &gpu.brush, s, None::<&ID2D1StrokeStyle>);
             }
-        } else if *button == ToolbarButton::Smart {
-            // Always filled, so it reads as a feature and not as one more icon. On, it takes the
-            // selection tint; while searching a glint runs through it.
-            let state = toolbar.editor.map(|e| e.smart).unwrap_or_default();
-            let base = mix(theme.control, theme.selected, c.selected);
-            fill_rounded(gpu, fade(mix(base, theme.tint_strong, 0.5 * c.hover * (1.0 - c.selected)), a), *r, 10.0 * s);
-            if matches!(state, SmartUi::Scanning(_)) {
-                let phase = (text.animation_time() * 0.9).fract() as f32;
-                shimmer(gpu, *r, phase, 70.0 * s, if theme.dark { 0.22 } else { 0.55 } * a, 10.0 * s);
-            }
-            let ink = fade(mix(theme.text, theme.on_selected, c.selected), a);
-            let icon = rect(r.left + 4.0 * s, r.top, r.left + 36.0 * s, r.bottom);
+        } else if c.enabled
+            && matches!(
+                button,
+                ToolbarButton::Smart | ToolbarButton::Translate | ToolbarButton::SaveAs | ToolbarButton::Copy
+            )
+        {
+            // The labelled pills: one shape, icon then caption. Tonal fill for features, the accent
+            // for the primary «Копировать». «Цензура», on, takes the selection tint; while
+            // searching a glint runs through it.
+            let ink = if *button == ToolbarButton::Copy {
+                fill_rounded(gpu, fade(mix(theme.accent, theme.on_accent, 0.12 * c.hover), a), *r, 10.0 * s);
+                fade(theme.on_accent, a)
+            } else {
+                let state = toolbar.editor.map(|e| e.smart).unwrap_or_default();
+                let base = mix(theme.control, theme.selected, c.selected);
+                let fill = mix(base, theme.tint_strong, 0.5 * c.hover * (1.0 - c.selected));
+                fill_rounded(gpu, fade(fill, a), *r, 10.0 * s);
+                if *button == ToolbarButton::Smart && matches!(state, SmartUi::Scanning(_)) {
+                    let phase = (text.animation_time() * 0.9).fract() as f32;
+                    shimmer(gpu, *r, phase, 70.0 * s, if theme.dark { 0.22 } else { 0.55 } * a, 10.0 * s);
+                }
+                fade(mix(theme.text, theme.on_selected, c.selected), a)
+            };
+            let icon = rect(r.left + 6.0 * s, r.top, r.left + 38.0 * s, r.bottom);
             glyphs::draw(gpu, *button, icon, ink, s);
-            draw_text(gpu, label, icon.right, r.top + (r.bottom - r.top - label.h) / 2.0, ink);
+            draw_text(gpu, label, r.left + PILL_ICON * s, r.top + (r.bottom - r.top - label.h) / 2.0, ink);
         } else {
             let ink = if !c.enabled {
                 fade(theme.disabled, a)
-            } else if *button == ToolbarButton::Copy {
-                fill_rounded(gpu, fade(mix(theme.accent, theme.on_accent, 0.12 * c.hover), a), *r, 10.0 * s);
-                fade(theme.on_accent, a)
             } else {
                 // Main-row tools take their tint from how much of the gliding pill covers them, so
                 // the colour travels with the pill instead of jumping ahead of it.
@@ -837,6 +890,9 @@ fn draw_toolbar(
             } else {
                 glyphs::draw(gpu, *button, *r, ink, s);
             }
+        }
+        if let Some(outer) = pressed {
+            unsafe { gpu.d2d.SetTransform(&outer) };
         }
         if c.property {
             unsafe {

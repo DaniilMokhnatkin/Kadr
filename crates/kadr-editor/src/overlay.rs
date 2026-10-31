@@ -268,6 +268,11 @@ impl Overlay {
         scene::toolbar_hit(shared, &self.text, self.rect, self.scale, selection, (p.x, p.y), editor)
     }
 
+    /// A tap on a toolbar button: it gives and springs back (the next frames show it).
+    pub fn toolbar_press(&self, button: ToolbarButton) {
+        self.text.press_toolbar(button);
+    }
+
     pub fn contains(&self, p: POINT) -> bool {
         let r = self.rect;
         p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom

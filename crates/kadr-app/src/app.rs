@@ -1015,7 +1015,11 @@ impl App {
         }
         if let Some(button) = hit {
             if msg == WM_LBUTTONDOWN {
+                for overlay in &self.overlays {
+                    overlay.toolbar_press(button);
+                }
                 self.press(button);
+                self.request_redraw();
             }
             return;
         }
