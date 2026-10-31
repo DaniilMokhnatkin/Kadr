@@ -267,6 +267,24 @@ function Test-VcRuntime {
     $false
 }
 
+# What a translation manifest installs: each archive by name and checksum.
+function Get-TranslationPack([string]$path) {
+    $pack=Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+    (@($pack.assets | Where-Object { $_.kind -ne 'vcredist' } | ForEach-Object { "$($_.name)|$($_.sha256)" }) -join ';').ToLowerInvariant()
+}
+
+# One real translation through the worker. UTF-8 without a BOM: the console's code page (or a
+# BOM) would garble the request on some systems.
+function Test-TranslationWorker([string]$python, [string]$worker) {
+    $OutputEncoding=[Text.UTF8Encoding]::new($false)
+    $probe=@('{"text":"Hello","to":"ru"}' | & $python -I -u $worker)
+    if ($LASTEXITCODE -ne 0) {throw "Офлайн-переводчик не запустился (код $LASTEXITCODE)"}
+    $line=$probe | Where-Object { $_ -and $_.Trim().StartsWith('{') } | Select-Object -Last 1
+    if (-not $line) {throw 'Офлайн-переводчик ничего не ответил на проверке'}
+    $reply=$line | ConvertFrom-Json
+    if ($reply.error -or -not $reply.text) {throw "Офлайн-переводчик не прошёл проверку: $($reply.error)"}
+}
+
 function Install-TranslationFiles {
     if (-not $TranslationManifest) { $TranslationManifest=Join-Path $PSScriptRoot 'translation-manifest.json' }
     if (-not $TranslationWorker) { $TranslationWorker=Join-Path $PSScriptRoot 'translation-worker.py' }
@@ -278,12 +296,31 @@ function Install-TranslationFiles {
     $installed=Join-Path $InstallDir 'translation'
     $previousManifest=Join-Path $installed 'install-manifest.json'
     $previousWorker=Join-Path $installed 'translation-worker.py'
+    $python=Join-Path $installed 'python\python.exe'
+    # The same pack (archive names and checksums; not the manifest's bytes, whose line endings
+    # depend on where the setup was built) is reused as it is: an update downloads nothing.
     if ((Test-Path -LiteralPath $previousManifest) -and (Test-Path -LiteralPath $previousWorker) -and
-        (Test-Path -LiteralPath (Join-Path $installed 'python\python.exe')) -and
+        (Test-Path -LiteralPath $python) -and
         (Test-Path -LiteralPath (Join-Path $installed 'models\translate-en_ru-1_9\model\model.bin')) -and
         (Test-Path -LiteralPath (Join-Path $installed 'models\translate-ru_en-1_9\model\model.bin')) -and
-        (Get-FileHash -LiteralPath $previousManifest).Hash -eq (Get-FileHash -LiteralPath $TranslationManifest).Hash -and
-        (Get-FileHash -LiteralPath $previousWorker).Hash -eq (Get-FileHash -LiteralPath $TranslationWorker).Hash) {
+        (Get-TranslationPack $previousManifest) -eq (Get-TranslationPack $TranslationManifest)) {
+        $text={param($path) [IO.File]::ReadAllText($path).Replace("`r`n", "`n")}
+        if ((& $text $previousWorker) -ne (& $text $TranslationWorker)) {
+            # Only the small worker script is new: swap it, keep the old one if the new does not answer.
+            Report 'progress translation Проверка перевода…'
+            $backup="$previousWorker.old"
+            Copy-Item -LiteralPath $previousWorker -Destination $backup -Force
+            try {
+                Copy-Item -LiteralPath $TranslationWorker -Destination $previousWorker -Force
+                Test-TranslationWorker $python $previousWorker
+            } catch {
+                Copy-Item -LiteralPath $backup -Destination $previousWorker -Force
+                throw
+            } finally {
+                Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
+            }
+        }
+        Copy-Item -LiteralPath $TranslationManifest -Destination $previousManifest -Force
         return
     }
     # Leftovers of earlier runs: a stage that failed half-way, a version replaced before.
@@ -331,16 +368,9 @@ function Install-TranslationFiles {
         Copy-Item -LiteralPath $TranslationWorker -Destination (Join-Path $stage 'translation-worker.py') -Force
         Copy-Item -LiteralPath $TranslationManifest -Destination (Join-Path $stage 'install-manifest.json') -Force
         Get-ChildItem -LiteralPath $stage -Recurse -File | Unblock-File -ErrorAction SilentlyContinue
-        # Test a real inference before replacing a previously installed component. UTF-8 without
-        # a BOM: the console's code page (or a BOM) would garble the request on some systems.
-        $OutputEncoding=[Text.UTF8Encoding]::new($false)
+        # Test a real inference before replacing a previously installed component.
         Report 'progress translation Проверка перевода…'
-        $probe=@('{"text":"Hello","to":"ru"}' | & (Join-Path $runtime 'python.exe') -I -u (Join-Path $stage 'translation-worker.py'))
-        if ($LASTEXITCODE -ne 0) {throw "Офлайн-переводчик не запустился (код $LASTEXITCODE)"}
-        $line=$probe | Where-Object { $_ -and $_.Trim().StartsWith('{') } | Select-Object -Last 1
-        if (-not $line) {throw 'Офлайн-переводчик ничего не ответил на проверке'}
-        $reply=$line | ConvertFrom-Json
-        if ($reply.error -or -not $reply.text) {throw "Офлайн-переводчик не прошёл проверку: $($reply.error)"}
+        Test-TranslationWorker (Join-Path $runtime 'python.exe') (Join-Path $stage 'translation-worker.py')
         # A worker left running from the previous version would keep the folder locked.
         Get-Process python -ErrorAction SilentlyContinue |
             Where-Object { $_.Path -and $_.Path.StartsWith($installed, [StringComparison]::OrdinalIgnoreCase) } |

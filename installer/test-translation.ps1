@@ -3,7 +3,7 @@ $ErrorActionPreference='Stop'
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'install.ps1'),[ref]$tokens,[ref]$errors)
 if ($errors.Count) {throw $errors[0]}
-foreach ($name in 'Save-Download','Test-TranslationAsset','Get-TranslationAsset','Test-VcRuntime','Install-TranslationFiles','Install-Translation') {
+foreach ($name in 'Save-Download','Test-TranslationAsset','Get-TranslationAsset','Test-VcRuntime','Get-TranslationPack','Test-TranslationWorker','Install-TranslationFiles','Install-Translation') {
     $fn=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true)
     if (-not $fn) {throw "install.ps1 has no $name"}
     . ([scriptblock]::Create($fn.Extent.Text))
@@ -33,15 +33,36 @@ try {
     Install-Translation; & $ok 'First install'
     $runtime=Join-Path $InstallDir 'translation\python\python.exe'
     if (-not (Test-Path -LiteralPath $runtime)) {throw 'Portable runtime was not installed'}
+    # A file the installed pack never had: a reinstall would drop it.
+    $marker=Join-Path $InstallDir 'translation\kept-marker'
+    Set-Content -LiteralPath $marker -Value 'kept'
+    $TranslationCache=$null
     # Unchanged component is reused without any download or replacement.
     Install-Translation; & $ok 'Reuse'
-    # A changed worker triggers a replacement; the previous copy is cleaned up once the new one works.
+    # The same manifest with other line endings (a setup built elsewhere) is the same pack.
+    $crlf=Join-Path $fixture 'crlf-manifest.json'
+    [IO.File]::WriteAllText($crlf, [IO.File]::ReadAllText($TranslationManifest).Replace("`r`n", "`n").Replace("`n", "`r`n"))
+    $TranslationManifest=$crlf
+    Install-Translation; & $ok 'Reuse with CRLF manifest'
+    if (-not (Test-Path -LiteralPath $marker)) {throw 'Line endings alone made the pack install again'}
+    # A changed worker is swapped in place and checked; the pack is not downloaded again.
     $updatedWorker=Join-Path $fixture 'updated-worker.py'
     Copy-Item -LiteralPath $TranslationWorker -Destination $updatedWorker
     Add-Content -LiteralPath $updatedWorker -Value '# component update fixture' -Encoding UTF8
     $TranslationWorker=$updatedWorker
     Install-Translation; & $ok 'Update'
+    if (-not (Test-Path -LiteralPath $marker)) {throw 'A new worker made the pack install again'}
+    if ((Get-Content -LiteralPath (Join-Path $InstallDir 'translation\translation-worker.py') -Raw) -notlike '*component update fixture*') {throw 'The new worker was not installed'}
     if (@(Get-ChildItem $InstallDir -Directory | Where-Object Name -like 'translation-*-*').Count -ne 0) {throw 'Stage or previous copy left behind'}
+    # A worker that does not answer is rolled back.
+    $badWorker=Join-Path $fixture 'bad-worker.py'
+    Set-Content -LiteralPath $badWorker -Value 'raise SystemExit(3)' -Encoding UTF8
+    $TranslationWorker=$badWorker
+    Install-Translation
+    if ($script:reports[-1] -notlike 'warn translation *') {throw "A broken worker must be a warning: $($script:reports[-1])"}
+    if ((Get-Content -LiteralPath (Join-Path $InstallDir 'translation\translation-worker.py') -Raw) -notlike '*component update fixture*') {throw 'A broken worker replaced the working one'}
+    $TranslationWorker=$updatedWorker
+    $TranslationCache=Join-Path $root 'dist\translation-downloads'
     # Nothing to download from and no cache: a warning, the working component stays, no exception.
     $broken=Join-Path $fixture 'broken-manifest.json'
     $manifest.assets[0].url=$null

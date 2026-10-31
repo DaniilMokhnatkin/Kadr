@@ -1,0 +1,4 @@
+# Embedded into the setup byte for byte: the same bytes wherever it is built (a Windows CI
+# checkout would otherwise turn them into CRLF).
+installer/*.json text eol=lf
+installer/*.py text eol=lf

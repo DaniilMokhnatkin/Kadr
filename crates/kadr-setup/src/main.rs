@@ -112,6 +112,39 @@ const ENGINES: [(&str, &str, &[&str], &[&str]); 2] = [
     ),
 ];
 
+/// Kadr already on this computer, and how it was set up. The setup then updates it with the same
+/// choices instead of starting from scratch: no tour, and nothing downloaded twice.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Installed {
+    autostart: bool,
+    paddle: bool,
+    translation: bool,
+}
+
+fn installed() -> Option<Installed> {
+    let dir = std::path::PathBuf::from(std::env::var_os("ProgramFiles")?).join("Kadr");
+    if !dir.join("kadr.exe").is_file() {
+        return None;
+    }
+    let paddle = std::fs::read_to_string(dir.join("ocr-engine.txt"))
+        .map_or_else(|_| dir.join("ocr").is_dir(), |engine| engine.trim() != "windows");
+    let translation = dir.join("translation").join("install-manifest.json").is_file()
+        && dir.join("translation").join("python").join("python.exe").is_file();
+    let autostart = unsafe {
+        windows::Win32::System::Registry::RegGetValueW(
+            windows::Win32::System::Registry::HKEY_CURRENT_USER,
+            w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run"),
+            w!("Kadr"),
+            windows::Win32::System::Registry::RRF_RT_REG_SZ,
+            None,
+            None,
+            None,
+        )
+    }
+    .is_ok();
+    Some(Installed { autostart, paddle, translation })
+}
+
 #[derive(Clone, PartialEq)]
 enum Step {
     Waiting,
@@ -182,6 +215,8 @@ struct App {
     adding_paddle: bool,
     /// The offer of PaddleOCR was turned down.
     offer_declined: bool,
+    /// Kadr is already installed: this run is an update.
+    existing: Option<Installed>,
 }
 
 thread_local! {
@@ -216,6 +251,7 @@ impl App {
         Some(match self.page {
             WELCOME => "Начать",
             p if p <= ENGINE => "Далее",
+            READY if self.existing.is_some() => "Обновить",
             READY => "Установить",
             INSTALLING => return None,
             _ if self.failed.is_some() => "Повторить",
@@ -610,8 +646,17 @@ fn main() {
         glass::match_appearance(hwnd);
     }
     let spring = |c: Curve| Spring::with(0.0, c).precise(0.001);
+    // Over an installed Kadr: straight to the update, with the choices made last time.
+    let existing = installed();
+    let options = existing.map_or([true, true], |e| [e.autostart, e.translation]);
+    let paddle = existing.is_none_or(|e| e.paddle);
+    let page = if existing.is_some() { READY } else { WELCOME };
     let mut knobs = [spring(Curve::POP), spring(Curve::POP)];
-    knobs.iter_mut().for_each(|k| k.snap(1.0));
+    knobs.iter_mut().zip(options).for_each(|(k, on)| k.snap(f32::from(on)));
+    let mut slide = spring(Curve::LAYOUT);
+    slide.snap(page as f32);
+    let mut choice = spring(Curve::GLIDE);
+    choice.snap(if paddle { 0.0 } else { 1.0 });
     APP.with(|a| {
         *a.borrow_mut() = Some(App {
             hwnd,
@@ -621,27 +666,30 @@ fn main() {
             logo: None,
             scale,
             epoch: Instant::now(),
-            page: WELCOME,
-            slide: spring(Curve::LAYOUT),
+            page,
+            slide,
             entered: [0.0; PAGES],
             hover: None,
             glow: Vec::new(),
-            options: [true, true],
+            options,
             knobs,
             payload: install::payload(),
             task: None,
             plan: Vec::new(),
             live: None,
-            paddle: true,
-            choice: spring(Curve::GLIDE),
+            paddle,
+            choice,
             adding_paddle: false,
             offer_declined: false,
             steps: vec![Step::Waiting; STEPS.len()],
             declined: false,
             failed: None,
             progress: spring(Curve::GLIDE),
+            existing,
         })
     });
+    // Started by Kadr's own «Обновить»: that was the decision, so the update begins at once.
+    let start_now = existing.is_some() && args.iter().any(|a| a == "--update");
     // Centred on the monitor under the pointer.
     unsafe {
         let mut p = POINT::default();
@@ -662,6 +710,13 @@ fn main() {
         );
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
+        if start_now {
+            APP.with(|a| {
+                if let Some(app) = a.borrow_mut().as_mut() {
+                    app.primary();
+                }
+            });
+        }
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             let _ = TranslateMessage(&msg);
@@ -1151,24 +1206,40 @@ fn draw_page(
         }
         READY => {
             let (r, alpha) = lifted(rect(40.0 * s, 64.0 * s, w - 80.0 * s, 104.0 * s), 0);
-            text(gpu, &f.title, "Одно разрешение — и готово", r, fade(theme.text, alpha));
+            let update = app.existing.is_some();
+            let title =
+                if update { "Обновление Kadr" } else { "Одно разрешение — и готово" };
+            text(gpu, &f.title, title, r, fade(theme.text, alpha));
             let (r, alpha) = lifted(rect(40.0 * s, 110.0 * s, w - 80.0 * s, 136.0 * s), 1);
-            text(
-                gpu,
-                &f.lead,
-                "Windows попросит разрешение администратора. Оно нужно один раз, чтобы:",
-                r,
-                fade(theme.text_muted, alpha),
-            );
-            let reasons = [
-                "Kadr работал поверх любых окон — даже Диспетчера задач",
-                "подписать Kadr сертификатом, созданным прямо на этом компьютере",
-                if app.paddle {
-                    "положить Kadr и PaddleOCR в Program Files"
-                } else {
-                    "положить Kadr в Program Files и докачать распознавание текста Windows"
-                },
-            ];
+            let lead = if update {
+                "Настройки и снимки сохранятся. Разрешение администратора нужно, чтобы:"
+            } else {
+                "Windows попросит разрешение администратора. Оно нужно один раз, чтобы:"
+            };
+            text(gpu, &f.lead, lead, r, fade(theme.text_muted, alpha));
+            let kept = match (app.paddle, app.existing.is_some_and(|e| e.translation)) {
+                (true, true) => "оставить PaddleOCR и офлайн-перевод — без повторной загрузки",
+                (true, false) => "обновить PaddleOCR — он внутри установщика, качать ничего не нужно",
+                (false, true) => "оставить распознавание Windows и офлайн-перевод как есть",
+                (false, false) => "оставить распознавание текста Windows как есть",
+            };
+            let reasons = if update {
+                [
+                    "заменить Kadr в Program Files новой версией",
+                    "подписать её сертификатом этого компьютера, как и раньше",
+                    kept,
+                ]
+            } else {
+                [
+                    "Kadr работал поверх любых окон — даже Диспетчера задач",
+                    "подписать Kadr сертификатом, созданным прямо на этом компьютере",
+                    if app.paddle {
+                        "положить Kadr и PaddleOCR в Program Files"
+                    } else {
+                        "положить Kadr в Program Files и докачать распознавание текста Windows"
+                    },
+                ]
+            };
             for (n, reason) in reasons.iter().enumerate() {
                 let y = 150.0 * s + n as f32 * 34.0 * s;
                 let (row, alpha) = lifted(rect(40.0 * s, y, w - 40.0 * s, y + 30.0 * s), 2 + n);
@@ -1193,7 +1264,14 @@ fn draw_page(
             // Options.
             let options = [
                 ("Запускать вместе с Windows", "Kadr будет ждать PrtSc сразу после входа"),
-                ("Офлайн-перевод EN ↔ RU", "Скачать около 440 МБ один раз; затем без интернета и ключей"),
+                (
+                    "Офлайн-перевод EN ↔ RU",
+                    if app.existing.is_some_and(|e| e.translation) {
+                        "Уже установлен — заново скачивать не нужно"
+                    } else {
+                        "Скачать около 440 МБ один раз; затем без интернета и ключей"
+                    },
+                ),
             ];
             let group = rect(l.toggles[0].left, l.toggles[0].top, l.toggles[1].right, l.toggles[1].bottom);
             let (g, alpha) = lifted(group, 5);
@@ -1432,7 +1510,7 @@ fn draw_page(
                     "Kadr уже распознаёт текст через PaddleOCR — ничего перезапускать не нужно. Нажмите PrtSc, выделите текст и нажмите «Текст».".to_string(),
                 ),
                 None => (
-                    "Kadr установлен",
+                    if app.existing.is_some() { "Kadr обновлён" } else { "Kadr установлен" },
                     format!(
                         "Значок Kadr уже в трее, рядом с часами. Нажмите PrtSc — и выделите область.\n{}",
                         if app.options[0] {
@@ -1643,7 +1721,7 @@ fn snapshots(folder: &std::path::Path, scale: f32) -> windows::core::Result<()> 
     let (w, h) = ((WIDTH * scale) as u32, (HEIGHT * scale) as u32);
     let _ = std::fs::create_dir_all(folder);
     // (name, page, seconds into the page)
-    let shots: [(&str, usize, f64); 19] = [
+    let shots: [(&str, usize, f64); 21] = [
         ("01-welcome", WELCOME, 2.0),
         ("02-select", 1, 1.9),
         ("03-draw", 2, 3.2),
@@ -1657,6 +1735,8 @@ fn snapshots(folder: &std::path::Path, scale: f32) -> windows::core::Result<()> 
         ("11-engine", ENGINE, 2.0),
         ("11b-engine-windows", ENGINE, 2.0),
         ("12-ready", READY, 2.0),
+        ("12b-update", READY, 2.0),
+        ("12c-update-no-translation", READY, 2.0),
         ("13-installing", INSTALLING, 2.0),
         ("13b-installing-windows", INSTALLING, 2.0),
         ("14-done", DONE, 2.0),
@@ -1692,11 +1772,19 @@ fn snapshots(folder: &std::path::Path, scale: f32) -> windows::core::Result<()> 
             steps: vec![Step::Waiting; STEPS.len()],
             declined: false,
             failed: (name == "15-failed").then(|| "Подпись не удалась: сертификат недоступен.".to_string()),
+            existing: name.contains("update").then_some(Installed {
+                autostart: true,
+                paddle: true,
+                translation: !name.contains("no-translation"),
+            }),
             progress: spring(Curve::GLIDE),
         };
         app.fonts = Some(fonts(&device.shared, scale).unwrap());
         app.slide.snap(page as f32);
-        app.knobs.iter_mut().for_each(|k| k.snap(1.0));
+        if let Some(e) = app.existing {
+            app.options = [e.autostart, e.translation];
+        }
+        app.knobs.iter_mut().zip(app.options).for_each(|(k, on)| k.snap(f32::from(on)));
         let windows = name.contains("windows") || name == "16-offer-paddle";
         if windows {
             app.paddle = false;

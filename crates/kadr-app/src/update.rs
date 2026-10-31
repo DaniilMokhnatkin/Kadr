@@ -191,7 +191,8 @@ fn download_and_run(release: &Release) -> Result<(), String> {
             None,
             windows::core::w!("open"),
             windows::core::PCWSTR(file.as_ptr()),
-            windows::core::PCWSTR::null(),
+            // The setup then updates at once with the choices made when Kadr was installed.
+            windows::core::w!("--update"),
             windows::core::PCWSTR::null(),
             SW_SHOWNORMAL,
         )

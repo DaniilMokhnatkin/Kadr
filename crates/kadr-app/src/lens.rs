@@ -235,7 +235,8 @@ fn room(rects: &[(Rect, usize)], i: usize, picture: Rect) -> (i32, i32) {
     let (r, lines) = rects[i];
     let line = (r.height() / lines.max(1) as i32).max(1);
     let others = || rects.iter().enumerate().filter(move |(j, _)| *j != i).map(|(_, (o, _))| *o);
-    let column = others().filter(|o| (o.left - r.left).abs() <= 3 * line).map(|o| o.right).max().unwrap_or(picture.right);
+    let column =
+        others().filter(|o| (o.left - r.left).abs() <= 3 * line).map(|o| o.right).max().unwrap_or(picture.right);
     let beside =
         others().filter(|o| o.left >= r.right && o.top < r.bottom && o.bottom > r.top).map(|o| o.left - line / 2);
     let right = beside.min().map_or(column, |b| column.min(b)).max(r.right).min(picture.right);
