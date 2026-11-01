@@ -189,7 +189,7 @@ pub enum ToolbarButton {
 
 impl ToolbarButton {
     pub const ALL: [ToolbarButton; 8] =
-        [Self::Copy, Self::Save, Self::SaveAs, Self::Pin, Self::Recent, Self::Text, Self::Translate, Self::Close];
+        [Self::Copy, Self::Record, Self::SaveAs, Self::Pin, Self::Recent, Self::Text, Self::Translate, Self::Close];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -524,7 +524,7 @@ fn build_toolbar_layout(
     let pad = 12.0 * s;
     let gap = 4.0 * s;
     let side = 40.0 * s;
-    let panel_w = (if editor.is_some() { 984.0 } else { 728.0 } * s).min((w - 16.0 * s).max(1.0));
+    let panel_w = (if editor.is_some() { 1040.0 } else { 800.0 } * s).min((w - 16.0 * s).max(1.0));
     let content_w = (panel_w - 2.0 * pad).max(side);
     let mut buttons = Vec::new();
     let empty = measure(shared, &text.button, "")?;
@@ -609,30 +609,22 @@ fn build_toolbar_layout(
         vec![
             vec![ToolbarButton::Close],
             vec![ToolbarButton::Undo, ToolbarButton::Redo],
-            vec![
-                ToolbarButton::Recent,
-                ToolbarButton::Pin,
-                ToolbarButton::Text,
-                ToolbarButton::Record,
-                ToolbarButton::Save,
-            ],
+            vec![ToolbarButton::Recent, ToolbarButton::Pin, ToolbarButton::Text],
         ]
     } else {
-        vec![
-            vec![ToolbarButton::Close],
-            vec![
-                ToolbarButton::Recent,
-                ToolbarButton::Pin,
-                ToolbarButton::Text,
-                ToolbarButton::Record,
-                ToolbarButton::Save,
-            ],
-        ]
+        vec![vec![ToolbarButton::Close], vec![ToolbarButton::Recent, ToolbarButton::Pin, ToolbarButton::Text]]
     };
+    // Plain «Сохранить» stays on Ctrl+S; the panel offers «Сохранить как…» only.
     let pills: Vec<ToolbarButton> = if editor.is_some() {
-        vec![ToolbarButton::Translate, ToolbarButton::Smart, ToolbarButton::SaveAs, ToolbarButton::Copy]
+        vec![
+            ToolbarButton::Record,
+            ToolbarButton::Translate,
+            ToolbarButton::Smart,
+            ToolbarButton::SaveAs,
+            ToolbarButton::Copy,
+        ]
     } else {
-        vec![ToolbarButton::Translate, ToolbarButton::SaveAs, ToolbarButton::Copy]
+        vec![ToolbarButton::Record, ToolbarButton::Translate, ToolbarButton::SaveAs, ToolbarButton::Copy]
     };
     let group_gap = 14.0 * s;
     let mut left = pad;
@@ -653,6 +645,7 @@ fn build_toolbar_layout(
     for &b in &pills {
         let value = match b {
             ToolbarButton::Smart => smart_label(editor.map(|e| e.smart).unwrap_or_default()),
+            ToolbarButton::Record => "Запись".to_string(),
             other => other.label().trim_end_matches('…').to_string(),
         };
         let label = measure(shared, &text.button, &value)?;
@@ -835,7 +828,11 @@ fn draw_toolbar(
         } else if c.enabled
             && matches!(
                 button,
-                ToolbarButton::Smart | ToolbarButton::Translate | ToolbarButton::SaveAs | ToolbarButton::Copy
+                ToolbarButton::Smart
+                    | ToolbarButton::Translate
+                    | ToolbarButton::Record
+                    | ToolbarButton::SaveAs
+                    | ToolbarButton::Copy
             )
         {
             // The labelled pills: one shape, icon then caption. Tonal fill for features, the accent

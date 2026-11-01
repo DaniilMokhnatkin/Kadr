@@ -159,6 +159,14 @@ impl Annotation {
                     b = b.max(*y);
                 }
             }
+            // The head's wings reach out beyond the shaft (see the renderer).
+            Tool::Arrow => {
+                let wing = (self.width as i32 * 4 + 18) * 5 / 8 + 1;
+                l -= wing;
+                t -= wing;
+                r += wing;
+                b += wing;
+            }
             Tool::Counter => {
                 let radius = self.font_size() * 3 / 4;
                 l -= radius;

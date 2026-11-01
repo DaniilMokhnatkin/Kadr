@@ -169,11 +169,10 @@ pub(super) fn draw(gpu: &Gpu, button: ToolbarButton, r: D2D_RECT_F, ink: D2D1_CO
                 p.line((12.0, 4.5), (12.0, 19.5));
                 p.line((9.0, 19.5), (15.0, 19.5));
             }
-            // A numbered marker pointing at its spot, with an optically centred «1».
+            // A numbered badge: a ring with an optically centred «1».
             Tool::Counter => {
-                p.ellipse((12.0, 11.0), 7.5, 7.5);
-                p.dot((12.0, 21.0), 1.2);
-                p.path(&[(12.3, 8.8), (14.0, 7.6), (14.0, 12.6)]);
+                p.ellipse((12.0, 12.0), 8.5, 8.5);
+                p.path(&[(10.0, 9.4), (12.8, 7.6), (12.8, 16.4)]);
             }
             Tool::Blur => {
                 p.rounded(4.0, 4.0, 20.0, 20.0, 2.5);

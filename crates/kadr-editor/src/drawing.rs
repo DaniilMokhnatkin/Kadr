@@ -409,7 +409,9 @@ impl Drawing {
             } else {
                 let mut end = [p.x, p.y];
                 let start = shape.points[0];
-                if shift || matches!(shape.tool, Tool::Ellipse | Tool::Lens) {
+                // Shift keeps a square, a circle or a straight line; the lens is always round.
+                let round = shape.tool == Tool::Lens || (shift && shape.tool == Tool::Ellipse);
+                if shift || round {
                     let dx = end[0] - start[0];
                     let dy = end[1] - start[1];
                     let side = dx.abs().max(dy.abs());
@@ -428,7 +430,7 @@ impl Drawing {
                         ];
                     }
                 }
-                if matches!(shape.tool, Tool::Ellipse | Tool::Lens) {
+                if round {
                     let sx = if end[0] < start[0] { -1 } else { 1 };
                     let sy = if end[1] < start[1] { -1 } else { 1 };
                     let room_x = if sx < 0 { start[0] - crop.left } else { crop.right - 1 - start[0] };
@@ -457,8 +459,19 @@ impl Drawing {
                 self.shapes[i] = shape;
             } else {
                 let target = drag_handle(&bounds, edit.handle, edit.start, p, &crop);
-                self.shapes[i] = edit.shape.transformed(bounds, target);
-                self.shapes[i].width = edit.shape.width;
+                let shape = edit.shape.transformed(bounds, target);
+                // Strokes keep their width when a shape is resized; a numbered badge is the
+                // exception: its size is its width, so the bubble grows and shrinks with the frame.
+                let width = if shape.tool == Tool::Counter {
+                    let k = (target.width() as f64 / bounds.width().max(1) as f64
+                        + target.height() as f64 / bounds.height().max(1) as f64)
+                        / 2.0;
+                    (((edit.shape.font_size() as f64 * k - 12.0) / 4.0).round() as u32).clamp(1, 64)
+                } else {
+                    edit.shape.width
+                };
+                self.shapes[i] = shape;
+                self.shapes[i].width = width;
             }
             return true;
         }
@@ -657,19 +670,41 @@ mod tests {
         assert_eq!(d.shapes()[0], before);
     }
     #[test]
-    fn circle_is_round_then_can_be_stretched_from_its_handle() {
+    fn oval_follows_the_pointer_shift_makes_a_circle_and_its_handle_stretches_it() {
         let mut d = Drawing::default();
         d.set_tool(Tool::Ellipse);
         d.down(Point::new(100, 100), C, 1);
         d.up(Point::new(180, 140), C, false);
-        let r = d.shapes()[0].rect();
+        assert_eq!((d.shapes()[0].rect().width(), d.shapes()[0].rect().height()), (81, 41));
+        d.down(Point::new(300, 100), C, 1);
+        d.up(Point::new(380, 140), C, true);
+        let r = d.shapes()[1].rect();
         assert_eq!(r.width(), r.height());
         let handle = d.selected_control().unwrap();
         d.down(handle, C, 1);
         d.up(Point::new(handle.x + 80, handle.y), C, false);
-        assert!(d.shapes()[0].rect().width() > d.shapes()[0].rect().height());
+        assert!(d.shapes()[1].rect().width() > d.shapes()[1].rect().height());
         d.undo();
-        assert_eq!(d.shapes()[0].rect(), r);
+        assert_eq!(d.shapes()[1].rect(), r);
+    }
+    #[test]
+    fn resizing_a_numbered_badge_grows_the_bubble_not_just_its_tail() {
+        let mut d = Drawing::default();
+        d.set_tool(Tool::Counter);
+        d.down(Point::new(200, 200), C, 1);
+        d.up(Point::new(200, 200), C, false);
+        let before = d.shapes()[0].clone();
+        let b = before.bounds();
+        d.set_tool(Tool::Select);
+        d.down(Point::new(200, 200), C, 1);
+        d.up(Point::new(200, 200), C, false);
+        d.down(Point::new(b.right, b.bottom), C, 1);
+        d.up(Point::new(b.right + b.width(), b.bottom + b.height()), C, false);
+        let after = &d.shapes()[0];
+        let grown = after.font_size() as f64 / before.font_size() as f64;
+        assert!((1.7..2.3).contains(&grown), "badge grew ×{grown}");
+        d.undo();
+        assert_eq!(d.shapes()[0], before);
     }
     #[test]
     fn numbered_bubble_stays_round_until_its_separate_tail_handle_is_pulled() {

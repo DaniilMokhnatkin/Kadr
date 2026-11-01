@@ -349,25 +349,44 @@ fn draw_shape(
                 s.width as f32,
                 None,
             ),
-            Tool::Line | Tool::Arrow => {
-                gpu.d2d.DrawLine(a, b, &gpu.brush, s.width as f32, None);
-                if s.tool == Tool::Arrow {
-                    let angle = (b.Y - a.Y).atan2(b.X - a.X);
-                    let len =
-                        (s.width as f32 * 4.0 + 10.0).min(((b.X - a.X).powi(2) + (b.Y - a.Y).powi(2)).sqrt() * 0.6);
-                    let tip = |delta: f32| Vector2 {
-                        X: b.X - len * (angle + delta).cos(),
-                        Y: b.Y - len * (angle + delta).sin(),
-                    };
-                    let geometry = shared.d2d.CreatePathGeometry()?;
-                    let sink = geometry.Open()?;
-                    sink.BeginFigure(b, D2D1_FIGURE_BEGIN_FILLED);
-                    sink.AddLine(tip(0.45));
-                    sink.AddLine(tip(-0.45));
-                    sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-                    sink.Close()?;
-                    gpu.d2d.FillGeometry(&geometry, &gpu.brush, None);
+            Tool::Line => gpu.d2d.DrawLine(a, b, &gpu.brush, s.width as f32, None),
+            // One filled outline: a shaft that tapers from the chosen width at the head to a round
+            // tail, and a broad head with swept-back wings. The shaft never pokes past the tip.
+            Tool::Arrow => {
+                let (dx, dy) = (b.X - a.X, b.Y - a.Y);
+                let length = dx.hypot(dy);
+                if length < 1.0 {
+                    return Ok(());
                 }
+                let w = s.width as f32;
+                let (u, n) = ((dx / length, dy / length), (-dy / length, dx / length));
+                let head = (w * 4.0 + 18.0).min(length * 0.55);
+                let (wing, neck, tail) = (head * 0.62, (w * 0.65).max(1.5), (w * 0.25).max(1.0));
+                let at = |back: f32, side: f32| Vector2 {
+                    X: b.X - u.0 * back + n.0 * side,
+                    Y: b.Y - u.1 * back + n.1 * side,
+                };
+                let geometry = shared.d2d.CreatePathGeometry()?;
+                let sink = geometry.Open()?;
+                sink.BeginFigure(at(length, tail), D2D1_FIGURE_BEGIN_FILLED);
+                sink.AddLines(&[
+                    at(head * 0.78, neck),
+                    at(head, wing),
+                    b,
+                    at(head, -wing),
+                    at(head * 0.78, -neck),
+                    at(length, -tail),
+                ]);
+                sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                sink.Close()?;
+                gpu.d2d.FillGeometry(&geometry, &gpu.brush, None);
+                // A hairline with round joins softens the tip and wing corners.
+                let round = shared.d2d.CreateStrokeStyle(
+                    &D2D1_STROKE_STYLE_PROPERTIES1 { lineJoin: D2D1_LINE_JOIN_ROUND, ..Default::default() },
+                    None,
+                )?;
+                gpu.d2d.DrawGeometry(&geometry, &gpu.brush, 1.5, &round);
+                gpu.d2d.FillEllipse(&D2D1_ELLIPSE { point: a, radiusX: tail, radiusY: tail }, &gpu.brush);
             }
             Tool::Pen | Tool::Marker => {
                 let geometry = shared.d2d.CreatePathGeometry()?;
