@@ -1,6 +1,6 @@
-//! Censor: each press of the pill steps the level — off → light → hard → full → off. A level finds
-//! what to hide in the selection and blurs it; the next press dissolves those blurs away and
-//! searches again at the next level. The search runs on a worker (local OCR, nothing leaves the
+//! Censor: the pill opens a drawer of levels on «Без цензуры», which searches nothing. A level finds
+//! what to hide in the selection and blurs it; another choice dissolves those blurs away and
+//! searches again at the new level. The search runs on a worker (local OCR, nothing leaves the
 //! computer). Areas appear in reading order, each dissolving into its blur with a brief accent
 //! outline; on the way out the original dissolves back before the blur is removed.
 use super::*;
@@ -15,6 +15,8 @@ const GLOW: f64 = 0.84;
 
 #[derive(Default)]
 pub(super) struct Smart {
+    /// The drawer of levels is open. Opening it starts no search.
+    open: bool,
     original: bool,
     /// The level being searched right now.
     scanning: Option<Censor>,
@@ -134,15 +136,23 @@ impl App {
     }
 
     pub(super) fn smart_ui(&self, d: &Drawing) -> SmartUi {
-        if let Some(level) = self.smart.scanning.or(self.smart.then) {
-            return SmartUi::Scanning(level);
+        let hiding = self.smart.anim.as_ref().is_some_and(|a| !a.showing);
+        let level = self.smart.level.map(|level| (level, d.smart_shapes().len().min(u16::MAX as usize) as u16));
+        pill(self.smart.open, self.smart.scanning.or(self.smart.then), hiding, level)
+    }
+
+    /// The pill: open the drawer on «Без цензуры», or close it and take the level away.
+    pub(super) fn toggle_censor_drawer(&mut self) {
+        // Blurs still arriving: the same press waits, as a level choice does.
+        if self.active.is_none() || self.smart.anim.is_some() {
+            return;
         }
-        if self.smart.anim.as_ref().is_some_and(|a| !a.showing) {
-            return SmartUi::Off;
-        }
-        match self.smart.level {
-            Some(level) => SmartUi::On(level, d.smart_shapes().len().min(u16::MAX as usize) as u16),
-            None => SmartUi::Off,
+        if self.smart.open {
+            self.smart.open = false;
+            self.set_censor(None);
+        } else {
+            self.smart.open = true;
+            self.request_redraw();
         }
     }
 
@@ -199,7 +209,12 @@ impl App {
     /// Copy with «Скрывать данные при копировании» on: search first (the beam hides the wait),
     /// copy once the blurs are in. False when there is nothing to wait for.
     pub(super) fn censor_before(&mut self, how: Export) -> bool {
-        if !self.config.capture.auto_censor || self.smart.level.is_some() || self.smart.anim.is_some() {
+        // «Без цензуры» chosen in the open drawer is an explicit answer: copy as is.
+        if !self.config.capture.auto_censor
+            || self.smart.open
+            || self.smart.level.is_some()
+            || self.smart.anim.is_some()
+        {
             return false;
         }
         self.smart.after = Some(how);
@@ -536,6 +551,17 @@ impl App {
     }
 }
 
+/// What the pill and its drawer show. A search under way (or queued behind the blurs leaving) shows
+/// its level; while blurs leave, nothing is on; the open drawer with no level is «Без цензуры».
+fn pill(open: bool, searching: Option<Censor>, hiding: bool, level: Option<(Censor, u16)>) -> SmartUi {
+    match (searching, level) {
+        (Some(level), _) => SmartUi::Scanning(level),
+        (None, Some((level, found))) if !hiding => SmartUi::On(level, found),
+        _ if open => SmartUi::Open,
+        _ => SmartUi::Off,
+    }
+}
+
 /// Top to bottom, then left to right: the cascade reads like the text it hides.
 fn reading_order(mut areas: Vec<DocRect>) -> Vec<DocRect> {
     areas.sort_by_key(|r| (r.top / 8, r.left));
@@ -575,11 +601,16 @@ mod tests {
         assert!(animation.stagger() < STAGGER);
     }
     #[test]
-    fn the_censor_button_turns_off_any_level_and_restores_the_last_choice() {
+    fn the_drawer_opens_on_no_censorship_and_shows_each_level_while_it_works() {
+        // Opened: nothing searched, nothing hidden.
+        assert_eq!(pill(true, None, false, None), SmartUi::Open);
+        assert_eq!(pill(false, None, false, None), SmartUi::Off);
         for level in [Censor::Light, Censor::Hard, Censor::Full] {
-            assert_eq!(SmartUi::Off.toggled(level), Some(level));
-            assert_eq!(SmartUi::On(level, 3).toggled(level), None);
-            assert_eq!(SmartUi::Scanning(level).toggled(level), None);
+            assert_eq!(pill(true, Some(level), false, None), SmartUi::Scanning(level));
+            assert_eq!(pill(true, None, false, Some((level, 3))), SmartUi::On(level, 3));
+            // «Без цензуры» chosen over a level: the drawer stays open while its blurs leave.
+            assert_eq!(pill(true, None, true, Some((level, 3))), SmartUi::Open);
+            assert_eq!(pill(false, None, true, Some((level, 3))), SmartUi::Off);
         }
     }
 }

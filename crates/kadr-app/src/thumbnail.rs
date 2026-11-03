@@ -13,6 +13,10 @@ use std::time::Instant;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap1;
+use windows::Win32::Graphics::DirectWrite::{
+    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+    DWRITE_WORD_WRAPPING_NO_WRAP, IDWriteTextFormat,
+};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
     PAINTSTRUCT,
@@ -79,8 +83,17 @@ struct State {
     leaving: bool,
     tracking: bool,
     dragging: bool,
+    /// «Сохранено» on a saved capture's card, sized for `scale`.
+    label: Option<(f32, IDWriteTextFormat)>,
 }
 impl State {
+    /// A picture that went to disk, not one only copied (or a recording, which has its own player).
+    fn saved(&self) -> bool {
+        self.shot
+            .as_ref()
+            .and_then(|s| s.path.as_ref())
+            .is_some_and(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("png")))
+    }
     fn now(&self) -> f64 {
         self.epoch.elapsed().as_secs_f64()
     }
@@ -130,6 +143,36 @@ fn request(value: Request) {
             let _ = PostMessageW(Some(host), msg, WPARAM(0), LPARAM(0));
         }
     }
+}
+
+fn label_format(device: &Device, s: f32) -> Option<IDWriteTextFormat> {
+    let shared = &device.shared;
+    unsafe {
+        let f = shared
+            .dwrite
+            .CreateTextFormat(
+                PCWSTR(shared.ui_family.as_ptr()),
+                None,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                12.0 * s,
+                w!("ru-ru"),
+            )
+            .ok()?;
+        let _ = f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        let _ = f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        Some(f)
+    }
+}
+
+/// Whether the card on screen (or arriving) is the one for this saved file.
+pub fn shows(path: &std::path::Path) -> bool {
+    STATE.with(|s| {
+        s.try_borrow().ok().as_deref().and_then(Option::as_ref).is_some_and(|st| {
+            !st.leaving && st.shot.as_ref().and_then(|shot| shot.path.as_deref()) == Some(path)
+        })
+    })
 }
 
 /// Card size in pixels: the capture's aspect inside the box, never thinner than a fingertip.
@@ -197,6 +240,7 @@ fn show_with(instance: HINSTANCE, host: HWND, message: u32, shot: Shot, settled:
                 leaving: false,
                 tracking: false,
                 dragging: false,
+                label: None,
             })
         });
     }
@@ -292,6 +336,9 @@ fn paint_window(hwnd: HWND) {
         {
             st.bitmap = Some((b, shot.image.width() as f32, shot.image.height() as f32));
         }
+        if st.label.as_ref().is_none_or(|(s, _)| *s != st.scale) {
+            st.label = label_format(st.device.as_ref().unwrap(), st.scale).map(|f| (st.scale, f));
+        }
         let device = st.device.as_ref().unwrap();
         let surface = st.surface.as_ref().unwrap();
         let moving = glass::frame(device, surface, || paint(device, st));
@@ -336,6 +383,29 @@ fn paint(device: &Device, st: &State) -> bool {
     }
     stroke(gpu, fade(rgb(0x000000, 0.16), opacity), inflate(card, 0.5), radius + 0.5, 1.0);
     stroke(gpu, fade(rgb(0xffffff, 0.45), opacity), inflate(card, -0.5), radius - 0.5, 1.0);
+    // A saved capture says so, so it is not mistaken for one that was only copied.
+    if st.saved()
+        && let Some((_, format)) = &st.label
+        && card.right - card.left >= 112.0 * s
+    {
+        let pill = rect(card.left + 8.0 * s, card.bottom - 32.0 * s, card.left + 112.0 * s, card.bottom - 8.0 * s);
+        fill(gpu, fade(rgb(0x1c1c1e, 0.78), opacity), pill, 12.0 * s);
+        let (x, y) = (pill.left + 11.0 * s, (pill.top + pill.bottom) / 2.0);
+        unsafe {
+            gpu.brush.SetColor(&fade(rgb(0x30d158, 1.0), opacity));
+            for (p, q) in [((0.0, 0.0), (3.5, 3.5)), ((3.5, 3.5), (10.0, -3.5))] {
+                gpu.d2d.DrawLine(
+                    Vector2 { X: x + p.0 * s, Y: y + p.1 * s },
+                    Vector2 { X: x + q.0 * s, Y: y + q.1 * s },
+                    &gpu.brush,
+                    1.8 * s,
+                    None,
+                );
+            }
+        }
+        let label = rect(pill.left + 27.0 * s, pill.top, pill.right - 6.0 * s, pill.bottom);
+        glass::text(gpu, format, "Сохранено", label, fade(rgb(0xffffff, 1.0), opacity));
+    }
     // × appears on hover at the top-left corner, as on macOS.
     let c = st.close_rect();
     let a = opacity * hover;
@@ -636,7 +706,8 @@ pub fn preview(image: Arc<Image>, scale: f32) -> windows::core::Result<Image> {
         device: None,
         surface: None,
         bitmap: Some((bitmap, image.width() as f32, image.height() as f32)),
-        shot: None,
+        // Shown as saved: the card that says where the file went.
+        shot: Some(Shot { image: image.clone(), path: Some(PathBuf::from("Screenshot.png")), anchor: (0, 0) }),
         scale,
         card,
         epoch: Instant::now(),
@@ -648,6 +719,7 @@ pub fn preview(image: Arc<Image>, scale: f32) -> windows::core::Result<Image> {
         leaving: false,
         tracking: false,
         dragging: false,
+        label: label_format(&device, scale).map(|f| (scale, f)),
     };
     let (w, h) = (card.0 + 2.0 * MARGIN * scale, card.1 + 2.0 * MARGIN * scale);
     glass::render_offscreen(&device, w as u32, h as u32, || {

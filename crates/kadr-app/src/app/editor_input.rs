@@ -17,13 +17,13 @@ impl App {
             self.pointer_history.begin(current);
         }
         let shift = mods().shift;
-        if matches!(msg, WM_MOUSEMOVE | WM_LBUTTONUP) && active.drawing.busy() && active.drawing.tool.is_path() {
-            let query = MOUSEMOVEPOINT {
-                x: p.x & 65535,
-                y: p.y & 65535,
-                time: if msg == WM_MOUSEMOVE { current.time } else { 0 },
-                dwExtraInfo: 0,
-            };
+        let busy = active.drawing.busy();
+        let held = msg != WM_MOUSEMOVE || !busy || left_button_held();
+        // Only a timestamped move is looked up in the history. The move to the release point always
+        // comes before WM_LBUTTONUP and has already replayed everything up to it; a lookup by position
+        // alone could match a later visit to the same pixel and splice in where the cursor went after.
+        if msg == WM_MOUSEMOVE && busy && held && active.drawing.tool.is_path() {
+            let query = MOUSEMOVEPOINT { x: p.x & 65535, y: p.y & 65535, time: current.time, dwExtraInfo: 0 };
             let mut history = [MOUSEMOVEPOINT::default(); 64];
             let count = unsafe {
                 GetMouseMovePointsEx(size_of::<MOUSEMOVEPOINT>() as u32, &query, &mut history, GMMP_USE_DISPLAY_POINTS)
@@ -56,7 +56,15 @@ impl App {
                 }
                 handled
             }
-            WM_MOUSEMOVE => active.drawing.motion(p, crop, mods().shift),
+            WM_MOUSEMOVE => {
+                let handled = active.drawing.drag(p, crop, shift, held);
+                if busy && !active.drawing.busy() {
+                    unsafe {
+                        let _ = ReleaseCapture();
+                    }
+                }
+                handled
+            }
             WM_LBUTTONUP => {
                 let handled = active.drawing.up(p, crop, mods().shift);
                 if handled {
@@ -69,8 +77,9 @@ impl App {
             _ => false,
         };
         if handled {
+            let ended = busy && !active.drawing.busy();
             active.session.observe_cursor(p);
-            if msg != WM_MOUSEMOVE {
+            if msg != WM_MOUSEMOVE || ended {
                 self.schedule_draft();
             }
             self.request_redraw();
@@ -222,6 +231,16 @@ impl App {
         }
     }
     pub(super) fn editor_wheel(&mut self, delta: i32) {
+        // With «Недавние» open in the dock the wheel scrolls its grid: half a row a notch, and the
+        // cards glide there on their own springs.
+        if let Some(a) = self.active.as_mut().filter(|a| a.bar.menu == Some(kadr_render::scene::BarMenu::Recent)) {
+            let limit = kadr_render::scene::recent_scroll_limit(self.recent_items.len()) as i32;
+            // Two quarters a notch; a touchpad's small deltas still move by at least one.
+            let step = if delta.abs() >= 60 { delta * 2 / 120 } else { delta.signum() };
+            a.bar.scroll = (a.bar.scroll as i32 - step).clamp(0, limit) as u32;
+            self.request_redraw();
+            return;
+        }
         let Some(active) = &mut self.active else {
             return;
         };
@@ -264,5 +283,17 @@ impl App {
         }
         self.schedule_draft();
         self.request_redraw();
+    }
+}
+/// The release can reach another window (capture lost, another topmost window): this queue then
+/// never gets WM_LBUTTONUP, and the next move must not continue the gesture.
+fn left_button_held() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
+    use windows::Win32::UI::WindowsAndMessaging::{GetQueueStatus, GetSystemMetrics, QS_MOUSEBUTTON, SM_SWAPBUTTON};
+    unsafe {
+        // GetAsyncKeyState reads the physical buttons; with swapped buttons the logical left is the right one.
+        let vk = if GetSystemMetrics(SM_SWAPBUTTON) != 0 { VK_RBUTTON } else { VK_LBUTTON };
+        // A release still queued here arrives as WM_LBUTTONUP right after this move.
+        GetAsyncKeyState(i32::from(vk.0)) < 0 || (GetQueueStatus(QS_MOUSEBUTTON) >> 16) & QS_MOUSEBUTTON.0 != 0
     }
 }

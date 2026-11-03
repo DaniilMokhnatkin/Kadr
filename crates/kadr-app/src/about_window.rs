@@ -139,7 +139,8 @@ fn layout(view: View, width: f32, s: f32) -> Layout {
             l.name = rect(left, 108.0 * s, right, 134.4 * s);
             l.version = rect(left, 138.4 * s, right, 155.2 * s);
             l.update = rect(left, 171.2 * s, right, (171.2 + ROW) * s);
-            l.check = rect(l.update.right - 93.3 * s, l.update.top, l.update.right, l.update.bottom);
+            // The whole row is the button: what the last check said is written on it.
+            l.check = l.update;
             l.about = rect(left + 14.0 * s, 231.2 * s, right - 14.0 * s, 270.2 * s);
             let top = 286.2 * s;
             let column = 186.0 * s;
@@ -210,9 +211,11 @@ struct State {
     hover: Option<Hit>,
     glow: Vec<(Hit, Spring)>,
     tracking: bool,
-    /// The line beside «Проверить»: what the last check said.
+    /// The update button's words: an invitation until a check, then what the check said.
     update: String,
     checking: bool,
+    /// The last check found this version current: its line gets a tick.
+    current: bool,
     text: String,
     text_edit: TextInput,
     contact: String,
@@ -242,8 +245,9 @@ impl State {
             hover: None,
             glow: Vec::new(),
             tracking: false,
-            update: "Обновления проверяются сами раз в день".into(),
+            update: "Проверить обновления".into(),
             checking: false,
+            current: false,
             text: String::new(),
             text_edit: TextInput::default(),
             contact: String::new(),
@@ -349,6 +353,7 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
 pub fn update_result(line: String) -> bool {
     let asked = ASKED.swap(false, Ordering::SeqCst);
     let hwnd = with(|st| {
+        st.current = line == "Установлена последняя версия";
         st.update = line;
         st.checking = false;
         st.hwnd
@@ -382,6 +387,19 @@ pub fn escape() -> bool {
         return true;
     }
     false
+}
+
+/// «Проверить обновления» from the tray: «О программе» opens and checks at once, its button says what came of it.
+pub fn check_updates(instance: HINSTANCE) {
+    show(instance);
+    if let Some(hwnd) = with(|st| {
+        press(st, Hit::Check);
+        st.hwnd
+    }) {
+        unsafe {
+            let _ = InvalidateRect(Some(hwnd), None, false);
+        }
+    }
 }
 
 pub fn show(instance: HINSTANCE) {
@@ -643,38 +661,37 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
     let mut moving = st.glow.iter().any(|(_, sp)| sp.active(now)) || st.knob.active(now);
     let glow = |hit: Hit| st.glow.iter().find(|(k, _)| *k == hit).map_or(0.0, |(_, sp)| sp.value(now));
     let link = |hit: Hit| mix(theme.accent, theme.on_selected, glow(hit));
-    let group = |r: D2D_RECT_F| {
-        fill(gpu, theme.control, r, 22.0 * s);
+    // An icon and a label centred together in `r`; a label too wide for it ends in an ellipsis.
+    let centred = |r: D2D_RECT_F, icon: Option<&str>, label: &str, color| {
+        let gap = if icon.is_some() { 26.0 * s } else { 0.0 };
+        let room = (r.right - r.left - 32.0 * s - gap).max(0.0);
+        let units: Vec<u16> = label.encode_utf16().collect();
+        let width = unsafe { device.shared.dwrite.CreateTextLayout(&units, &f.chip, 10000.0, 44.0 * s) }
+            .ok()
+            .and_then(|t| {
+                let mut m = DWRITE_TEXT_METRICS::default();
+                unsafe { t.GetMetrics(&mut m) }.ok().map(|_| m.width)
+            })
+            .unwrap_or(room)
+            .min(room);
+        let left = (r.left + r.right - width - gap) / 2.0;
+        if let Some(name) = icon {
+            kadr_render::scene::concept_icon(gpu, name, rect(left, r.top, left + 20.0 * s, r.bottom), color, 20.0 * s);
+        }
+        text(gpu, &f.chip, label, rect(left + gap, r.top, left + gap + width + 1.0, r.bottom), color);
     };
     let button = |r: D2D_RECT_F, hit: Hit, label: &str, enabled: bool| {
         let color = if enabled { theme.text } else { theme.text_muted };
-        if hit != Hit::Check || glow(hit) > 0.001 {
-            fill(gpu, fade(theme.control, if hit == Hit::Check { glow(hit) } else { 1.0 }), r, 22.0 * s);
-        }
-        let name = match hit {
+        fill(gpu, theme.control, r, 22.0 * s);
+        fill(gpu, fade(theme.tint, glow(hit)), r, 22.0 * s);
+        let icon = match hit {
             Hit::Report => Some("bug"),
             Hit::Support => Some("heart"),
+            Hit::Check if st.checking => Some("spinner"),
+            Hit::Check if st.current => Some("check-circle"),
             _ => None,
         };
-        if let Some(name) = name {
-            let units: Vec<u16> = label.encode_utf16().collect();
-            if let Ok(t) = unsafe { device.shared.dwrite.CreateTextLayout(&units, &f.chip, 10000.0, 44.0 * s) } {
-                let mut m = DWRITE_TEXT_METRICS::default();
-                if unsafe { t.GetMetrics(&mut m) }.is_ok() {
-                    let left = (r.left + r.right - m.width - 26.0 * s) / 2.0;
-                    kadr_render::scene::concept_icon(
-                        gpu,
-                        name,
-                        rect(left, r.top, left + 20.0 * s, r.bottom),
-                        color,
-                        20.0 * s,
-                    );
-                    text(gpu, &f.chip, label, rect(left + 26.0 * s, r.top, left + 26.0 * s + m.width, r.bottom), color);
-                }
-            }
-        } else {
-            text(gpu, &f.chip, label, r, color);
-        }
+        centred(r, icon, label, color);
     };
     fill(gpu, theme.surface, rect(0.0, 0.0, w, h), 0.0);
 
@@ -702,18 +719,8 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
             text(gpu, &f.name, "Kadr", l.name, theme.text);
             text(gpu, &f.version, &format!("Версия {}", env!("CARGO_PKG_VERSION")), l.version, theme.text_muted);
 
-            group(l.update);
-            let status = rect(l.update.left + 40.0 * s, l.update.top, l.check.left - 8.0 * s, l.update.bottom);
-            kadr_render::scene::concept_icon(
-                gpu,
-                if st.checking { "spinner" } else { "check-circle" },
-                rect(l.update.left + 14.0 * s, l.update.top, l.update.left + 32.0 * s, l.update.bottom),
-                theme.text_muted,
-                18.0 * s,
-            );
-            let ink = if st.checking { theme.text_muted } else { theme.text };
-            text(gpu, &f.label, if st.checking { "Проверяю…" } else { st.update.as_str() }, status, ink);
-            button(l.check, Hit::Check, "Проверить", !st.checking);
+            let label = if st.checking { "Проверяю обновления…" } else { st.update.as_str() };
+            button(l.check, Hit::Check, label, !st.checking);
 
             text(
                 gpu,
@@ -1304,6 +1311,7 @@ pub fn preview(scale: f32, report: bool) -> windows::core::Result<kadr_doc::Imag
         st.contact_edit = TextInput::at_end(&st.contact);
     } else {
         st.update = "Установлена последняя версия".into();
+        st.current = true;
     }
     if !ensure_fonts(&mut st) {
         return Err(windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL));

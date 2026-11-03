@@ -637,7 +637,8 @@ impl App {
             CMD_FULLSCREEN => self.capture_mode(Mode::Fullscreen, 0, "трей"),
             CMD_LAST_REGION => self.capture_mode(Mode::LastRegion, 0, "трей"),
             CMD_CONFIG => crate::settings_window::show(self.instance, self.hwnd, WM_APP_SETTINGS, &self.config),
-            CMD_UPDATE => crate::update::check_now(),
+            // The answer is shown in «О программе», not in a bubble.
+            CMD_UPDATE => crate::about_window::check_updates(self.instance),
             CMD_ABOUT => crate::about_window::show(self.instance),
             CMD_CLIPBOARD => self.show_clipboard(),
             CMD_WARM => {
@@ -1327,9 +1328,12 @@ impl App {
             match saved.result {
                 Ok(path) => {
                     log_info!("сохранено: {}", path.display());
-                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    if self.config.save.notify {
-                        self.notify("Снимок сохранён", &format!("{name}\nНажмите, чтобы открыть папку"));
+                    // The corner card marks a saved capture itself; without it a bubble says where the file went.
+                    let announced = crate::thumbnail::shows(&path)
+                        || self.thumb_pending.as_ref().is_some_and(|s| s.path.as_deref() == Some(path.as_path()));
+                    if self.config.save.notify && !announced && !self.bench_mode {
+                        let (title, text) = saved_message(&path, &file::default_folder());
+                        crate::bubble::open(self.instance, tray_corner(), crate::bubble::Content::Info(title, text));
                     }
                     self.last_saved = Some(path);
                     if let Some(draft) = saved.draft {
@@ -1338,7 +1342,11 @@ impl App {
                 }
                 Err((path, e)) => {
                     log_warn!("не удалось сохранить {}: {e}", path.display());
-                    self.notify("Не удалось сохранить", &e);
+                    // Never silent: the user expects a file.
+                    if !self.bench_mode {
+                        let text = format!("{}\n{e}", path.display());
+                        crate::bubble::open(self.instance, tray_corner(), crate::bubble::Content::Failed(text));
+                    }
                 }
             }
         }
@@ -1624,21 +1632,59 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
         WM_RBUTTONUP => with_app(|app| app.on_key(VK_ESCAPE.0, true)),
         WM_CHAR => with_app(|app| app.on_text(wp.0 as u16)),
         WM_MOUSEWHEEL => with_app(|app| app.editor_wheel(((wp.0 >> 16) as u16 as i16) as i32)),
-        WM_LBUTTONDBLCLK => with_app(|app| {
-            // On a text label: edit it. Elsewhere inside the selection, with the pointer tool
-            // (drawing tools take two quick clicks as two marks): copy, as in ShareX.
-            let copy = app.active.as_mut().is_some_and(|a| {
-                !a.drawing.edit_text()
-                    && a.drawing.tool == kadr_doc::annotation::Tool::Select
-                    && !a.drawing.typing()
-                    && a.session.show_toolbar()
-                    && a.session.selection().is_some_and(|s| s.contains(doc_point(cursor_pos())))
-            });
-            if copy {
-                app.export(Export::Copy);
+        WM_LBUTTONDBLCLK => {
+            let mut origin = POINT::default();
+            unsafe {
+                let _ = windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut origin);
             }
-            app.render_all();
-        }),
+            let point = kadr_editor::pointer::message_point(lp.0, doc_point(origin));
+            with_app(|app| {
+                // On the dock or an open dock menu (paging «Недавние», the width chips…) a quick
+                // second click is just another press, never «copy and close».
+                let on_dock = app.toolbar_at(POINT { x: point.x, y: point.y }).is_some()
+                    || app.active.as_ref().is_some_and(|a| a.bar.menu.is_some());
+                if on_dock {
+                    app.on_pointer(hwnd, WM_LBUTTONDOWN, point);
+                    return;
+                }
+                // On a text label: edit it. A drawing tool takes the second quick click as its own
+                // press: a new mark, as if it were not a double click at all.
+                let mut editing = false;
+                let mut drawing = false;
+                if let Some(a) = app.active.as_mut() {
+                    editing = a.drawing.edit_text();
+                    drawing = !editing && a.drawing.tool != kadr_doc::annotation::Tool::Select;
+                }
+                if drawing {
+                    app.on_pointer(hwnd, WM_LBUTTONDOWN, point);
+                    return;
+                }
+                // Elsewhere inside the selection, with the pointer tool: copy, as in ShareX.
+                let copy = !editing
+                    && app.active.as_ref().is_some_and(|a| {
+                        a.drawing.tool == kadr_doc::annotation::Tool::Select
+                            && !a.drawing.typing()
+                            && a.session.show_toolbar()
+                            && a.session.selection().is_some_and(|s| s.contains(doc_point(cursor_pos())))
+                    });
+                if copy {
+                    app.export(Export::Copy);
+                }
+                // Not render_all: a blocking frame on every monitor stalls the input thread.
+                app.request_redraw();
+            })
+        }
+        // Capture taken away mid-stroke (another window, a lost release): end the mark where it was
+        // last seen instead of letting later moves extend it.
+        WM_CAPTURECHANGED => {
+            with_app(|app| {
+                if app.active.as_mut().is_some_and(|a| a.drawing.finish_gesture()) {
+                    app.schedule_draft();
+                    app.request_redraw();
+                }
+            });
+            false
+        }
         WM_KEYDOWN => with_app(|app| app.on_key(wp.0 as u16, true)),
         WM_KEYUP => with_app(|app| app.on_key(wp.0 as u16, false)),
         WM_SETCURSOR if (lp.0 & 0xffff) as u32 == HTCLIENT => {
@@ -1784,4 +1830,30 @@ fn tray_corner() -> DocRect {
     }
     let w = mi.rcWork;
     DocRect::new(w.right - 1, w.bottom - 1, w.right, w.bottom)
+}
+
+/// «Сохранено в Изображения\Screenshots» and the file's name; another folder is named by its full path.
+fn saved_message(path: &std::path::Path, default_folder: &std::path::Path) -> (String, String) {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let folder = match path.parent() {
+        Some(p) if p == default_folder => r"Изображения\Screenshots".to_string(),
+        Some(p) => p.display().to_string(),
+        None => String::new(),
+    };
+    (format!("Сохранено в {folder}"), name)
+}
+
+#[cfg(test)]
+mod save_tests {
+    use super::saved_message;
+    use std::path::Path;
+    #[test]
+    fn the_saved_message_names_the_folder_and_the_file() {
+        let pictures = Path::new(r"C:\Users\me\Pictures\Screenshots");
+        let (title, text) = saved_message(&pictures.join("Screenshot_2026-11-03_10-00-00.png"), pictures);
+        assert_eq!(title, r"Сохранено в Изображения\Screenshots");
+        assert_eq!(text, "Screenshot_2026-11-03_10-00-00.png");
+        let (title, _) = saved_message(Path::new(r"D:\Shots\a.png"), pictures);
+        assert_eq!(title, r"Сохранено в D:\Shots");
+    }
 }

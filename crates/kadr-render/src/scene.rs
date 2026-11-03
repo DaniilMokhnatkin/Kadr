@@ -28,7 +28,7 @@ use kadr_doc::annotation::{COLORS, Tool};
 mod dock;
 mod glyphs;
 mod transition;
-pub use dock::{BarMenu, BarState, RecentItem};
+pub use dock::{BarMenu, BarState, RecentItem, recent_scroll_limit};
 
 struct Style {
     format: IDWriteTextFormat,
@@ -46,6 +46,8 @@ pub struct TextStyles {
     dock_label: Style,
     dock_strong: Style,
     dock_small: Style,
+    /// Counter badges: 11 px semibold, tabular figures.
+    dock_badge: Style,
     dock_heading: Style,
     dock_option: Style,
     toolbar: std::cell::RefCell<Option<(ToolbarKey, Option<ToolbarLayout>)>>,
@@ -74,6 +76,7 @@ impl TextStyles {
             dock_label: style(DWRITE_FONT_WEIGHT_REGULAR, 13.0, false)?,
             dock_strong: style(DWRITE_FONT_WEIGHT_SEMI_BOLD, 13.0, false)?,
             dock_small: style(DWRITE_FONT_WEIGHT_REGULAR, 11.0, false)?,
+            dock_badge: style(DWRITE_FONT_WEIGHT_SEMI_BOLD, 11.0, true)?,
             dock_heading: style(DWRITE_FONT_WEIGHT_SEMI_BOLD, 12.0, false)?,
             dock_option: style(DWRITE_FONT_WEIGHT(500), 12.0, false)?,
             toolbar: Default::default(),
@@ -202,6 +205,8 @@ pub enum ToolbarButton {
     Crop,
     Menu(BarMenu),
     Censor(Censor),
+    /// The drawer's first segment: nothing is searched or hidden.
+    CensorOff,
     WidthValue(u32),
     Original,
     About,
@@ -210,7 +215,6 @@ pub enum ToolbarButton {
     RecentPin(usize),
     RecentDelete(usize),
     RecentClear,
-    RecentPage(bool),
     SystemAudio,
     Microphone,
     StartRecord,
@@ -248,6 +252,7 @@ impl ToolbarButton {
             Self::Crop => "Обрезать",
             Self::Menu(menu) => menu.label(),
             Self::Censor(level) => level.name(),
+            Self::CensorOff => "Без цензуры",
             Self::WidthValue(_) => "Толщина линии",
             Self::Original => "Показать оригинал",
             Self::About => "О программе…",
@@ -256,8 +261,6 @@ impl ToolbarButton {
             Self::RecentPin(_) => "Закрепить в недавних",
             Self::RecentDelete(_) => "Удалить снимок",
             Self::RecentClear => "Очистить всё",
-            Self::RecentPage(true) => "Следующие снимки",
-            Self::RecentPage(false) => "Предыдущие снимки",
             Self::SystemAudio => "Звук компьютера",
             Self::Microphone => "Микрофон",
             Self::StartRecord => "Начать запись",
@@ -324,18 +327,16 @@ impl Censor {
     }
 }
 
-/// The censor pill: off, searching at a level, or hiding so many areas (0: nothing found).
+/// The censor pill: off, open with no level chosen, searching at a level, or hiding so many areas
+/// (0: nothing found).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum SmartUi {
     #[default]
     Off,
+    /// The drawer is open on «Без цензуры»: nothing is recognised or hidden until a level is chosen.
+    Open,
     Scanning(Censor),
     On(Censor, u16),
-}
-impl SmartUi {
-    pub fn toggled(self, last: Censor) -> Option<Censor> {
-        if self == Self::Off { Some(last) } else { None }
-    }
 }
 
 /// Что нарисовать поверх кадра. Одинаково для всех мониторов: каждый рисует свою часть.
@@ -531,6 +532,8 @@ pub fn draw(
 struct ToolbarLayout {
     track: Option<D2D_RECT_F>,
     popup: Option<D2D_RECT_F>,
+    /// The button the popup belongs to: it grows out of that button's centre.
+    trigger: Option<D2D_RECT_F>,
     panel: D2D_RECT_F,
     /// Selection the panel is attached to: the panel grows out of that edge.
     sel: D2D_RECT_F,
@@ -761,6 +764,7 @@ fn build_toolbar_layout(
         context,
         track: None,
         popup: None,
+        trigger: None,
     }))
 }
 
@@ -786,8 +790,22 @@ pub fn toolbar_hit(
     let layout = text.displayed(&target, editor, None, scale);
     let (x, y) = layout.unproject((at.0 - ox) as f32, (at.1 - oy) as f32);
     if editor.is_some() {
+        // A «Недавние» card scrolled out of the grid is hidden and must not catch the click.
+        let visible = |b: ToolbarButton| {
+            !dock::is_recent_card(b)
+                || target.popup.is_some_and(|p| {
+                    let v = dock::recent_view(p, scale);
+                    x >= v.left && x < v.right && y >= v.top && y < v.bottom
+                })
+        };
         if let Some(c) = layout.buttons.iter().rev().find(|c| {
-            c.live && c.opacity > 0.02 && x >= c.rect.left && x < c.rect.right && y >= c.rect.top && y < c.rect.bottom
+            c.live
+                && c.opacity > 0.02
+                && visible(c.button)
+                && x >= c.rect.left
+                && x < c.rect.right
+                && y >= c.rect.top
+                && y < c.rect.bottom
         }) {
             return Some(if c.enabled { c.button } else { ToolbarButton::Surface });
         }
@@ -1786,7 +1804,7 @@ fn intersect(a: D2D_RECT_F, b: D2D_RECT_F) -> Option<D2D_RECT_F> {
 /// What the censor pill says in each state.
 fn smart_label(state: SmartUi) -> String {
     match state {
-        SmartUi::Off => "Цензура · выкл".into(),
+        SmartUi::Off | SmartUi::Open => "Цензура · выкл".into(),
         SmartUi::Scanning(level) => format!("{} · ищу…", level.name()),
         SmartUi::On(level, 0) => format!("{} · ничего", level.name()),
         SmartUi::On(level, n) => format!("{} · {n}", level.name()),

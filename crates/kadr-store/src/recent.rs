@@ -10,6 +10,8 @@ use std::{
 
 const MAX_FILE: u64 = 256 * 1024 * 1024;
 const MAX_TOTAL_PIXELS: usize = 64 * 1024 * 1024;
+/// Most unpinned captures kept; `[recent] max` in the config is checked against the same bound.
+pub const MAX_ENTRIES: usize = 25;
 pub trait Crypto: Send + 'static {
     fn seal(&self, data: &[u8]) -> io::Result<Vec<u8>>;
     fn open(&self, data: &[u8]) -> io::Result<Vec<u8>>;
@@ -76,7 +78,7 @@ impl<C: Crypto> Store<C> {
             return Err(invalid("каталог черновиков не должен быть ссылкой"));
         }
         fs::create_dir_all(&root)?;
-        Ok(Self { root, crypto, max: max.clamp(1, 10) })
+        Ok(Self { root, crypto, max: max.clamp(1, MAX_ENTRIES) })
     }
     fn dir(&self, id: &str) -> io::Result<PathBuf> {
         if id.is_empty() || id.len() > 64 || !id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
@@ -243,7 +245,7 @@ impl<C: Crypto> Store<C> {
         Ok(())
     }
     pub fn set_max(&mut self, max: usize) -> io::Result<()> {
-        self.max = max.clamp(1, 10);
+        self.max = max.clamp(1, MAX_ENTRIES);
         self.prune()
     }
     pub fn set_pinned(&self, id: &str, pinned: bool) -> io::Result<()> {

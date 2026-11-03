@@ -139,7 +139,7 @@ pub(super) fn draw(gpu: &Gpu, button: ToolbarButton, r: D2D_RECT_F, ink: D2D1_CO
                 p.dot((x, 12.0), 1.5);
             }
         }
-        ToolbarButton::Menu(BarMenu::Shapes | BarMenu::Blur) | ToolbarButton::RecentPage(_) => {
+        ToolbarButton::Menu(BarMenu::Shapes | BarMenu::Blur) => {
             p.path(&[(8.0, 10.0), (12.0, 14.0), (16.0, 10.0)]);
         }
         ToolbarButton::Original => {
@@ -333,11 +333,14 @@ pub(super) fn v4(gpu: &Gpu, name: &str, r: D2D_RECT_F, ink: D2D1_COLOR_F, size: 
     unsafe {
         gpu.brush.SetColor(&ink);
     }
+    // The reference's `.solid` rule does not reach into its `<use>` copies, so its rendering strokes
+    // those circles like every other outline: the record icon is a ring around a ring, the blur grid
+    // and the «more» dots are small rings. Draw them as the concept renders them.
     for (points, closed, filled) in v4_data::outlines(match name {
         "forward" => "back",
         "chevron-small" => "chevron",
         _ => name,
     }) {
-        p.figure(points, *closed, *filled);
+        p.figure(points, *closed || *filled, false);
     }
 }

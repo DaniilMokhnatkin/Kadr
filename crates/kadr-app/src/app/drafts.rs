@@ -82,6 +82,13 @@ impl App {
         let Some(draft) = &mut active.draft else {
             return;
         };
+        if open && active.drawing.busy() {
+            // Not in the middle of the next stroke: each write also renders a GPU preview in the store.
+            unsafe {
+                SetTimer(Some(self.hwnd), TIMER_DRAFT, 300, None);
+            }
+            return;
+        }
         let selection = archived_selection(active.session.selection(), draft.view).map(to_array);
         let annotations = archived_shapes(active.drawing.shapes(), draft.view, &draft.document.annotations);
         let changed = selection != draft.document.selection

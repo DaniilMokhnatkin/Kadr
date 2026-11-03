@@ -33,7 +33,8 @@ pub struct BarState {
     pub system_audio: bool,
     pub microphone: bool,
     pub recent_count: usize,
-    pub page: usize,
+    /// How far the «Недавние» grid is scrolled, in quarters of a row (the cards glide between them).
+    pub scroll: u32,
     pub focus: Option<ToolbarButton>,
 }
 impl Default for BarState {
@@ -47,7 +48,7 @@ impl Default for BarState {
             system_audio: true,
             microphone: false,
             recent_count: 0,
-            page: 0,
+            scroll: 0,
             focus: None,
         }
     }
@@ -56,7 +57,7 @@ impl BarState {
     pub fn toggle(&mut self, menu: BarMenu) {
         self.menu = (self.menu != Some(menu)).then_some(menu);
         self.focus = None;
-        self.page = 0;
+        self.scroll = 0;
     }
     pub fn select_tool(&mut self, tool: Tool) {
         if matches!(tool, Tool::Line | Tool::Rectangle | Tool::Ellipse) {
@@ -68,6 +69,20 @@ impl BarState {
         self.menu = None;
         self.focus = None;
     }
+}
+/// Rows of «Недавние» cards the dock's popup shows at once; the rest scroll under its edge.
+const RECENT_ROWS: usize = 2;
+/// How far the grid of `count` captures can scroll, in quarters of a row.
+pub fn recent_scroll_limit(count: usize) -> u32 {
+    count.div_ceil(3).saturating_sub(RECENT_ROWS) as u32 * 4
+}
+/// A part of a «Недавние» card: these scroll and are clipped to the popup's grid.
+pub(super) fn is_recent_card(b: ToolbarButton) -> bool {
+    matches!(b, ToolbarButton::RecentOpen(_) | ToolbarButton::RecentPin(_) | ToolbarButton::RecentDelete(_))
+}
+/// Where the cards of the «Недавние» popup `popup` are visible: under its header, inside its padding.
+pub(super) fn recent_view(popup: D2D_RECT_F, s: f32) -> D2D_RECT_F {
+    rect(popup.left, popup.top + 52.0 * s, popup.right, popup.bottom - 8.0 * s)
 }
 pub struct RecentItem {
     pub preview: Option<Arc<kadr_doc::Image>>,
@@ -142,7 +157,8 @@ pub(super) fn build(
             let label = measure(shared, style, label)?.w / s;
             Ok(match b {
                 ToolbarButton::SaveAs => 44.0,
-                ToolbarButton::Copy => label + 84.0,
+                // 16 + icon 20 + 6 + label + 6 + 2 + return 20 + 16.
+                ToolbarButton::Copy => label + 86.0,
                 ToolbarButton::Recent => label + 78.0,
                 ToolbarButton::Save => label + 48.0,
                 _ => label + 54.0,
@@ -206,11 +222,17 @@ pub(super) fn build(
     }
     y += SIDE + GAP;
     if e.smart != SmartUi::Off {
-        let levels = [(Censor::Light, "Лёгкая"), (Censor::Hard, "Жёсткая"), (Censor::Full, "Полная")];
+        // «Без цензуры» first: opening the drawer recognises nothing until a level is chosen.
+        let levels = [
+            ToolbarButton::CensorOff,
+            ToolbarButton::Censor(Censor::Light),
+            ToolbarButton::Censor(Censor::Hard),
+            ToolbarButton::Censor(Censor::Full),
+        ];
         let info = if content >= 700.0 { 148.0 } else { 0.0 };
-        let level_width = (content - SIDE - GAP - info) / 3.0;
-        for (i, (level, label)) in levels.into_iter().enumerate() {
-            add(ToolbarButton::Censor(level), 8.0 + i as f32 * level_width, y, level_width, label)?;
+        let level_width = (content - SIDE - GAP - info) / levels.len() as f32;
+        for (i, level) in levels.into_iter().enumerate() {
+            add(level, 8.0 + i as f32 * level_width, y, level_width, "")?;
         }
         add(ToolbarButton::Original, pw / s - 8.0 - SIDE, y, SIDE, "")?;
         y += SIDE + GAP;
@@ -246,7 +268,7 @@ pub(super) fn build(
     };
     // On a narrow monitor the dock wraps. Move it toward the bottom before putting a tall menu
     // above it, rather than letting a menu cover the actions it belongs to.
-    if popup.is_some_and(|p| intersect(p, panel).is_some()) {
+    if popup.is_some_and(|p| intersect(p.0, panel).is_some()) {
         let dy = (h - 8.0 * s - panel.bottom).max(0.0);
         shift(&mut panel, 0.0, dy);
         shift(&mut track, 0.0, dy);
@@ -256,7 +278,15 @@ pub(super) fn build(
         }
         popup = Some(popover(shared, text, (w, h, s), panel, e, e.ui.menu.unwrap(), &mut buttons)?);
     }
-    Ok(Some(ToolbarLayout { panel, sel, buttons, context: None, track: Some(track), popup }))
+    Ok(Some(ToolbarLayout {
+        panel,
+        sel,
+        buttons,
+        context: None,
+        track: Some(track),
+        popup: popup.map(|p| p.0),
+        trigger: popup.map(|p| p.1),
+    }))
 }
 fn shift(r: &mut D2D_RECT_F, x: f32, y: f32) {
     r.left += x;
@@ -273,7 +303,7 @@ fn popover(
     e: EditorBar,
     menu: BarMenu,
     buttons: &mut Vec<(ToolbarButton, D2D_RECT_F, Text)>,
-) -> Result<D2D_RECT_F> {
+) -> Result<(D2D_RECT_F, D2D_RECT_F)> {
     let (w, h, s) = viewport;
     let size = (w, h);
     let mut rows: Vec<(ToolbarButton, String)> = match menu {
@@ -336,10 +366,10 @@ fn popover(
         .min(panel.right - panel.left - 16.0 * s);
     let fields = fields(e);
     let grid = menu == BarMenu::Recent;
-    let count = e.ui.recent_count.saturating_sub(e.ui.page * 6).min(6);
+    let count = e.ui.recent_count;
     let card_width = (pw / s - 32.0) / 3.0;
     let card_height = card_width * 0.75 + 46.2;
-    let rows_count = count.max(1).div_ceil(3);
+    let rows_count = count.max(1).div_ceil(3).min(RECENT_ROWS);
     let ph = if grid && count == 0 {
         132.8 * s
     } else if grid {
@@ -399,20 +429,17 @@ fn popover(
             rect(x + pw - 8.0 * s - clear_width, y + 8.0 * s, x + pw - 8.0 * s, y + 52.0 * s),
             "Очистить всё",
         )?;
+        // Every capture is laid out; the grid scrolls by whole pixels of its row pitch and the popup
+        // keeps two rows in view, so a long history never grows the popup over the dock.
         let cell = (pw - 32.0 * s) / 3.0;
-        for n in 0..count {
-            let i = e.ui.page * 6 + n;
-            let left = x + 8.0 * s + (n % 3) as f32 * (cell + 8.0 * s);
-            let top = y + 52.0 * s + (n / 3) as f32 * (card_height + 8.0) * s;
+        let pitch = (card_height + 8.0) * s;
+        let scroll = e.ui.scroll.min(recent_scroll_limit(count)) as f32 / 4.0 * pitch;
+        for i in 0..count {
+            let left = x + 8.0 * s + (i % 3) as f32 * (cell + 8.0 * s);
+            let top = y + 52.0 * s + (i / 3) as f32 * pitch - scroll;
             push(ToolbarButton::RecentOpen(i), rect(left, top, left + cell, top + card_height * s), "")?;
             push(ToolbarButton::RecentPin(i), rect(left, top, left + 44.0 * s, top + 44.0 * s), "")?;
             push(ToolbarButton::RecentDelete(i), rect(left + cell - 44.0 * s, top, left + cell, top + 44.0 * s), "")?;
-        }
-        if e.ui.recent_count > 6 {
-            // Keep long histories reachable without growing the reference's popup over the dock.
-            for (next, left) in [(false, x + 100.0 * s), (true, x + 144.0 * s)] {
-                push(ToolbarButton::RecentPage(next), rect(left, y + 8.0 * s, left + 44.0 * s, y + 52.0 * s), "")?;
-            }
         }
     } else if menu == BarMenu::Shapes || menu == BarMenu::Blur {
         let cell = (pw - 32.0 * s) / 3.0;
@@ -479,7 +506,17 @@ fn popover(
             )?;
         }
     }
-    Ok(popup)
+    Ok((popup, anchor))
+}
+
+/// Reference colours the theme has no role for.
+struct Extra {
+    /// `--hover`: a translucent wash under the liquid blob, never over it.
+    hover: D2D1_COLOR_F,
+    /// `--press`: a tile's hover.
+    press: D2D1_COLOR_F,
+    /// `--red`: the record icon.
+    red: D2D1_COLOR_F,
 }
 
 pub(super) fn draw(
@@ -493,21 +530,35 @@ pub(super) fn draw(
 ) -> Result<()> {
     let e = toolbar.editor.unwrap();
     let mut appearance = *theme;
+    let rgb = |value: u32, alpha| D2D1_COLOR_F {
+        r: ((value >> 16) & 255) as f32 / 255.0,
+        g: ((value >> 8) & 255) as f32 / 255.0,
+        b: (value & 255) as f32 / 255.0,
+        a: alpha,
+    };
+    let mut extra = Extra {
+        hover: theme.tint,
+        press: theme.tint_strong,
+        red: rgb(if theme.dark { 0xff453a } else { 0xe5342a }, 1.0),
+    };
     // Use the reference's roles here; other native windows retain their own materials.
     // System high-contrast colors take precedence over the reference palette.
     if appearance.shadow.a > 0.0 {
-        let rgb = |value: u32, alpha| D2D1_COLOR_F {
-            r: ((value >> 16) & 255) as f32 / 255.0,
-            g: ((value >> 8) & 255) as f32 / 255.0,
-            b: (value & 255) as f32 / 255.0,
-            a: alpha,
-        };
-        appearance.text_muted = rgb(if appearance.dark { 0xa1a1a6 } else { 0x636366 }, 1.0);
-        appearance.selected =
-            rgb(if appearance.dark { 0x0a84ff } else { 0x0071e3 }, if appearance.dark { 0.2 } else { 0.12 });
-        appearance.on_selected = rgb(if appearance.dark { 0x4da3ff } else { 0x0062c4 }, 1.0);
-        appearance.track = rgb(if appearance.dark { 0x48484b } else { 0xd6d6db }, 1.0);
-        appearance.border = rgb(if appearance.dark { 0xffffff } else { 0x000000 }, 0.1);
+        let dark = appearance.dark;
+        appearance.surface = rgb(if dark { 0x1c1c1e } else { 0xfbfbfd }, 1.0);
+        appearance.control = rgb(if dark { 0x28282b } else { 0xececf0 }, 1.0);
+        appearance.text = rgb(if dark { 0xf5f5f7 } else { 0x1d1d1f }, 1.0);
+        appearance.text_muted = rgb(if dark { 0xa1a1a6 } else { 0x636366 }, 1.0);
+        appearance.accent = rgb(0x0071e3, 1.0);
+        appearance.on_accent = rgb(0xffffff, 1.0);
+        appearance.selected = rgb(if dark { 0x0a84ff } else { 0x0071e3 }, if dark { 0.2 } else { 0.12 });
+        appearance.on_selected = rgb(if dark { 0x4da3ff } else { 0x0062c4 }, 1.0);
+        appearance.track = rgb(if dark { 0x48484b } else { 0xd6d6db }, 1.0);
+        appearance.border = rgb(if dark { 0xffffff } else { 0x000000 }, 0.1);
+        extra.hover = rgb(if dark { 0xffffff } else { 0x000000 }, if dark { 0.07 } else { 0.05 });
+        extra.press = rgb(if dark { 0xffffff } else { 0x000000 }, if dark { 0.12 } else { 0.09 });
+    } else {
+        extra.red = theme.text;
     }
     let theme = &appearance;
     let s = scene.scale;
@@ -520,16 +571,10 @@ pub(super) fn draw(
     let k = l.scale * (1.0 - 0.06 * scene.marks.exit);
     let (ax, ay) = l.anchor;
     let mut previous = Matrix3x2::default();
+    let dock = Matrix3x2 { M11: k, M12: 0.0, M21: 0.0, M22: k, M31: ax * (1.0 - k), M32: ay * (1.0 - k) + l.lift };
     unsafe {
         gpu.d2d.GetTransform(&mut previous);
-        gpu.d2d.SetTransform(&Matrix3x2 {
-            M11: k,
-            M12: 0.0,
-            M21: 0.0,
-            M22: k,
-            M31: ax * (1.0 - k),
-            M32: ay * (1.0 - k) + l.lift,
-        });
+        gpu.d2d.SetTransform(&dock);
     }
     fill_rounded(gpu, fade(theme.surface, a), l.panel, 30.0 * s);
     edge(gpu, theme, l.panel, 30.0 * s, s, a);
@@ -540,374 +585,154 @@ pub(super) fn draw(
         track.bottom += l.panel.top - target.panel.top;
         fill_rounded(gpu, fade(theme.control, a), track, 22.0 * s);
     }
-    if let Some(r) = l.indicator {
-        fill_rounded(gpu, fade(theme.accent, a), inflate(r, -4.0 * s), 18.0 * s);
-    }
-    // The reference has one neutral track per segmented group, with one moving blue blob.
-    for group in 0..1 {
-        let mut track = None;
-        for (b, r, _) in &target.buttons {
-            if radio_group(*b) == Some(group) {
-                track = Some(track.map_or(*r, |p: D2D_RECT_F| {
-                    rect(p.left.min(r.left), p.top.min(r.top), p.right.max(r.right), p.bottom.max(r.bottom))
-                }));
+    let p = Painter { gpu, shared, text, theme, extra, e, toolbar, s };
+    // A scrolled «Недавние» card belongs to its popup even when it has slid past the popup's edge.
+    let in_popover = |c: &super::transition::Button| {
+        if is_recent_card(c.button) {
+            l.popovers.iter().rposition(|p| p.menu == Some(BarMenu::Recent))
+        } else {
+            l.popovers.iter().rposition(|p| inside_rect(p.rect, c.rect))
+        }
+    };
+    let main: Vec<&super::transition::Button> = l
+        .buttons
+        .iter()
+        .filter(|c| !c.drawer && in_popover(c).is_none() && (c.live || inside_rect(l.panel, c.rect)))
+        .collect();
+    p.layer(&main, None, &[(None, l.indicator)], a)?;
+
+    // The drawer: clipped to its growing row, its content rising into place.
+    if let Some(d) = l.drawer
+        && d.clip.bottom - d.clip.top > 0.01
+    {
+        let items: Vec<&super::transition::Button> = l.buttons.iter().filter(|c| c.drawer).collect();
+        let (ox, oy) = d.origin;
+        let grow = Matrix3x2 {
+            M11: d.scale,
+            M12: 0.0,
+            M21: 0.0,
+            M22: d.scale,
+            M31: ox * (1.0 - d.scale),
+            M32: oy * (1.0 - d.scale),
+        };
+        unsafe {
+            gpu.d2d.PushAxisAlignedClip(&d.clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            gpu.d2d.SetTransform(&(grow * dock));
+        }
+        let alpha = a * d.opacity;
+        let result = (|| -> Result<()> {
+            if let Some(track) = union(items.iter().filter(|c| radio_group(c.button) == Some(0)).map(|c| c.rect)) {
+                fill_rounded(gpu, fade(theme.control, alpha), track, 22.0 * s);
             }
-        }
-        if let Some(track) = track {
-            fill_rounded(gpu, fade(theme.control, a), track, 22.0 * s);
-        }
-        if let Some(r) = l.radios[group] {
-            fill_rounded(gpu, fade(theme.accent, a), inflate(r, -4.0 * s), 18.0 * s);
-        }
-    }
-    if let Some(p) = target.popup {
-        shadow(gpu, theme.shadow, p, 22.0 * s, s, a, true);
-        fill_rounded(gpu, fade(theme.surface, a), p, 22.0 * s);
-        edge(gpu, theme, p, 22.0 * s, s, a);
-        if e.ui.menu == Some(BarMenu::Recent) {
-            caption(
-                gpu,
-                shared,
-                &text.dock_heading,
-                "Недавние",
-                p.left + 20.0 * s,
-                p.top + 23.0 * s,
-                fade(theme.text_muted, a),
-            )?;
-            if (1..=6).contains(&e.ui.recent_count) {
+            p.layer(&items, None, &[(Some(0), l.radios[0])], alpha)?;
+            if let Some(r) = items.iter().find(|c| c.button == ToolbarButton::Original).map(|c| c.rect)
+                && target.panel.right - target.panel.left >= 700.0 * s
+            {
+                let (value, note) = match e.smart {
+                    SmartUi::On(_, n) => {
+                        (count_label(n as usize, ["фрагмент", "фрагмента", "фрагментов"]), "скрыто на снимке")
+                    }
+                    SmartUi::Scanning(_) => ("Поиск данных…".into(), "скрыто на снимке"),
+                    SmartUi::Open | SmartUi::Off => ("Ничего не скрыто".into(), "выберите уровень"),
+                };
                 caption(
                     gpu,
                     shared,
-                    &text.dock_option,
-                    &count_label(e.ui.recent_count, ["снимок", "снимка", "снимков"]),
-                    p.right - 184.0 * s,
-                    p.top + 23.0 * s,
-                    fade(theme.text_muted, a),
+                    &text.dock_strong,
+                    &value,
+                    r.left - 142.0 * s,
+                    r.top + 7.0 * s,
+                    fade(theme.text, alpha),
                 )?;
-            }
-            if e.ui.recent_count == 0 {
-                let r = rect(p.left + 8.0 * s, p.top + 52.0 * s, p.right - 8.0 * s, p.bottom - 8.0 * s);
-                fill_rounded(gpu, fade(theme.control, a), r, 14.0 * s);
-                let t = measure(shared, &text.dock_label, "Недавних снимков нет")?;
-                draw_text(
+                caption(
                     gpu,
-                    &t,
-                    (r.left + r.right - t.w) / 2.0,
-                    (r.top + r.bottom - t.h) / 2.0,
-                    fade(theme.text_muted, a),
-                );
-            }
-        } else if matches!(e.ui.menu, Some(BarMenu::Shapes | BarMenu::Blur | BarMenu::Record)) {
-            let title = if e.ui.menu == Some(BarMenu::Record) {
-                "Запись области"
-            } else {
-                e.ui.menu.unwrap().label()
-            };
-            caption(
-                gpu,
-                shared,
-                &text.dock_heading,
-                title,
-                p.left + 20.0 * s,
-                p.top + 14.0 * s,
-                fade(theme.text_muted, a),
-            )?;
-        } else if e.ui.menu == Some(BarMenu::Properties) {
-            let f = fields(e);
-            for (row, label) in [
-                (f.color, "Цвет"),
-                (Some(f.width), "Толщина"),
-                (f.style, "Оформление текста"),
-                (f.strength, if e.tool == Tool::Lens { "Увеличение" } else { "Сила эффекта" }),
-            ] {
-                if let Some(top) = row {
-                    caption(
-                        gpu,
-                        shared,
-                        &text.dock_option,
-                        label,
-                        p.left + 20.0 * s,
-                        p.top + (top - 22.8) * s,
-                        fade(theme.text_muted, a),
-                    )?;
-                }
-            }
-            if let Some(top) = f.strength {
-                let r = rect(p.left + 8.0 * s, p.top + top * s, p.right - 8.0 * s, p.top + (top + 44.0) * s);
-                fill_rounded(gpu, fade(theme.control, a), r, 22.0 * s);
-                let t = measure(shared, &text.dock_strong, &(e.strength + 1).to_string())?;
-                draw_text(gpu, &t, (r.left + r.right - t.w) / 2.0, (r.top + r.bottom - t.h) / 2.0, fade(theme.text, a));
-            }
-        } else if e.ui.menu == Some(BarMenu::More) {
-            fill(
-                gpu,
-                fade(theme.border, a),
-                rect(p.left + 20.0 * s, p.top + 188.0 * s, p.right - 20.0 * s, p.top + 189.0 * s),
-            );
-        }
-    }
-    // Properties tracks are inside the popup surface, so paint them after that surface.
-    if e.ui.menu == Some(BarMenu::Properties) {
-        for group in 1..3 {
-            let row: Vec<_> = target.buttons.iter().filter(|b| radio_group(b.0) == Some(group)).collect();
-            if let (Some(first), Some(last)) = (row.first(), row.last()) {
-                fill_rounded(
-                    gpu,
-                    fade(theme.control, a),
-                    rect(first.1.left, first.1.top, last.1.right, last.1.bottom),
-                    22.0 * s,
-                );
-                if let Some(r) = l.radios[group] {
-                    fill_rounded(gpu, fade(theme.accent, a), inflate(r, -4.0 * s), 18.0 * s);
-                }
-            }
-        }
-    }
-    for c in &l.buttons {
-        let b = c.button;
-        let r = inflate(c.rect, -s * c.press);
-        let alpha = a * c.opacity;
-        if alpha < 0.002 || (!c.live && !inside_rect(l.panel, r) && target.popup.is_none()) {
-            continue;
-        }
-        let is_main = matches!(
-            b,
-            ToolbarButton::Tool(Tool::Select | Tool::Arrow | Tool::Pen | Tool::Text | Tool::Counter)
-                | ToolbarButton::Menu(BarMenu::Shapes | BarMenu::Blur | BarMenu::More)
-        );
-        let is_tile = !is_main
-            && matches!(b, ToolbarButton::Tool(_))
-            && matches!(e.ui.menu, Some(BarMenu::Shapes | BarMenu::Blur));
-        let group = radio_group(b);
-        let selected = c.selected;
-        if let ToolbarButton::RecentOpen(i) = b {
-            if let Some(item) = toolbar.recent.get(i) {
-                draw_recent(gpu, shared, text, theme, r, item, (s, alpha, c.hover))?;
-            }
-            continue;
-        }
-        if let ToolbarButton::RecentPin(i) | ToolbarButton::RecentDelete(i) = b {
-            let pinned =
-                matches!(b, ToolbarButton::RecentPin(_)) && toolbar.recent.get(i).is_some_and(|item| item.pinned);
-            let near = |button: Option<ToolbarButton>| matches!(button,Some(ToolbarButton::RecentOpen(j)|ToolbarButton::RecentPin(j)|ToolbarButton::RecentDelete(j)) if j==i);
-            if pinned || near(toolbar.hovered) || near(e.ui.focus) {
-                let circle = inflate(r, -8.0 * s);
-                let color = if pinned {
-                    theme.accent
-                } else {
-                    D2D1_COLOR_F { r: 20.0 / 255.0, g: 20.0 / 255.0, b: 22.0 / 255.0, a: 0.72 + 0.18 * c.hover }
-                };
-                fill_rounded(gpu, fade(color, alpha), circle, 14.0 * s);
-                glyphs::v4(
-                    gpu,
-                    if matches!(b, ToolbarButton::RecentPin(_)) { "pin" } else { "close" },
-                    r,
-                    fade(theme.on_accent, alpha),
-                    16.0 * s,
-                );
-            }
-            continue;
-        }
-        if is_tile {
-            fill_rounded(gpu, fade(if selected > 0.5 { theme.accent } else { theme.control }, alpha), r, 14.0 * s);
-        } else if b == ToolbarButton::Copy || b == ToolbarButton::StartRecord {
-            fill_rounded(gpu, fade(theme.accent, alpha), r, 22.0 * s);
-        } else if !is_main
-            && group.is_none()
-            && !matches!(b, ToolbarButton::Color(_) | ToolbarButton::SystemAudio | ToolbarButton::Microphone)
-            && selected > 0.001
-        {
-            fill_rounded(
-                gpu,
-                fade(if matches!(b, ToolbarButton::Tool(_)) { theme.accent } else { theme.selected }, alpha * selected),
-                r,
-                if e.ui.menu == Some(BarMenu::More) { 14.0 * s } else { 22.0 * s },
-            );
-        } else if c.hover > 0.001 {
-            fill_rounded(
-                gpu,
-                fade(theme.control, alpha * c.hover),
-                if is_main || group.is_some() { inflate(r, -4.0 * s) } else { r },
-                if is_main || group.is_some() { 18.0 * s } else { 22.0 * s },
-            );
-        }
-        if e.ui.focus == Some(b) {
-            edge(gpu, theme, inflate(r, -2.0 * s), 20.0 * s, s, alpha);
-        }
-        if let ToolbarButton::Color(i) = b {
-            let rgb = COLORS[i];
-            let center = (r.left + r.right) / 2.0;
-            let circle = rect(center - 12.0 * s, r.top + 10.0 * s, center + 12.0 * s, r.bottom - 10.0 * s);
-            fill_rounded(
-                gpu,
-                D2D1_COLOR_F { r: rgb[0] as f32 / 255.0, g: rgb[1] as f32 / 255.0, b: rgb[2] as f32 / 255.0, a: alpha },
-                circle,
-                12.0 * s,
-            );
-            if e.color == i {
-                outline(gpu, fade(theme.text, alpha), inflate(circle, 3.0 * s), 15.0 * s, 2.0 * s);
-            }
-            continue;
-        }
-        let ink = fade(if !c.enabled { theme.disabled } else { theme.text }, alpha);
-        if matches!(b, ToolbarButton::SystemAudio | ToolbarButton::Microphone) {
-            glyph(gpu, b, rect(r.left + 12.0 * s, r.top, r.left + 32.0 * s, r.bottom), ink, s, e);
-            draw_text(gpu, &c.label, r.left + 42.0 * s, (r.top + r.bottom - c.label.h) / 2.0, ink);
-            let track = rect(r.right - 52.0 * s, r.top + 10.0 * s, r.right - 12.0 * s, r.bottom - 10.0 * s);
-            fill_rounded(gpu, fade(if selected > 0.5 { theme.accent } else { theme.track }, alpha), track, 12.0 * s);
-            let x = if selected > 0.5 { track.right - 22.0 * s } else { track.left + 2.0 * s };
-            fill_rounded(
-                gpu,
-                fade(theme.on_accent, alpha),
-                rect(x, track.top + 2.0 * s, x + 20.0 * s, track.bottom - 2.0 * s),
-                10.0 * s,
-            );
-            continue;
-        }
-        if b == ToolbarButton::Menu(BarMenu::Properties) {
-            let rgb = COLORS[e.color.min(COLORS.len() - 1)];
-            fill_rounded(
-                gpu,
-                D2D1_COLOR_F { r: rgb[0] as f32 / 255.0, g: rgb[1] as f32 / 255.0, b: rgb[2] as f32 / 255.0, a: alpha },
-                rect(r.left + 14.0 * s, r.top + 15.0 * s, r.left + 28.0 * s, r.top + 29.0 * s),
-                7.0 * s,
-            );
-            let t = measure(shared, &text.dock_label, &format!("{} px", e.width))?;
-            draw_text(gpu, &t, r.left + 34.0 * s, (r.top + r.bottom - t.h) / 2.0, ink);
-            continue;
-        }
-        let primary = b == ToolbarButton::Copy
-            || b == ToolbarButton::StartRecord
-            || (is_tile && selected > 0.5)
-            || (e.ui.menu == Some(BarMenu::More) && selected > 0.5);
-        let ink = if primary {
-            fade(theme.on_accent, alpha)
-        } else if b == ToolbarButton::RecentClear || (selected > 0.5 && !is_main && group.is_none()) {
-            fade(theme.on_selected, alpha)
-        } else {
-            ink
-        };
-        let paint = |ink: D2D1_COLOR_F, muted: D2D1_COLOR_F| -> Result<()> {
-            if let ToolbarButton::Censor(level) = b {
-                let title = measure(shared, &text.dock_strong, level.name())?;
-                let desc = measure(
                     shared,
                     &text.dock_small,
-                    match level {
-                        Censor::Light => "Контакты и коды",
-                        Censor::Hard => "Плюс имена и адреса",
-                        Censor::Full => "Весь текст",
-                    },
+                    note,
+                    r.left - 142.0 * s,
+                    r.top + 24.0 * s,
+                    fade(theme.text_muted, alpha),
                 )?;
-                draw_text(gpu, &title, (r.left + r.right - title.w) / 2.0, r.top + 7.0 * s, ink);
-                if desc.w < r.right - r.left - 8.0 * s {
-                    draw_text(gpu, &desc, (r.left + r.right - desc.w) / 2.0, r.top + 24.0 * s, muted);
-                }
-            } else if is_tile {
-                glyphs::v4(gpu, tool_icon(b), rect(r.left, r.top + 16.0 * s, r.right, r.top + 38.0 * s), ink, 22.0 * s);
-                let t = &c.label;
-                draw_text(gpu, t, (r.left + r.right - t.w) / 2.0, r.top + 44.0 * s, ink);
-            } else if e.ui.menu == Some(BarMenu::More) && !inside_rect(l.panel, r) {
-                glyph(gpu, b, rect(r.left + 12.0 * s, r.top, r.left + 32.0 * s, r.bottom), ink, s, e);
-                draw_text(gpu, &c.label, r.left + 42.0 * s, (r.top + r.bottom - c.label.h) / 2.0, ink);
-                let key = match b {
-                    ToolbarButton::Tool(Tool::Eraser) => "M",
-                    ToolbarButton::Tool(Tool::Lens) => "G",
-                    ToolbarButton::Tool(Tool::Spotlight) => "I",
-                    ToolbarButton::Tool(Tool::Redact) => "X",
-                    ToolbarButton::Close => "Esc",
-                    _ => "",
-                };
-                let key = measure(shared, &text.dock_option, key)?;
-                draw_text(gpu, &key, r.right - 12.0 * s - key.w, (r.top + r.bottom - key.h) / 2.0, muted);
-            } else if group.is_some()
-                || matches!(b, ToolbarButton::RecentClear | ToolbarButton::RecentPage(_) | ToolbarButton::StartRecord)
-            {
-                draw_text(
-                    gpu,
-                    &c.label,
-                    (r.left + r.right - c.label.w) / 2.0,
-                    (r.top + r.bottom - c.label.h) / 2.0,
-                    ink,
-                );
-            } else if c.label.w > 0.0 {
-                let badge = if b == ToolbarButton::Recent { 24.0 * s } else { 0.0 };
-                let trailing = if b == ToolbarButton::Copy { 28.0 * s } else { 0.0 };
-                let width = 26.0 * s + c.label.w + badge + trailing;
-                let left = r.left + (r.right - r.left - width) / 2.0;
-                glyph(
-                    gpu,
-                    b,
-                    rect(left, r.top, left + 20.0 * s, r.bottom),
-                    if b == ToolbarButton::Record {
-                        D2D1_COLOR_F { r: 1.0, g: 69.0 / 255.0, b: 58.0 / 255.0, a: alpha }
-                    } else {
-                        ink
-                    },
-                    s,
-                    e,
-                );
-                draw_text(gpu, &c.label, left + 26.0 * s, (r.top + r.bottom - c.label.h) / 2.0, ink);
-                if badge > 0.0 {
-                    let t = measure(shared, &text.dock_small, &e.ui.recent_count.to_string())?;
-                    let x = left + 26.0 * s + c.label.w + 6.0 * s;
-                    fill_rounded(
-                        gpu,
-                        fade(theme.control, alpha),
-                        rect(x, r.top + 13.0 * s, x + 18.0 * s, r.top + 31.0 * s),
-                        9.0 * s,
-                    );
-                    draw_text(gpu, &t, x + (18.0 * s - t.w) / 2.0, (r.top + r.bottom - t.h) / 2.0, muted);
-                }
-                if trailing > 0.0 {
-                    glyphs::v4(
-                        gpu,
-                        "return",
-                        rect(r.right - 36.0 * s, r.top, r.right - 16.0 * s, r.bottom),
-                        fade(ink, 0.75),
-                        20.0 * s,
-                    );
-                }
-            } else {
-                glyph(gpu, b, r, ink, s, e);
             }
             Ok(())
+        })();
+        unsafe {
+            gpu.d2d.SetTransform(&dock);
+            gpu.d2d.PopAxisAlignedClip();
+        }
+        result?;
+    }
+    if let Some(r) = l.buttons.iter().find(|c| c.button == ToolbarButton::SaveAs && c.live).map(|c| c.rect) {
+        fill(gpu, fade(theme.border, a), rect(r.left, r.top + 14.0 * s, r.left + s, r.bottom - 14.0 * s));
+    }
+
+    // Popovers grow out of their trigger and shrink back into it.
+    for (i, pose) in l.popovers.iter().enumerate() {
+        let (ox, oy) = pose.origin;
+        let grow = Matrix3x2 {
+            M11: pose.scale,
+            M12: 0.0,
+            M21: 0.0,
+            M22: pose.scale,
+            M31: ox * (1.0 - pose.scale),
+            M32: oy * (1.0 - pose.scale) + pose.dy,
         };
-        paint(ink, fade(theme.text_muted, alpha))?;
-        let blob = if is_main { l.indicator } else { group.and_then(|i| l.radios[i]) };
-        if let Some(clip) = blob.and_then(|p| intersect(inflate(p, -4.0 * s), r)) {
-            unsafe {
-                gpu.d2d.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        unsafe {
+            gpu.d2d.SetTransform(&(grow * dock));
+        }
+        let alpha = a * pose.opacity;
+        let items: Vec<&super::transition::Button> =
+            l.buttons.iter().filter(|c| !c.drawer && in_popover(c) == Some(i)).collect();
+        let result = (|| -> Result<()> {
+            p.popover(pose.rect, pose.menu, alpha)?;
+            let mut blobs = Vec::new();
+            if pose.menu == Some(BarMenu::Properties) {
+                // Properties tracks are inside the popup surface, so paint them after that surface.
+                for group in 1..3 {
+                    if let Some(track) =
+                        union(items.iter().filter(|c| radio_group(c.button) == Some(group)).map(|c| c.rect))
+                    {
+                        fill_rounded(gpu, fade(theme.control, alpha), track, 22.0 * s);
+                        blobs.push((Some(group), l.radios[group]));
+                    }
+                }
             }
-            let result = paint(fade(theme.on_accent, alpha), fade(theme.on_accent, alpha));
+            if pose.menu != Some(BarMenu::Recent) {
+                return p.layer(&items, pose.menu, &blobs, alpha);
+            }
+            // «Недавние»: the header stays put; the cards scroll inside the grid, clipped to it.
+            let (cards, header): (Vec<_>, Vec<_>) = items.into_iter().partition(|c| is_recent_card(c.button));
+            p.layer(&header, pose.menu, &blobs, alpha)?;
+            let view = recent_view(pose.rect, s);
+            unsafe {
+                gpu.d2d.PushAxisAlignedClip(&view, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            }
+            let drawn = p.layer(&cards, pose.menu, &[], alpha);
             unsafe {
                 gpu.d2d.PopAxisAlignedClip();
             }
-            result?;
+            drawn?;
+            // A thin thumb at the right edge says where in the list the view is, and how much there is.
+            let rows = e.ui.recent_count.div_ceil(3);
+            if rows > RECENT_ROWS
+                && let Some(first) = cards.iter().find(|c| c.button == ToolbarButton::RecentOpen(0))
+            {
+                let pitch = (view.bottom - view.top + 8.0 * s) / RECENT_ROWS as f32;
+                let content = rows as f32 * pitch - 8.0 * s;
+                let span = view.bottom - view.top;
+                let thumb = (span * span / content).max(24.0 * s);
+                let travel = (content - span).max(1.0);
+                let at = ((view.top - first.rect.top) / travel).clamp(0.0, 1.0);
+                let top = view.top + (span - thumb) * at;
+                let x = pose.rect.right - 5.0 * s;
+                fill_rounded(gpu, fade(theme.text_muted, alpha * 0.5), rect(x - 1.5 * s, top, x + 1.5 * s, top + thumb), 1.5 * s);
+            }
+            Ok(())
+        })();
+        unsafe {
+            gpu.d2d.SetTransform(&dock);
         }
-    }
-    if e.smart != SmartUi::Off
-        && let Some((_, r, _)) = target.buttons.iter().find(|b| b.0 == ToolbarButton::Original)
-        && target.panel.right - target.panel.left >= 700.0 * s
-    {
-        let value = match e.smart {
-            SmartUi::On(_, n) => count_label(n as usize, ["фрагмент", "фрагмента", "фрагментов"]),
-            SmartUi::Scanning(_) => "Поиск данных…".into(),
-            SmartUi::Off => String::new(),
-        };
-        caption(gpu, shared, &text.dock_strong, &value, r.left - 142.0 * s, r.top + 7.0 * s, fade(theme.text, a))?;
-        caption(
-            gpu,
-            shared,
-            &text.dock_small,
-            "скрыто на снимке",
-            r.left - 142.0 * s,
-            r.top + 24.0 * s,
-            fade(theme.text_muted, a),
-        )?;
-    }
-    if let Some((_, r, _)) = target.buttons.iter().find(|b| b.0 == ToolbarButton::SaveAs) {
-        fill(gpu, fade(theme.border, a), rect(r.left, r.top + 14.0 * s, r.left + s, r.bottom - 14.0 * s));
+        result?;
     }
     unsafe {
         gpu.d2d.SetTransform(&previous);
@@ -929,6 +754,445 @@ pub(super) fn draw(
     }
     Ok(())
 }
+fn union(mut rects: impl Iterator<Item = D2D_RECT_F>) -> Option<D2D_RECT_F> {
+    let first = rects.next()?;
+    Some(
+        rects.fold(first, |p, r| {
+            rect(p.left.min(r.left), p.top.min(r.top), p.right.max(r.right), p.bottom.max(r.bottom))
+        }),
+    )
+}
+/// The tools of the main track: one liquid blob moves between them.
+fn is_main(b: ToolbarButton) -> bool {
+    matches!(
+        b,
+        ToolbarButton::Tool(Tool::Select | Tool::Arrow | Tool::Pen | Tool::Text | Tool::Counter)
+            | ToolbarButton::Menu(BarMenu::Shapes | BarMenu::Blur | BarMenu::More)
+    )
+}
+/// The blob's corner follows its thickness while it thins in flight.
+fn blob_radius(r: D2D_RECT_F, s: f32) -> f32 {
+    (18.0 * s).min((r.bottom - r.top) / 2.0).min((r.right - r.left) / 2.0).max(0.0)
+}
+
+struct Painter<'a> {
+    gpu: &'a Gpu,
+    shared: &'a Shared,
+    text: &'a TextStyles,
+    theme: &'a Theme,
+    extra: Extra,
+    e: EditorBar,
+    toolbar: Toolbar<'a>,
+    s: f32,
+}
+impl Painter<'_> {
+    fn rect(&self, c: &super::transition::Button) -> D2D_RECT_F {
+        inflate(c.rect, -self.s * c.press)
+    }
+    /// A tile of the shapes and blur menus.
+    fn is_tile(b: ToolbarButton, menu: Option<BarMenu>) -> bool {
+        !is_main(b) && matches!(b, ToolbarButton::Tool(_)) && matches!(menu, Some(BarMenu::Shapes | BarMenu::Blur))
+    }
+    /// One layer after the reference's `.track` + `.liquid`: backgrounds, then each liquid blob over
+    /// them, then the ink, then the blob's own copy of the ink in the on-accent colour, exactly where
+    /// the blob covers it (the reference's `mirror()`), and focus rings on top. The blob is above the
+    /// controls during its whole flight, never under a hover or a tile.
+    fn layer(
+        &self,
+        buttons: &[&super::transition::Button],
+        menu: Option<BarMenu>,
+        blobs: &[(Option<usize>, Option<D2D_RECT_F>)],
+        alpha: f32,
+    ) -> Result<()> {
+        let (gpu, s) = (self.gpu, self.s);
+        for c in buttons {
+            self.back(c, menu, alpha)?;
+        }
+        let blobs: Vec<_> = blobs.iter().filter_map(|(g, r)| r.map(|r| (*g, inflate(r, -4.0 * s)))).collect();
+        for (_, b) in &blobs {
+            fill_rounded(gpu, fade(self.theme.accent, alpha), *b, blob_radius(*b, s));
+        }
+        for c in buttons {
+            self.ink(c, menu, alpha)?;
+        }
+        for (group, b) in &blobs {
+            let covered: Vec<_> = buttons
+                .iter()
+                .filter(|c| {
+                    (if let Some(g) = group { radio_group(c.button) == Some(*g) } else { is_main(c.button) })
+                        && intersect(c.rect, *b).is_some()
+                })
+                .collect();
+            if covered.is_empty() {
+                continue;
+            }
+            unsafe {
+                let geometry = gpu.d2d.GetFactory()?.CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT {
+                    rect: *b,
+                    radiusX: blob_radius(*b, s),
+                    radiusY: blob_radius(*b, s),
+                })?;
+                let mut mask = D2D1_LAYER_PARAMETERS1 {
+                    contentBounds: *b,
+                    geometricMask: ManuallyDrop::new(Some(geometry.into())),
+                    maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                    maskTransform: Matrix3x2::identity(),
+                    opacity: 1.0,
+                    opacityBrush: ManuallyDrop::new(None),
+                    layerOptions: D2D1_LAYER_OPTIONS1_NONE,
+                };
+                gpu.d2d.PushLayer(&mask, None::<&ID2D1Layer>);
+                let result = covered.iter().try_for_each(|c| {
+                    let on = fade(self.theme.on_accent, alpha * c.opacity);
+                    self.paint(c, self.rect(c), menu, (on, on), alpha * c.opacity)
+                });
+                gpu.d2d.PopLayer();
+                ManuallyDrop::drop(&mut mask.geometricMask);
+                result?;
+            }
+        }
+        for c in buttons {
+            if self.e.ui.focus == Some(c.button) && c.opacity * alpha > 0.002 {
+                edge(gpu, self.theme, inflate(self.rect(c), -2.0 * s), 20.0 * s, s, alpha * c.opacity);
+            }
+        }
+        Ok(())
+    }
+    /// Fills under the ink: hover washes, tiles, pressed tints, primary actions, recent cards.
+    fn back(&self, c: &super::transition::Button, menu: Option<BarMenu>, layer: f32) -> Result<()> {
+        let (gpu, theme, s, b) = (self.gpu, self.theme, self.s, c.button);
+        let (r, alpha) = (self.rect(c), layer * c.opacity);
+        if alpha < 0.002 {
+            return Ok(());
+        }
+        let main = is_main(b);
+        let group = radio_group(b);
+        if let ToolbarButton::RecentOpen(i) = b {
+            if let Some(item) = self.toolbar.recent.get(i) {
+                draw_recent(gpu, self.shared, self.text, theme, r, item, (s, alpha, c.hover))?;
+            }
+            return Ok(());
+        }
+        if Self::is_tile(b, menu) {
+            fill_rounded(gpu, fade(if c.selected > 0.5 { theme.accent } else { theme.control }, alpha), r, 14.0 * s);
+            if c.selected <= 0.5 && c.hover > 0.001 {
+                fill_rounded(gpu, fade(self.extra.press, alpha * c.hover), r, 14.0 * s);
+            }
+        } else if b == ToolbarButton::Copy || b == ToolbarButton::StartRecord {
+            fill_rounded(gpu, fade(theme.accent, alpha), r, 22.0 * s);
+        } else if !main
+            && group.is_none()
+            && !matches!(
+                b,
+                ToolbarButton::Color(_)
+                    | ToolbarButton::SystemAudio
+                    | ToolbarButton::Microphone
+                    | ToolbarButton::RecentPin(_)
+                    | ToolbarButton::RecentDelete(_)
+            )
+            && c.selected > 0.001
+        {
+            fill_rounded(
+                gpu,
+                fade(
+                    if matches!(b, ToolbarButton::Tool(_)) { theme.accent } else { theme.selected },
+                    alpha * c.selected,
+                ),
+                r,
+                if menu == Some(BarMenu::More) { 14.0 * s } else { 22.0 * s },
+            );
+        } else if !matches!(b, ToolbarButton::RecentPin(_) | ToolbarButton::RecentDelete(_)) {
+            // A group's trigger keeps its wash while its menu is open.
+            let open = matches!(b, ToolbarButton::Menu(m) if main && self.e.ui.menu == Some(m));
+            let hover = if open { 1.0 } else { c.hover };
+            if hover > 0.001 {
+                fill_rounded(
+                    gpu,
+                    fade(self.extra.hover, alpha * hover),
+                    if main || group.is_some() { inflate(r, -4.0 * s) } else { r },
+                    if main || group.is_some() {
+                        18.0 * s
+                    } else if menu.is_some() {
+                        14.0 * s
+                    } else {
+                        22.0 * s
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+    /// Icons, labels, swatches and switches.
+    fn ink(&self, c: &super::transition::Button, menu: Option<BarMenu>, layer: f32) -> Result<()> {
+        let (gpu, theme, s, b, e) = (self.gpu, self.theme, self.s, c.button, self.e);
+        let (r, alpha) = (self.rect(c), layer * c.opacity);
+        if alpha < 0.002 || matches!(b, ToolbarButton::RecentOpen(_)) {
+            return Ok(());
+        }
+        let main = is_main(b);
+        let group = radio_group(b);
+        if let ToolbarButton::RecentPin(i) | ToolbarButton::RecentDelete(i) = b {
+            let pinned =
+                matches!(b, ToolbarButton::RecentPin(_)) && self.toolbar.recent.get(i).is_some_and(|item| item.pinned);
+            let near = |button: Option<ToolbarButton>| matches!(button,Some(ToolbarButton::RecentOpen(j)|ToolbarButton::RecentPin(j)|ToolbarButton::RecentDelete(j)) if j==i);
+            if pinned || near(self.toolbar.hovered) || near(e.ui.focus) {
+                let circle = inflate(r, -8.0 * s);
+                let color = if pinned {
+                    theme.accent
+                } else {
+                    D2D1_COLOR_F { r: 20.0 / 255.0, g: 20.0 / 255.0, b: 22.0 / 255.0, a: 0.72 + 0.18 * c.hover }
+                };
+                fill_rounded(gpu, fade(color, alpha), circle, 14.0 * s);
+                glyphs::v4(
+                    gpu,
+                    if matches!(b, ToolbarButton::RecentPin(_)) { "pin" } else { "close" },
+                    r,
+                    fade(theme.on_accent, alpha),
+                    16.0 * s,
+                );
+            }
+            return Ok(());
+        }
+        if let ToolbarButton::Color(i) = b {
+            let rgb = COLORS[i];
+            let center = (r.left + r.right) / 2.0;
+            let circle = rect(center - 12.0 * s, r.top + 10.0 * s, center + 12.0 * s, r.bottom - 10.0 * s);
+            fill_rounded(
+                gpu,
+                D2D1_COLOR_F { r: rgb[0] as f32 / 255.0, g: rgb[1] as f32 / 255.0, b: rgb[2] as f32 / 255.0, a: alpha },
+                circle,
+                12.0 * s,
+            );
+            if e.color == i {
+                outline(gpu, fade(theme.text, alpha), inflate(circle, 3.0 * s), 15.0 * s, 2.0 * s);
+            }
+            return Ok(());
+        }
+        let ink = fade(if !c.enabled { theme.disabled } else { theme.text }, alpha);
+        if matches!(b, ToolbarButton::SystemAudio | ToolbarButton::Microphone) {
+            glyph(gpu, b, rect(r.left + 12.0 * s, r.top, r.left + 32.0 * s, r.bottom), ink, s, e);
+            draw_text(gpu, &c.label, r.left + 42.0 * s, (r.top + r.bottom - c.label.h) / 2.0, ink);
+            let track = rect(r.right - 52.0 * s, r.top + 10.0 * s, r.right - 12.0 * s, r.bottom - 10.0 * s);
+            fill_rounded(gpu, fade(if c.selected > 0.5 { theme.accent } else { theme.track }, alpha), track, 12.0 * s);
+            let x = if c.selected > 0.5 { track.right - 22.0 * s } else { track.left + 2.0 * s };
+            fill_rounded(
+                gpu,
+                fade(theme.on_accent, alpha),
+                rect(x, track.top + 2.0 * s, x + 20.0 * s, track.bottom - 2.0 * s),
+                10.0 * s,
+            );
+            return Ok(());
+        }
+        if b == ToolbarButton::Menu(BarMenu::Properties) {
+            let rgb = COLORS[e.color.min(COLORS.len() - 1)];
+            fill_rounded(
+                gpu,
+                D2D1_COLOR_F { r: rgb[0] as f32 / 255.0, g: rgb[1] as f32 / 255.0, b: rgb[2] as f32 / 255.0, a: alpha },
+                rect(r.left + 14.0 * s, r.top + 15.0 * s, r.left + 28.0 * s, r.top + 29.0 * s),
+                7.0 * s,
+            );
+            let t = measure(self.shared, &self.text.dock_label, &format!("{} px", e.width))?;
+            draw_text(gpu, &t, r.left + 34.0 * s, (r.top + r.bottom - t.h) / 2.0, ink);
+            return Ok(());
+        }
+        let primary = b == ToolbarButton::Copy
+            || b == ToolbarButton::StartRecord
+            || (Self::is_tile(b, menu) && c.selected > 0.5)
+            || (menu == Some(BarMenu::More) && !main && c.selected > 0.5);
+        let ink = if primary {
+            fade(theme.on_accent, alpha)
+        } else if b == ToolbarButton::RecentClear || (c.selected > 0.5 && !main && group.is_none()) {
+            fade(theme.on_selected, alpha)
+        } else {
+            ink
+        };
+        self.paint(c, r, menu, (ink, fade(theme.text_muted, alpha)), alpha)
+    }
+    /// The content of a control in the given ink; the blob repaints it in the on-accent colour.
+    fn paint(
+        &self,
+        c: &super::transition::Button,
+        r: D2D_RECT_F,
+        menu: Option<BarMenu>,
+        (ink, muted): (D2D1_COLOR_F, D2D1_COLOR_F),
+        alpha: f32,
+    ) -> Result<()> {
+        let (gpu, shared, text, s, b, e) = (self.gpu, self.shared, self.text, self.s, c.button, self.e);
+        let level = match b {
+            ToolbarButton::Censor(level) => Some((
+                level.name(),
+                match level {
+                    Censor::Light => "Контакты и коды",
+                    Censor::Hard => "Плюс имена и адреса",
+                    Censor::Full => "Весь текст",
+                },
+            )),
+            ToolbarButton::CensorOff => Some(("Без цензуры", "Снимок как есть")),
+            _ => None,
+        };
+        if let Some((name, note)) = level {
+            let mut title = measure(shared, &text.dock_strong, name)?;
+            if b == ToolbarButton::CensorOff && title.w > r.right - r.left - 8.0 * s {
+                title = measure(shared, &text.dock_strong, "Выкл")?;
+            }
+            let desc = measure(shared, &text.dock_small, note)?;
+            draw_text(gpu, &title, (r.left + r.right - title.w) / 2.0, r.top + 7.0 * s, ink);
+            if desc.w < r.right - r.left - 8.0 * s {
+                draw_text(gpu, &desc, (r.left + r.right - desc.w) / 2.0, r.top + 24.0 * s, muted);
+            }
+        } else if Self::is_tile(b, menu) {
+            glyphs::v4(gpu, tool_icon(b), rect(r.left, r.top + 16.0 * s, r.right, r.top + 38.0 * s), ink, 22.0 * s);
+            let t = &c.label;
+            draw_text(gpu, t, (r.left + r.right - t.w) / 2.0, r.top + 44.0 * s, ink);
+        } else if menu == Some(BarMenu::More) {
+            glyph(gpu, b, rect(r.left + 12.0 * s, r.top, r.left + 32.0 * s, r.bottom), ink, s, e);
+            draw_text(gpu, &c.label, r.left + 42.0 * s, (r.top + r.bottom - c.label.h) / 2.0, ink);
+            let key = match b {
+                ToolbarButton::Tool(Tool::Eraser) => "M",
+                ToolbarButton::Tool(Tool::Lens) => "G",
+                ToolbarButton::Tool(Tool::Spotlight) => "I",
+                ToolbarButton::Tool(Tool::Redact) => "X",
+                ToolbarButton::Close => "Esc",
+                _ => "",
+            };
+            let key = measure(shared, &text.dock_option, key)?;
+            draw_text(gpu, &key, r.right - 12.0 * s - key.w, (r.top + r.bottom - key.h) / 2.0, muted);
+        } else if radio_group(b).is_some() || matches!(b, ToolbarButton::RecentClear | ToolbarButton::StartRecord) {
+            draw_text(gpu, &c.label, (r.left + r.right - c.label.w) / 2.0, (r.top + r.bottom - c.label.h) / 2.0, ink);
+        } else if c.label.w > 0.0 {
+            // `.btn`: icon 20, gap 6, label; the badge and the return key follow with the same gap.
+            let badge = if b == ToolbarButton::Recent {
+                Some(measure(shared, &text.dock_badge, &e.ui.recent_count.to_string())?)
+            } else {
+                None
+            };
+            let badge_width = badge.as_ref().map_or(0.0, |t| (t.w + 10.0 * s).max(18.0 * s));
+            let trailing = if b == ToolbarButton::Copy { 28.0 * s } else { 0.0 };
+            let width = 26.0 * s + c.label.w + if badge.is_some() { 6.0 * s + badge_width } else { 0.0 } + trailing;
+            let left = r.left + (r.right - r.left - width) / 2.0;
+            let icon = if b == ToolbarButton::Record { fade(self.extra.red, alpha) } else { ink };
+            glyph(gpu, b, rect(left, r.top, left + 20.0 * s, r.bottom), icon, s, e);
+            draw_text(gpu, &c.label, left + 26.0 * s, (r.top + r.bottom - c.label.h) / 2.0, ink);
+            if let Some(t) = badge {
+                let x = left + 26.0 * s + c.label.w + 6.0 * s;
+                let pill = rect(x, r.top + 13.0 * s, x + badge_width, r.top + 31.0 * s);
+                fill_rounded(gpu, fade(self.theme.control, alpha), pill, 9.0 * s);
+                draw_text(gpu, &t, (pill.left + pill.right - t.w) / 2.0, (r.top + r.bottom - t.h) / 2.0, muted);
+            }
+            if trailing > 0.0 {
+                glyphs::v4(
+                    gpu,
+                    "return",
+                    rect(r.right - 36.0 * s, r.top, r.right - 16.0 * s, r.bottom),
+                    fade(ink, 0.75),
+                    20.0 * s,
+                );
+            }
+        } else {
+            glyph(gpu, b, r, ink, s, e);
+        }
+        Ok(())
+    }
+    /// A popover's surface and its titles.
+    fn popover(&self, p: D2D_RECT_F, menu: Option<BarMenu>, a: f32) -> Result<()> {
+        let (gpu, shared, text, theme, s, e) = (self.gpu, self.shared, self.text, self.theme, self.s, self.e);
+        shadow(gpu, theme.shadow, p, 22.0 * s, s, a, true);
+        fill_rounded(gpu, fade(theme.surface, a), p, 22.0 * s);
+        edge(gpu, theme, p, 22.0 * s, s, a);
+        match menu {
+            Some(BarMenu::Recent) => {
+                caption(
+                    gpu,
+                    shared,
+                    &text.dock_heading,
+                    "Недавние",
+                    p.left + 20.0 * s,
+                    p.top + 23.0 * s,
+                    fade(theme.text_muted, a),
+                )?;
+                let count = e.ui.recent_count;
+                if count > 0 {
+                    let label = count_label(count, ["снимок", "снимка", "снимков"]);
+                    caption(
+                        gpu,
+                        shared,
+                        &text.dock_option,
+                        &label,
+                        p.right - 184.0 * s,
+                        p.top + 23.0 * s,
+                        fade(theme.text_muted, a),
+                    )?;
+                }
+                if e.ui.recent_count == 0 {
+                    let r = rect(p.left + 8.0 * s, p.top + 52.0 * s, p.right - 8.0 * s, p.bottom - 8.0 * s);
+                    fill_rounded(gpu, fade(theme.control, a), r, 14.0 * s);
+                    let t = measure(shared, &text.dock_label, "Недавних снимков нет")?;
+                    draw_text(
+                        gpu,
+                        &t,
+                        (r.left + r.right - t.w) / 2.0,
+                        (r.top + r.bottom - t.h) / 2.0,
+                        fade(theme.text_muted, a),
+                    );
+                }
+            }
+            Some(menu @ (BarMenu::Shapes | BarMenu::Blur | BarMenu::Record)) => {
+                let title = if menu == BarMenu::Record { "Запись области" } else { menu.label() };
+                caption(
+                    gpu,
+                    shared,
+                    &text.dock_heading,
+                    title,
+                    p.left + 20.0 * s,
+                    p.top + 14.0 * s,
+                    fade(theme.text_muted, a),
+                )?;
+            }
+            Some(BarMenu::Properties) => {
+                let f = fields(e);
+                for (row, label) in [
+                    (f.color, "Цвет"),
+                    (Some(f.width), "Толщина"),
+                    (f.style, "Оформление текста"),
+                    (f.strength, if e.tool == Tool::Lens { "Увеличение" } else { "Сила эффекта" }),
+                ] {
+                    if let Some(top) = row {
+                        caption(
+                            gpu,
+                            shared,
+                            &text.dock_option,
+                            label,
+                            p.left + 20.0 * s,
+                            p.top + (top - 22.8) * s,
+                            fade(theme.text_muted, a),
+                        )?;
+                    }
+                }
+                if let Some(top) = f.strength {
+                    let r = rect(p.left + 8.0 * s, p.top + top * s, p.right - 8.0 * s, p.top + (top + 44.0) * s);
+                    fill_rounded(gpu, fade(theme.control, a), r, 22.0 * s);
+                    let t = measure(shared, &text.dock_strong, &(e.strength + 1).to_string())?;
+                    draw_text(
+                        gpu,
+                        &t,
+                        (r.left + r.right - t.w) / 2.0,
+                        (r.top + r.bottom - t.h) / 2.0,
+                        fade(theme.text, a),
+                    );
+                }
+            }
+            Some(BarMenu::More) => {
+                fill(
+                    gpu,
+                    fade(theme.border, a),
+                    rect(p.left + 20.0 * s, p.top + 188.0 * s, p.right - 20.0 * s, p.top + 189.0 * s),
+                );
+            }
+            None => {}
+        }
+        Ok(())
+    }
+}
 fn inside_rect(outer: D2D_RECT_F, inner: D2D_RECT_F) -> bool {
     inner.left >= outer.left - 0.1
         && inner.right <= outer.right + 0.1
@@ -949,7 +1213,7 @@ fn count_label(n: usize, words: [&str; 3]) -> String {
 }
 fn radio_group(b: ToolbarButton) -> Option<usize> {
     match b {
-        ToolbarButton::Censor(_) => Some(0),
+        ToolbarButton::Censor(_) | ToolbarButton::CensorOff => Some(0),
         ToolbarButton::WidthValue(_) => Some(1),
         ToolbarButton::TextPlain
         | ToolbarButton::TextFilled
@@ -1024,14 +1288,13 @@ fn glyph(gpu: &Gpu, b: ToolbarButton, r: D2D_RECT_F, ink: D2D1_COLOR_F, s: f32, 
         ToolbarButton::Microphone => "mic",
         ToolbarButton::StrengthStep(false) => "minus",
         ToolbarButton::StrengthStep(true) => "plus",
-        ToolbarButton::RecentPage(false) => "back",
-        ToolbarButton::RecentPage(true) => "forward",
         _ => "info",
     };
     if matches!(b, ToolbarButton::Menu(BarMenu::Shapes | BarMenu::Blur)) {
         let x = (r.left + r.right) / 2.0;
-        glyphs::v4(gpu, name, rect(x - 16.0 * s, r.top, x + 4.0 * s, r.bottom), ink, 20.0 * s);
-        glyphs::v4(gpu, "chevron-small", rect(x + 6.0 * s, r.top, x + 16.0 * s, r.bottom), fade(ink, 0.7), 10.0 * s);
+        // `.seg` gap 2 and the chevron's margin −1: icon 20 + 1 + chevron 10, centred.
+        glyphs::v4(gpu, name, rect(x - 15.5 * s, r.top, x + 4.5 * s, r.bottom), ink, 20.0 * s);
+        glyphs::v4(gpu, "chevron-small", rect(x + 5.5 * s, r.top, x + 15.5 * s, r.bottom), fade(ink, 0.7), 10.0 * s);
     } else {
         glyphs::v4(gpu, name, r, ink, 20.0 * s);
     }
@@ -1181,6 +1444,146 @@ mod tests {
             }
         }
     }
+    /// The drawer grows without overlapping its neighbours, the level row opens on «Без цензуры»,
+    /// and a popover grows out of its trigger and leaves faster than it came.
+    #[test]
+    fn drawer_and_popover_move_as_the_reference_does() {
+        let shared = Shared::new().unwrap();
+        let text = TextStyles::new(&shared, 1.0).unwrap();
+        text.enable_motion(true);
+        let (size, sel) = ((1440.0, 900.0), rect(100.0, 100.0, 1100.0, 600.0));
+        let mut e = editor(None);
+        e.tool = Tool::Select;
+        let pose = |e: EditorBar, t: f64| {
+            text.set_animation_time(Some(t));
+            let target = toolbar_layout(&shared, &text, size, 1.0, sel, Some(e)).unwrap().unwrap();
+            (text.displayed(&target, Some(e), Some(None), 1.0), target)
+        };
+        pose(e, 0.0);
+        pose(e, 2.0);
+        let open = EditorBar { smart: SmartUi::Open, ..e };
+        pose(open, 3.0);
+        let (early, target) = pose(open, 3.08);
+        let d = early.drawer.unwrap();
+        let row = |l: &super::super::transition::Layout, b| l.buttons.iter().find(|c| c.button == b).unwrap().rect;
+        let tools = row(&early, ToolbarButton::Tool(Tool::Select));
+        let copy = row(&early, ToolbarButton::Copy);
+        assert!(d.clip.bottom - d.clip.top > 1.0 && d.clip.bottom - d.clip.top < 40.0, "{:?}", d.clip);
+        assert!(d.clip.top >= tools.bottom - 0.01 && copy.top >= d.clip.bottom - 0.01);
+        assert!(d.opacity < 0.9 && d.scale < 1.0);
+        let off = target.buttons.iter().find(|b| b.0 == ToolbarButton::CensorOff).unwrap().1;
+        let (settled, _) = pose(open, 4.0);
+        assert_eq!(settled.radios[0].map(|r| r.left), Some(off.left));
+        assert!(settled.drawer.unwrap().opacity == 1.0);
+        // Closing takes ~260 ms against ~420 ms opening.
+        pose(e, 5.0);
+        let (closing, _) = pose(e, 5.2);
+        assert!(closing.drawer.is_none_or(|d| d.clip.bottom - d.clip.top < 4.0));
+        let more = EditorBar { ui: BarState { menu: Some(BarMenu::More), ..e.ui }, ..e };
+        let (start, target) = pose(more, 7.0);
+        let p = start.popovers[0];
+        let trigger = target.buttons.iter().find(|b| b.0 == ToolbarButton::Menu(BarMenu::More)).unwrap().1;
+        assert!((p.scale - 0.96).abs() < 0.001 && p.opacity < 0.01);
+        assert!((p.origin.0 - (trigger.left + trigger.right) / 2.0).abs() < 0.5);
+        let (shown, _) = pose(more, 7.4);
+        assert!(shown.popovers[0].scale == 1.0 && shown.popovers[0].opacity == 1.0);
+        let (leaving, _) = pose(e, 8.0);
+        assert_eq!(leaving.popovers.len(), 1);
+        assert!(pose(e, 8.08).0.popovers[0].opacity < 0.6);
+        assert!(pose(e, 8.2).0.popovers.is_empty());
+    }
+    /// With KADR_MOTION_FRAMES=<dir>, renders the liquid pill, the drawer and a popover mid-flight
+    /// to PNGs for review; otherwise just draws them.
+    #[test]
+    fn mid_flight_frames_render() {
+        use windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_U;
+        use windows::Win32::Graphics::Direct2D::{
+            D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_CPU_READ, D2D1_BITMAP_OPTIONS_TARGET,
+            D2D1_MAP_OPTIONS_READ,
+        };
+        use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+        let shared = Shared::new().unwrap();
+        let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1().unwrap() };
+        let gpu = Gpu::new(&shared, &unsafe { factory.EnumAdapters1(0).unwrap() }, "motion frames".into()).unwrap();
+        let s = 1.5;
+        let (w, h) = (1100u32 * 3 / 2, 760u32 * 3 / 2);
+        let text = TextStyles::new(&shared, s).unwrap();
+        text.enable_motion(true);
+        let out = std::env::var_os("KADR_MOTION_FRAMES").map(std::path::PathBuf::from);
+        let sel = rect(40.0 * s, 380.0 * s, 1060.0 * s, 500.0 * s);
+        let base = EditorBar { tool: Tool::Select, ..editor(None) };
+        let counter = EditorBar { tool: Tool::Counter, ..base };
+        let open = EditorBar { smart: SmartUi::Open, ..counter };
+        let hard = EditorBar { smart: SmartUi::On(Censor::Hard, 6), ..open };
+        let more = EditorBar { ui: BarState { menu: Some(BarMenu::More), ..open.ui }, ..open };
+        let recent = EditorBar { ui: BarState { menu: Some(BarMenu::Recent), recent_count: 10, ..base.ui }, ..base };
+        let frames: &[(&str, EditorBar, f64)] = &[
+            ("rest", base, 0.0),
+            ("rest", base, 2.0),
+            ("pill-00", counter, 3.0),
+            ("pill-40ms", counter, 3.04),
+            ("pill-90ms", counter, 3.09),
+            ("pill-150ms", counter, 3.15),
+            ("pill-end", counter, 4.0),
+            ("drawer-00", open, 5.0),
+            ("drawer-80ms", open, 5.08),
+            ("drawer-160ms", open, 5.16),
+            ("drawer-300ms", open, 5.3),
+            ("drawer-end", open, 6.0),
+            ("level-00", hard, 6.5),
+            ("level-60ms", hard, 6.56),
+            ("level-end", hard, 7.5),
+            ("popover-00", more, 8.0),
+            ("popover-60ms", more, 8.06),
+            ("popover-140ms", more, 8.14),
+            ("popover-end", more, 9.0),
+            ("popover-leave-00", hard, 10.0),
+            ("popover-leave-60ms", hard, 10.06),
+            ("drawer-close-00", counter, 11.0),
+            ("drawer-close-100ms", counter, 11.1),
+            ("recent-paging", recent, 12.0),
+            ("recent-paging", recent, 13.0),
+        ];
+        for (name, e, t) in frames {
+            text.set_animation_time(Some(*t));
+            let marks = Marks {
+                selection: Some(RECT {
+                    left: sel.left as i32,
+                    top: sel.top as i32,
+                    right: sel.right as i32,
+                    bottom: sel.bottom as i32,
+                }),
+                toolbar: Some(Toolbar { recent: &[], hovered: None, editor: Some(*e) }),
+                ..Default::default()
+            };
+            let scene = Scene { frame: None, origin: (0, 0), size: (w, h), scale: s, marks };
+            unsafe {
+                let props = crate::gpu::bitmap_props(D2D1_BITMAP_OPTIONS_TARGET);
+                let target = gpu.d2d.CreateBitmap(D2D_SIZE_U { width: w, height: h }, None, 0, &props).unwrap();
+                gpu.d2d.SetTarget(&target);
+                gpu.d2d.BeginDraw();
+                gpu.d2d.Clear(Some(&D2D1_COLOR_F { r: 0.35, g: 0.45, b: 0.5, a: 1.0 }));
+                draw(&gpu, &shared, &text, &Theme::current(), &scene, sel, scene.marks.toolbar.unwrap()).unwrap();
+                gpu.d2d.EndDraw(None, None).unwrap();
+                let Some(dir) = &out else { continue };
+                let read = crate::gpu::bitmap_props(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW);
+                let readback = gpu.d2d.CreateBitmap(D2D_SIZE_U { width: w, height: h }, None, 0, &read).unwrap();
+                readback.CopyFromBitmap(None, &target, None).unwrap();
+                let mapped = readback.Map(D2D1_MAP_OPTIONS_READ).unwrap();
+                let mut bgra = Vec::with_capacity((w * h * 4) as usize);
+                for y in 0..h {
+                    bgra.extend_from_slice(std::slice::from_raw_parts(
+                        mapped.bits.add((y * mapped.pitch) as usize),
+                        (w * 4) as usize,
+                    ));
+                }
+                readback.Unmap().unwrap();
+                let image = kadr_doc::Image::new(kadr_doc::Rect::new(0, 0, w as i32, h as i32), bgra);
+                std::fs::create_dir_all(dir).unwrap();
+                std::fs::write(dir.join(format!("{name}.png")), kadr_doc::pixels::encode_png(&image).unwrap()).unwrap();
+            }
+        }
+    }
     #[test]
     fn choosing_a_group_item_remembers_it_and_closes_the_group() {
         let mut ui = BarState::default();
@@ -1262,6 +1665,10 @@ mod tests {
                         .iter()
                         .filter(|b| matches!(b.0, ToolbarButton::RecentPin(_) | ToolbarButton::RecentDelete(_)))
                     {
+                        // Cards scrolled under the grid's edge are hidden: they must not take the click.
+                        let view = recent_view(popup, scale);
+                        let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+                        let shown = cx >= view.left && cx < view.right && cy >= view.top && cy < view.bottom;
                         let hit = toolbar_hit(
                             &shared,
                             &text,
@@ -1274,7 +1681,11 @@ mod tests {
                             ),
                             Some(e),
                         );
-                        assert_eq!(hit, Some(*b));
+                        if shown {
+                            assert_eq!(hit, Some(*b));
+                        } else {
+                            assert_ne!(hit, Some(*b), "{b:?} is scrolled out of view");
+                        }
                     }
                 }
             }

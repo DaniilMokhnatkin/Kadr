@@ -46,6 +46,8 @@ const PAD: f32 = 28.0;
 const TOP: f32 = 92.0;
 const GAP: f32 = 16.0;
 const LABEL: f32 = 34.0;
+/// Work area of a 1920×1080 screen at 150 % in DIPs: the design snapshots are cut to it.
+const PREVIEW_HEIGHT: f32 = 656.0;
 /// Clear needs a second click within this time.
 const CONFIRM_MS: u32 = 3500;
 const TIMER_CONFIRM: usize = 1;
@@ -56,6 +58,8 @@ enum Hit {
     Close,
     Back,
     Clear,
+    /// «Ещё N ниже»: scrolls a page down.
+    More,
     Card(usize),
     Pin(usize),
     Delete(usize),
@@ -67,6 +71,11 @@ struct Layout {
     back: Option<D2D_RECT_F>,
     clear: D2D_RECT_F,
     cards: Vec<D2D_RECT_F>,
+    /// Cards still below the window's edge, and the pill that says so.
+    below: usize,
+    more: Option<D2D_RECT_F>,
+    /// Scroll bar track and thumb, when the grid is taller than the window.
+    bar: Option<(D2D_RECT_F, D2D_RECT_F)>,
 }
 
 /// Five across once there are more than three rows of four: 25 snapshots stay on one screen.
@@ -85,7 +94,7 @@ fn layout(width: f32, s: f32, count: usize, returning: bool) -> Layout {
     let right = close.left - 10.0 * s;
     let back = returning.then(|| rect(right - 116.0 * s, y, right, y + h));
     let clear_right = back.map_or(right, |b| b.left - 8.0 * s);
-    let clear = rect(clear_right - 112.0 * s, y, clear_right, y + h);
+    let clear = rect(clear_right - 124.0 * s, y, clear_right, y + h);
     let cols = columns(width, s, count);
     let tile_w = (width - 2.0 * PAD * s - (cols - 1) as f32 * GAP * s) / cols as f32;
     let tile_h = (tile_w * 0.625).round();
@@ -97,7 +106,37 @@ fn layout(width: f32, s: f32, count: usize, returning: bool) -> Layout {
             rect(left, top, left + tile_w.round(), top + tile_h)
         })
         .collect();
-    Layout { scale: s, close, back, clear, cards }
+    Layout { scale: s, close, back, clear, cards, below: 0, more: None, bar: None }
+}
+
+/// The grid scrolled by `scroll` inside a window of `height`: cards move, and when some are out of
+/// sight a thin bar on the right and a «Ещё N ниже» pill say how much is left.
+fn scrolled(mut l: Layout, width: f32, height: f32, count: usize, scroll: f32) -> Layout {
+    let s = l.scale;
+    let content = desired_height(width, s, count);
+    let over = (content - height).max(0.0);
+    let scroll = scroll.clamp(0.0, over);
+    for c in &mut l.cards {
+        c.top -= scroll;
+        c.bottom -= scroll;
+    }
+    if over < 1.0 {
+        return l;
+    }
+    // A card counts as hidden until its picture is at least half in view.
+    l.below = l.cards.iter().filter(|c| (c.top + c.bottom) / 2.0 > height).count();
+    let track = rect(width - 9.0 * s, TOP * s, width - 5.0 * s, height - 12.0 * s);
+    let visible = height - TOP * s;
+    let span = track.bottom - track.top;
+    let thumb_h = (span * visible / (content - TOP * s)).clamp(28.0 * s, span);
+    let top = track.top + (span - thumb_h) * scroll / over;
+    l.bar = Some((track, rect(track.left, top, track.right, top + thumb_h)));
+    if l.below > 0 {
+        let w = 172.0 * s;
+        let x = (width - w) / 2.0;
+        l.more = Some(rect(x, height - 48.0 * s, x + w, height - 16.0 * s));
+    }
+    l
 }
 
 fn desired_height(width: f32, s: f32, count: usize) -> f32 {
@@ -117,6 +156,13 @@ fn hit(l: &Layout, x: f32, y: f32, cards: usize, can_clear: bool) -> Option<Hit>
     }
     if can_clear && inside(l.clear, x, y) {
         return Some(Hit::Clear);
+    }
+    if l.more.is_some_and(|m| inside(m, x, y)) {
+        return Some(Hit::More);
+    }
+    // Cards scrolled under the header cannot be clicked through it.
+    if y < (TOP - 10.0) * l.scale {
+        return None;
     }
     for (i, r) in l.cards.iter().take(cards).enumerate() {
         if inside(card_button(*r, l.scale, false), x, y) {
@@ -255,7 +301,7 @@ struct State {
     focus: usize,
     focus_visible: bool,
     ring: Option<[Spring; 4]>,
-    buttons: [(Spring, Spring); 3],
+    buttons: [(Spring, Spring); 4],
     confirming: bool,
     danger: Spring,
     /// How far the grid is scrolled, in pixels, when it is taller than the window.
@@ -269,21 +315,18 @@ impl State {
         &mut self.buttons[match h {
             Hit::Close => 0,
             Hit::Back => 1,
+            Hit::More => 3,
             _ => 2,
         }]
     }
-    fn layout(&self, width: f32) -> Layout {
-        let mut l = layout(width, self.scale, self.cards.len(), self.returning);
-        for c in &mut l.cards {
-            c.top -= self.scroll;
-            c.bottom -= self.scroll;
-        }
-        l
+    fn layout(&self, (width, height): (f32, f32)) -> Layout {
+        let n = self.cards.len();
+        scrolled(layout(width, self.scale, n, self.returning), width, height, n, self.scroll)
     }
     /// Scrolls by `dy` pixels within what the grid overflows the window by.
     fn scroll_by(&mut self, dy: f32, (w, h): (f32, f32)) {
         let over = (desired_height(w, self.scale, self.cards.len()) - h).max(0.0);
-        self.scroll = (self.scroll + dy).clamp(0.0, over);
+        self.scroll = (self.scroll.min(over) + dy).clamp(0.0, over);
     }
     fn set_hover(&mut self, h: Option<Hit>) {
         if self.hover == h {
@@ -361,7 +404,7 @@ fn new_state(hwnd: HWND, host: HWND, message: u32, scale: f32) -> State {
         focus: 0,
         focus_visible: false,
         ring: None,
-        buttons: [(spring(), spring()), (spring(), spring()), (spring(), spring())],
+        buttons: [(spring(), spring()), (spring(), spring()), (spring(), spring()), (spring(), spring())],
         confirming: false,
         danger: Spring::with(0.0, Curve::FADE).precise(0.002),
         scroll: 0.0,
@@ -435,6 +478,7 @@ impl Window {
                 d.error = None;
                 d.returning = returning;
                 d.focus_visible = false;
+                d.scroll = 0.0;
                 d.set_hover(None);
                 if d.confirming {
                     d.set_confirm(false);
@@ -635,7 +679,7 @@ fn paint(ui: &Ui, st: &State, size: (f32, f32), now: f64, opaque: bool) -> bool 
     let ctx = &gpu.d2d;
     let theme = Theme::current();
     let s = st.scale;
-    let l = st.layout(size.0);
+    let l = st.layout(size);
     let mut moving = false;
     let mut sample = |spring: &Spring| {
         moving |= spring.active(now);
@@ -706,7 +750,8 @@ fn paint(ui: &Ui, st: &State, size: (f32, f32), now: f64, opaque: bool) -> bool 
     let neutral = mix(theme.tint, theme.tint_strong, hover);
     fill(gpu, mix(neutral, rgb(0xd70015, 1.0), danger), b, 9.0 * s);
     let ink = if can_clear { mix(theme.text, theme.on_accent, danger) } else { theme.disabled };
-    let label = if st.confirming { "Удалить незакреплённые?" } else { "Очистить всё" };
+    // The confirmation fits the button; pinned captures are kept either way.
+    let label = if st.confirming { "Точно удалить?" } else { "Очистить всё" };
     text(gpu, &ui.fonts.button, label, b, ink);
     unsafe {
         ctx.SetTransform(&Matrix3x2::identity());
@@ -786,13 +831,32 @@ fn paint(ui: &Ui, st: &State, size: (f32, f32), now: f64, opaque: bool) -> bool 
     unsafe {
         ctx.PopAxisAlignedClip();
     }
+
+    // More than fits: a thin bar on the right, as in Finder, and a pill over the last row.
+    if let Some((track, thumb)) = l.bar {
+        fill(gpu, fade(theme.text_muted, 0.12), track, 2.0 * s);
+        fill(gpu, fade(theme.text_muted, 0.55), thumb, 2.0 * s);
+    }
+    if let Some(m) = l.more {
+        let (hover, press) = (sample(&st.buttons[3].0), sample(&st.buttons[3].1));
+        unsafe {
+            ctx.SetTransform(&scaled_about(m, 1.0 - 0.04 * press, 0.0, 0.0));
+        }
+        shadow(gpu, m, 16.0 * s, s, 8.0, 3.0, 0.18 + 0.06 * hover);
+        fill(gpu, theme.surface, m, 16.0 * s);
+        fill(gpu, fade(theme.tint_strong, hover), m, 16.0 * s);
+        stroke(gpu, theme.hairline, inflate(m, -0.5), 16.0 * s, 1.0);
+        text(gpu, &ui.fonts.button, &format!("Ещё {} ниже  ↓", count_label(l.below)), m, theme.text);
+        unsafe {
+            ctx.SetTransform(&Matrix3x2::identity());
+        }
+    }
     moving
 }
 
-fn focus_ring_target(st: &mut State, width: f32) {
+fn focus_ring_target(st: &mut State, (width, height): (f32, f32)) {
     // The keyboard may walk past the window's edge: bring that card into view first.
-    let height = client_size(st.hwnd).1 as f32;
-    if let Some(r) = st.layout(width).cards.get(st.focus).copied() {
+    if let Some(r) = st.layout((width, height)).cards.get(st.focus).copied() {
         let s = st.scale;
         if r.top < TOP * s {
             st.scroll_by(r.top - TOP * s, (width, height));
@@ -800,7 +864,7 @@ fn focus_ring_target(st: &mut State, width: f32) {
             st.scroll_by(r.bottom + LABEL * s - height, (width, height));
         }
     }
-    let l = st.layout(width);
+    let l = st.layout((width, height));
     let Some(r) = l.cards.get(st.focus).map(|r| inflate(*r, 4.0 * st.scale)) else { return };
     let now = st.now();
     let values = [r.left, r.top, r.right, r.bottom];
@@ -824,6 +888,10 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         let _ = InvalidateRect(Some(hwnd), None, false);
     };
     let width = || client_size(hwnd).0 as f32;
+    let size = || {
+        let (w, h) = client_size(hwnd);
+        (w as f32, h as f32)
+    };
     match msg {
         // The whole window is client area: no system caption, DWM still draws shadow and corners.
         WM_NCCALCSIZE if wp.0 != 0 => return LRESULT(0),
@@ -834,7 +902,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             }
             let caption = DATA.with(|d| {
                 d.try_borrow().ok().as_deref().and_then(Option::as_ref).is_some_and(|st| {
-                    let l = st.layout(width());
+                    let l = st.layout(size());
                     (p.y as f32) < (TOP - 12.0) * st.scale
                         && hit(&l, p.x as f32, p.y as f32, st.cards.len(), !st.cards.is_empty()).is_none()
                 })
@@ -875,7 +943,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                         }
                         st.tracking = true;
                     }
-                    let l = st.layout(width());
+                    let l = st.layout(size());
                     let h = hit(&l, x, y, st.cards.len(), !st.cards.is_empty());
                     st.set_hover(h);
                 }
@@ -910,7 +978,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 if let Ok(mut guard) = d.try_borrow_mut()
                     && let Some(st) = guard.as_mut()
                 {
-                    let l = st.layout(width());
+                    let l = st.layout(size());
                     let h = hit(&l, x, y, st.cards.len(), !st.cards.is_empty());
                     st.press(h);
                     st.focus_visible = false;
@@ -930,7 +998,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let action = DATA.with(|d| {
                 let Ok(mut state) = d.try_borrow_mut() else { return Default::default() };
                 let st = state.as_mut()?;
-                let l = st.layout(width());
+                let l = st.layout(size());
                 let h = hit(&l, x, y, st.cards.len(), !st.cards.is_empty());
                 let pressed = st.pressed;
                 st.press(None);
@@ -947,6 +1015,12 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     Hit::Card(i) => st.cards.get(i).map(|c| Request::Load(c.id.clone())),
                     Hit::Pin(i) => st.cards.get(i).map(|c| Request::Pin(c.id.clone(), !c.pinned)),
                     Hit::Delete(i) => st.cards.get(i).map(|c| Request::Delete(c.id.clone())),
+                    Hit::More => {
+                        let (w, h) = size();
+                        st.scroll_by(h - (TOP + 40.0) * st.scale, (w, h));
+                        st.set_hover(None);
+                        None
+                    }
                     Hit::Close | Hit::Back => Some(Request::Close),
                 })
             });
@@ -1010,7 +1084,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     _ => return None,
                 };
                 st.focus_visible = true;
-                focus_ring_target(st, width());
+                focus_ring_target(st, size());
                 None
             });
             if let Some(id) = load {
@@ -1080,7 +1154,8 @@ pub fn preview(
         c.hover.snap(1.0);
     }
     let w = (WIDTH * scale).round();
-    let h = desired_height(w, scale, st.cards.len().max(if loading { 4 } else { 0 })).round();
+    // No taller than a 1080p screen at 150 % leaves for it, so a long list shows how it scrolls.
+    let h = desired_height(w, scale, st.cards.len().max(if loading { 4 } else { 0 })).min(PREVIEW_HEIGHT * scale).round();
     glass::render_offscreen(&ui.device, w as u32, h as u32, || {
         paint(&ui, &st, (w, h), 10.0, true);
     })
@@ -1117,6 +1192,30 @@ mod tests {
         assert_eq!(columns(WIDTH, 1.0, 25), 5);
         assert_eq!(columns(WIDTH, 1.0, 10), 4);
         assert!(desired_height(WIDTH, 1.0, 25) < 1000.0);
+    }
+    #[test]
+    fn a_list_taller_than_the_window_says_so_and_scrolls_to_every_card() {
+        for s in [1.0f32, 1.5, 2.0] {
+            let (w, h) = (WIDTH * s, PREVIEW_HEIGHT * s);
+            // Ten fit: no bar, no pill.
+            let l = scrolled(layout(w, s, 10, false), w, h, 10, 0.0);
+            assert!(l.bar.is_none() && l.more.is_none() && l.below == 0);
+            // Twenty-five do not: the pill counts what is below and scrolls there.
+            let l = scrolled(layout(w, s, 25, false), w, h, 25, 0.0);
+            assert!(l.bar.is_some() && l.below > 0, "{s}: {}", l.below);
+            let m = l.more.unwrap();
+            assert_eq!(hit(&l, (m.left + m.right) / 2.0, (m.top + m.bottom) / 2.0, 25, true), Some(Hit::More));
+            let end = scrolled(layout(w, s, 25, false), w, h, 25, f32::MAX);
+            assert!(end.more.is_none() && end.below == 0);
+            let last = end.cards[24];
+            assert!(last.bottom + LABEL * s <= h + 0.5, "the last card comes fully into view");
+            let (track, thumb) = end.bar.unwrap();
+            assert!((thumb.bottom - track.bottom).abs() < 0.5, "the thumb reaches the end of its track");
+            // A card scrolled under the header is not clicked through it.
+            let c = end.cards[0];
+            assert!(c.top < TOP * s);
+            assert_eq!(hit(&end, (c.left + c.right) / 2.0, (TOP - 20.0) * s, 25, true), None);
+        }
     }
     #[test]
     fn clear_is_not_clickable_without_snapshots() {

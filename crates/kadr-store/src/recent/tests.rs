@@ -106,6 +106,24 @@ fn updates_do_not_rewrite_frames_and_stale_export_cannot_delete_new_edits() {
     fs::remove_dir(&store.root).unwrap();
 }
 #[test]
+fn up_to_twenty_five_captures_are_kept_and_the_twenty_sixth_evicts_the_oldest() {
+    let root = std::env::temp_dir().join(format!("kadr-recent-limit25-{}", std::process::id()));
+    let mut store = Store::new(root, TestCrypto, 100).unwrap();
+    for n in 0..25 {
+        store.create(&format!("abc-{n:x}"), n, &frames(), &document()).unwrap();
+    }
+    assert_eq!(store.list().unwrap().len(), MAX_ENTRIES, "a larger request is held to the limit, not to 10");
+    store.create("abc-19", 25, &frames(), &document()).unwrap();
+    let entries = store.list().unwrap();
+    assert_eq!(entries.len(), 25);
+    assert_eq!(entries[0].id, "abc-19");
+    assert!(!store.root.join("abc-0").exists(), "the oldest goes first");
+    store.set_max(10).unwrap();
+    assert_eq!(store.list().unwrap().len(), 10, "a smaller limit trims the oldest at once");
+    store.clear().unwrap();
+    fs::remove_dir_all(&store.root).unwrap();
+}
+#[test]
 fn eleventh_draft_evicts_oldest_and_foreign_or_partial_directories_are_untouched() {
     let store = setup("retention");
     fs::create_dir_all(store.root.join("foreign-files")).unwrap();

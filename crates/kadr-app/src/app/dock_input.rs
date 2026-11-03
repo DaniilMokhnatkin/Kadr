@@ -34,7 +34,7 @@ impl App {
         }
         self.recent_entries = entries;
         if let Some(a) = &mut self.active {
-            a.bar.page = a.bar.page.min(self.recent_items.len().saturating_sub(1) / 6);
+            a.bar.scroll = a.bar.scroll.min(kadr_render::scene::recent_scroll_limit(self.recent_items.len()));
             if let Some(entry) = a.draft.as_ref().and_then(|d| self.recent_entries.iter().find(|e| e.id == d.token.id))
             {
                 a.bar.pinned = entry.pinned;
@@ -96,11 +96,10 @@ impl App {
                 }
             }
             ToolbarButton::StartRecord => self.start_record_from_selection(),
-            ToolbarButton::Smart => {
-                let Some(a) = &self.active else { return true };
-                let level = self.smart_ui(&a.drawing).toggled(self.last_censor);
-                self.set_censor(level);
-            }
+            // Opening the drawer only shows the levels, on «Без цензуры»: nothing is recognised
+            // until one is chosen. Closing it takes away whatever level was on.
+            ToolbarButton::Smart => self.toggle_censor_drawer(),
+            ToolbarButton::CensorOff => self.set_censor(None),
             ToolbarButton::Censor(level) => {
                 self.last_censor = level;
                 self.set_censor(Some(level));
@@ -154,16 +153,6 @@ impl App {
                     a.draft = None;
                 }
                 self.recent.send(Command::Clear);
-            }
-            ToolbarButton::RecentPage(next) => {
-                if let Some(a) = &mut self.active {
-                    a.bar.page = if next {
-                        (a.bar.page + 1).min(self.recent_items.len().saturating_sub(1) / 6)
-                    } else {
-                        a.bar.page.saturating_sub(1)
-                    };
-                    a.bar.focus = None;
-                }
             }
             _ => return false,
         }

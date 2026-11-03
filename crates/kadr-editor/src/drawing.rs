@@ -299,6 +299,8 @@ impl Drawing {
     }
     /// Возвращает true, когда событие принадлежит слою рисования, иначе рамке захвата.
     pub fn down(&mut self, p: Point, crop: Rect, seed: u64) -> bool {
+        // The previous release never arrived: keep that gesture as it was seen, never replace it.
+        self.finish_gesture();
         self.finish_text();
         if self.tool == Tool::Eraser {
             if !crop.contains(p) {
@@ -496,6 +498,14 @@ impl Drawing {
             return true;
         }
         false
+    }
+    /// A pointer move. Without the button held the release went past us (capture lost): the gesture
+    /// ends where it was last seen, and the move never extends it towards the cursor.
+    pub fn drag(&mut self, p: Point, crop: Rect, shift: bool, held: bool) -> bool {
+        if !held && self.busy() {
+            return self.finish_gesture();
+        }
+        self.motion(p, crop, shift)
     }
     pub fn up(&mut self, p: Point, crop: Rect, shift: bool) -> bool {
         self.motion(p, crop, shift);
@@ -771,6 +781,51 @@ mod tests {
         assert!(!d.motion(Point::new(80, 90), C, false));
         d.undo();
         assert!(d.shapes().is_empty());
+    }
+    #[test]
+    fn moving_after_the_release_never_changes_the_stroke() {
+        let mut d = Drawing::default();
+        d.set_tool(Tool::Pen);
+        d.down(Point::new(10, 20), C, 1);
+        d.drag(Point::new(40, 30), C, false, true);
+        d.up(Point::new(60, 50), C, false);
+        let committed = d.shapes().to_vec();
+        for p in [Point::new(200, 300), Point::new(400, 100)] {
+            d.drag(p, C, false, false);
+            d.drag(p, C, false, true);
+        }
+        assert_eq!(d.shapes(), committed);
+        assert!(d.preview().is_none());
+    }
+    #[test]
+    fn a_release_that_went_elsewhere_ends_the_stroke_where_it_was_seen() {
+        for tool in [Tool::Pen, Tool::Arrow] {
+            let mut d = Drawing::default();
+            d.set_tool(tool);
+            d.down(Point::new(10, 20), C, 1);
+            d.drag(Point::new(50, 60), C, false, true);
+            let visible = d.preview().unwrap().clone();
+            // The button is up but WM_LBUTTONUP never came: no segment towards the cursor.
+            assert!(d.drag(Point::new(300, 400), C, false, false));
+            assert_eq!(d.shapes(), std::slice::from_ref(&visible));
+            assert!(!d.drag(Point::new(320, 420), C, false, false));
+            assert_eq!(d.shapes(), std::slice::from_ref(&visible));
+            d.undo();
+            assert!(d.shapes().is_empty(), "{tool:?}: still one history step");
+        }
+    }
+    #[test]
+    fn a_press_while_a_stroke_is_open_keeps_that_stroke() {
+        let mut d = Drawing::default();
+        d.set_tool(Tool::Pen);
+        d.down(Point::new(10, 20), C, 1);
+        d.motion(Point::new(50, 60), C, false);
+        let visible = d.preview().unwrap().clone();
+        d.down(Point::new(200, 200), C, 2);
+        assert_eq!(d.shapes(), std::slice::from_ref(&visible));
+        d.up(Point::new(260, 230), C, false);
+        assert_eq!(d.shapes().len(), 2);
+        assert_eq!(d.shapes()[0], visible);
     }
     #[test]
     fn active_tool_does_not_start_a_crop_drag_outside_the_selection() {

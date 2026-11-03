@@ -168,7 +168,7 @@ pub struct Recent {
 }
 impl Default for Recent {
     fn default() -> Self {
-        Self { enabled: true, max: 25 }
+        Self { enabled: true, max: crate::recent::MAX_ENTRIES }
     }
 }
 
@@ -176,7 +176,7 @@ impl Config {
     /// Проверяем весь набор до замены действующих настроек и регистрации клавиш.
     pub fn parse(text: &str) -> Result<Self, String> {
         let config: Self = toml::from_str(text).map_err(|e| e.to_string())?;
-        if !(1..=25).contains(&config.recent.max) {
+        if !(1..=crate::recent::MAX_ENTRIES).contains(&config.recent.max) {
             return Err("recent.max должен быть от 1 до 25".into());
         }
         if !(1..=200).contains(&config.clipboard.max) {
