@@ -255,6 +255,26 @@ impl Drawing {
             changed
         });
     }
+    /// The v4 presentation row is one choice and one undo operation, including leaving a callout.
+    pub fn set_text_presentation(&mut self, style: TextStyle, callout: bool) {
+        self.text_style = style;
+        self.callout = callout;
+        if callout {
+            self.selected = self.target();
+        }
+        self.restyle(|shape| {
+            if shape.tool != Tool::Text {
+                return false;
+            }
+            let changed = shape.text_style != style || shape.callout != callout;
+            shape.text_style = style;
+            shape.callout = callout;
+            if callout && shape.points.len() < 3 {
+                shape.points.push([shape.points[0][0] - 36, shape.points[0][1] + shape.font_size() * 3]);
+            }
+            changed
+        });
+    }
     pub fn toggle_callout(&mut self) {
         self.callout = !self.callout;
         let value = self.callout;
@@ -859,6 +879,25 @@ mod tests {
         d.set_color(4);
         d.set_strength(2);
         assert_eq!((d.shapes()[2].color, d.shapes()[2].strength), (blur.color, 2));
+    }
+    #[test]
+    fn choosing_a_text_presentation_leaves_callout_and_undo_restores_both_in_one_step() {
+        let mut d = Drawing::default();
+        d.set_tool(Tool::Text);
+        d.down(Point::new(10, 10), C, 1);
+        d.text_char('A');
+        d.finish_text();
+        d.set_text_presentation(TextStyle::Outline, true);
+        assert!(d.callout && d.shapes()[0].callout);
+        d.set_text_presentation(TextStyle::Filled, false);
+        assert!(!d.callout && !d.shapes()[0].callout);
+        assert_eq!(d.shapes()[0].text_style, TextStyle::Filled);
+        d.undo();
+        assert!(d.shapes()[0].callout);
+        assert_eq!(d.shapes()[0].text_style, TextStyle::Outline);
+        d.redo();
+        assert!(!d.shapes()[0].callout);
+        assert_eq!(d.shapes()[0].text_style, TextStyle::Filled);
     }
     #[test]
     fn unicode_text_is_one_operation_and_escape_reverts_edit() {

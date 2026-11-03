@@ -80,7 +80,7 @@ fn run_tool(
                 magnifier: if editor { None } else { Some(&magnifier) },
                 toolbar: Some(Toolbar {
                     recent: dock.map_or(&[], |d| d.items.as_slice()),
-                    hovered: if dock.is_some() { None } else { Some(ToolbarButton::Save) },
+                    hovered: dock.map_or(Some(ToolbarButton::Save), |d| d.hovered),
                     editor: editor.then_some(scene::EditorBar {
                         ui: dock.map_or_else(Default::default, |d| d.ui),
                         text_style: Default::default(),
@@ -249,6 +249,7 @@ struct DockPreview {
     ui: scene::BarState,
     smart: scene::SmartUi,
     items: Vec<scene::RecentItem>,
+    hovered: Option<ToolbarButton>,
 }
 /// Render the production dock and every menu, without opening windows or capturing the desktop.
 pub fn dock_set(dir: &str) -> Result<(), Box<dyn Error>> {
@@ -280,6 +281,7 @@ pub fn dock_set(dir: &str) -> Result<(), Box<dyn Error>> {
                 ui: scene::BarState { menu, pinned: true, recent_count: 6, ..Default::default() },
                 smart,
                 items,
+                hovered: (name == "recent").then_some(ToolbarButton::RecentOpen(2)),
             };
             run_tool(
                 dir.join(format!("{name}-{}.png", (scale * 100.0) as u32)).to_str().unwrap(),
@@ -288,6 +290,12 @@ pub fn dock_set(dir: &str) -> Result<(), Box<dyn Error>> {
                 tool,
                 None,
                 Some(&preview),
+            )?;
+        }
+        for (name, report) in [("about", false), ("about-report", true)] {
+            std::fs::write(
+                dir.join(format!("{name}-{}.png", (scale * 100.0) as u32)),
+                kadr_doc::pixels::encode_png(&crate::about_window::preview(scale, report)?)?,
             )?;
         }
     }

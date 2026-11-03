@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
-use windows::Win32::Graphics::Direct2D::{D2D1_ANTIALIAS_MODE_ALIASED, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE};
+use windows::Win32::Graphics::Direct2D::{D2D1_ANTIALIAS_MODE_ALIASED, D2D1_DRAW_TEXT_OPTIONS_NONE};
 use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dwm::*;
 use windows::Win32::Graphics::Gdi::{
@@ -30,9 +30,9 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{BOOL, PCWSTR, w};
 use windows_numerics::Vector2;
 
-const WIDTH: f32 = 440.0;
-const PAD: f32 = 24.0;
-const ROW: f32 = 46.0;
+const WIDTH: f32 = 400.0;
+const PAD: f32 = 8.0;
+const ROW: f32 = 44.0;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 /// The send worker is done: its outcome waits in `SENT`.
 const WM_SENT: u32 = WM_APP + 1;
@@ -51,11 +51,11 @@ const LOG_LINES: usize = 20;
 
 const FEATURES: [&str; 6] = [
     "Снимок и запись экрана",
-    "Разметка и размытие",
+    "15 инструментов разметки",
     "Скрытие личных данных",
     "Распознавание и перевод",
-    "Недавние и закрепление",
-    "История буфера по Win+V",
+    "Недавние с закреплением",
+    "Горячие клавиши",
 ];
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -111,7 +111,7 @@ fn layout(view: View, width: f32, s: f32) -> Layout {
     let (left, right) = (PAD * s, width - PAD * s);
     let zero = rect(0.0, 0.0, 0.0, 0.0);
     let mut l = Layout {
-        close: rect(width - 44.0 * s, 12.0 * s, width - 12.0 * s, 44.0 * s),
+        close: rect(width - 44.0 * s, 0.0, width, 44.0 * s),
         icon: zero,
         name: zero,
         version: zero,
@@ -135,39 +135,35 @@ fn layout(view: View, width: f32, s: f32) -> Layout {
     match view {
         View::About => {
             let mid = width / 2.0;
-            l.icon = rect(mid - 32.0 * s, 36.0 * s, mid + 32.0 * s, 100.0 * s);
-            l.name = rect(left, 112.0 * s, right, 140.0 * s);
-            l.version = rect(left, 140.0 * s, right, 160.0 * s);
-            l.update = rect(left, 180.0 * s, right, (180.0 + ROW) * s);
-            l.check = rect(
-                l.update.right - 124.0 * s,
-                l.update.top + 6.0 * s,
-                l.update.right - 6.0 * s,
-                l.update.bottom - 6.0 * s,
-            );
-            l.about = rect(left + 4.0 * s, l.update.bottom + 16.0 * s, right - 4.0 * s, l.update.bottom + 60.0 * s);
-            let top = l.about.bottom + 12.0 * s;
-            let column = (right - left) / 2.0;
+            l.icon = rect(mid - 32.0 * s, 32.0 * s, mid + 32.0 * s, 96.0 * s);
+            l.name = rect(left, 108.0 * s, right, 134.4 * s);
+            l.version = rect(left, 138.4 * s, right, 155.2 * s);
+            l.update = rect(left, 171.2 * s, right, (171.2 + ROW) * s);
+            l.check = rect(l.update.right - 93.3 * s, l.update.top, l.update.right, l.update.bottom);
+            l.about = rect(left + 14.0 * s, 231.2 * s, right - 14.0 * s, 270.2 * s);
+            let top = 286.2 * s;
+            let column = 186.0 * s;
             for (i, r) in l.features.iter_mut().enumerate() {
-                let (x, y) = (left + 4.0 * s + (i % 2) as f32 * column, top + (i / 2) as f32 * 24.0 * s);
-                *r = rect(x, y, x + column - 8.0 * s, y + 24.0 * s);
+                let (x, y) = (left + 14.0 * s + (i % 2) as f32 * column, top + (i / 2) as f32 * 26.8 * s);
+                *r = rect(x, y, x + 170.0 * s, y + 16.8 * s);
             }
-            let y = top + 3.0 * 24.0 * s + 20.0 * s;
-            l.report = rect(left, y, mid - 4.0 * s, y + 40.0 * s);
-            l.support = rect(mid + 4.0 * s, y, right, y + 40.0 * s);
+            let y = 380.6 * s;
+            l.report = rect(left, y, mid - 4.0 * s, y + 44.0 * s);
+            l.support = rect(mid + 4.0 * s, y, right, y + 44.0 * s);
             l.height = l.report.bottom + PAD * s;
         }
         View::Report => {
-            l.back = rect(left - 8.0 * s, 12.0 * s, left + 140.0 * s, 44.0 * s);
-            l.title = rect(left, 56.0 * s, right, 88.0 * s);
-            l.text_label = rect(left + 4.0 * s, 96.0 * s, right, 120.0 * s);
-            l.text = rect(left, 122.0 * s, right, 254.0 * s);
-            l.contact_label = rect(left + 4.0 * s, 264.0 * s, right, 288.0 * s);
-            l.contact = rect(left, 290.0 * s, right, 330.0 * s);
-            l.details = rect(left, 346.0 * s, right, (346.0 + ROW) * s);
-            l.send = rect(left, l.details.bottom + 16.0 * s, right, l.details.bottom + 56.0 * s);
-            l.status = rect(left, l.send.bottom + 6.0 * s, right, l.send.bottom + 30.0 * s);
-            l.height = l.status.bottom + 12.0 * s;
+            l.back = rect(left, 8.0 * s, left + 132.0 * s, 52.0 * s);
+            l.close = rect(width - 52.0 * s, 8.0 * s, width - 8.0 * s, 52.0 * s);
+            l.title = rect(left + 14.0 * s, 64.0 * s, right - 14.0 * s, 86.1 * s);
+            l.text_label = rect(left + 14.0 * s, 98.1 * s, right, 114.9 * s);
+            l.text = rect(left, 122.9 * s, right, 226.9 * s);
+            l.contact_label = rect(left + 14.0 * s, 239.0 * s, right, 255.8 * s);
+            l.contact = rect(left, 263.8 * s, right, 307.8 * s);
+            l.details = rect(left, 315.8 * s, right, (315.8 + ROW) * s);
+            l.status = rect(left + 14.0 * s, 367.8 * s, right - 14.0 * s, 403.8 * s);
+            l.send = rect(left, 411.8 * s, right, 455.8 * s);
+            l.height = l.send.bottom + 8.0 * s;
         }
     }
     l
@@ -195,8 +191,10 @@ struct Fonts {
     title: IDWriteTextFormat,
     label: IDWriteTextFormat,
     hint: IDWriteTextFormat,
-    centered: IDWriteTextFormat,
     chip: IDWriteTextFormat,
+    version: IDWriteTextFormat,
+    small: IDWriteTextFormat,
+    primary: IDWriteTextFormat,
     body: IDWriteTextFormat,
     field: IDWriteTextFormat,
 }
@@ -541,13 +539,15 @@ fn ensure_fonts(st: &mut State) -> bool {
     let fonts = (|| {
         Some(Fonts {
             name: make(22.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, center, false)?,
-            title: make(20.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, lead, false)?,
-            label: make(14.0, DWRITE_FONT_WEIGHT_REGULAR, lead, false)?,
+            title: make(17.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, lead, false)?,
+            label: make(13.0, DWRITE_FONT_WEIGHT_REGULAR, lead, false)?,
             hint: make(12.0, DWRITE_FONT_WEIGHT_REGULAR, lead, false)?,
-            centered: make(13.0, DWRITE_FONT_WEIGHT_REGULAR, center, false)?,
-            chip: make(13.0, DWRITE_FONT_WEIGHT_MEDIUM, center, false)?,
+            chip: make(13.0, DWRITE_FONT_WEIGHT_REGULAR, center, false)?,
+            version: make(12.0, DWRITE_FONT_WEIGHT_REGULAR, center, false)?,
+            small: make(11.0, DWRITE_FONT_WEIGHT_REGULAR, lead, false)?,
+            primary: make(13.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, center, false)?,
             body: make(13.0, DWRITE_FONT_WEIGHT_REGULAR, lead, true)?,
-            field: make(14.0, DWRITE_FONT_WEIGHT_REGULAR, lead, true)?,
+            field: make(13.0, DWRITE_FONT_WEIGHT_REGULAR, lead, true)?,
         })
     })();
     st.fonts = fonts;
@@ -631,7 +631,11 @@ fn paint_window(hwnd: HWND) {
 fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
     let gpu = &device.gpu;
     let f = st.fonts.as_ref().unwrap();
-    let theme = Theme::current();
+    let mut theme = Theme::current();
+    if theme.shadow.a > 0.0 {
+        theme.text_muted = rgb(if theme.dark { 0xa1a1a6 } else { 0x636366 }, 1.0);
+        theme.track = rgb(if theme.dark { 0x48484b } else { 0xd6d6db }, 1.0);
+    }
     let now = st.now();
     let s = st.scale;
     let (w, h) = (size.0 as f32, size.1 as f32);
@@ -640,61 +644,73 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
     let glow = |hit: Hit| st.glow.iter().find(|(k, _)| *k == hit).map_or(0.0, |(_, sp)| sp.value(now));
     let link = |hit: Hit| mix(theme.accent, theme.on_selected, glow(hit));
     let group = |r: D2D_RECT_F| {
-        fill(gpu, theme.group, r, 12.0 * s);
-        stroke(gpu, fade(theme.hairline, 0.7), inflate(r, -0.5), 12.0 * s, 1.0);
+        fill(gpu, theme.control, r, 22.0 * s);
     };
     let button = |r: D2D_RECT_F, hit: Hit, label: &str, enabled: bool| {
-        fill(gpu, mix(theme.tint, theme.tint_strong, if enabled { glow(hit) } else { 0.0 }), r, 8.0 * s);
-        text(gpu, &f.chip, label, r, if enabled { theme.text } else { theme.text_muted });
+        let color = if enabled { theme.text } else { theme.text_muted };
+        if hit != Hit::Check || glow(hit) > 0.001 {
+            fill(gpu, fade(theme.control, if hit == Hit::Check { glow(hit) } else { 1.0 }), r, 22.0 * s);
+        }
+        let name = match hit {
+            Hit::Report => Some("bug"),
+            Hit::Support => Some("heart"),
+            _ => None,
+        };
+        if let Some(name) = name {
+            let units: Vec<u16> = label.encode_utf16().collect();
+            if let Ok(t) = unsafe { device.shared.dwrite.CreateTextLayout(&units, &f.chip, 10000.0, 44.0 * s) } {
+                let mut m = DWRITE_TEXT_METRICS::default();
+                if unsafe { t.GetMetrics(&mut m) }.is_ok() {
+                    let left = (r.left + r.right - m.width - 26.0 * s) / 2.0;
+                    kadr_render::scene::concept_icon(
+                        gpu,
+                        name,
+                        rect(left, r.top, left + 20.0 * s, r.bottom),
+                        color,
+                        20.0 * s,
+                    );
+                    text(gpu, &f.chip, label, rect(left + 26.0 * s, r.top, left + 26.0 * s + m.width, r.bottom), color);
+                }
+            }
+        } else {
+            text(gpu, &f.chip, label, r, color);
+        }
     };
-    fill(gpu, theme.wash, rect(0.0, 0.0, w, h), 0.0);
+    fill(gpu, theme.surface, rect(0.0, 0.0, w, h), 0.0);
 
     // Close, as in «Настройки».
     let c = l.close;
     let hover = glow(Hit::Close);
     fill(gpu, fade(theme.tint, hover), inflate(c, -2.0 * s), 14.0 * s);
-    let (cx, cy, k) = ((c.left + c.right) / 2.0, (c.top + c.bottom) / 2.0, 5.0 * s);
     let line = |a: (f32, f32), b: (f32, f32), width: f32| unsafe {
         gpu.d2d.DrawLine(Vector2 { X: a.0, Y: a.1 }, Vector2 { X: b.0, Y: b.1 }, &gpu.brush, width, None);
     };
     unsafe {
         gpu.brush.SetColor(&mix(theme.text_muted, theme.text, hover));
     }
-    line((cx - k, cy - k), (cx + k, cy + k), 1.5 * s);
-    line((cx - k, cy + k), (cx + k, cy - k), 1.5 * s);
+    kadr_render::scene::concept_icon(gpu, "close", c, mix(theme.text_muted, theme.text, hover), 20.0 * s);
 
     match st.view {
         View::About => {
-            // The mark: a frame's four corners around the lens, in ink on an ink-coloured tile.
+            // The source's blue app mark and the same SVG outlines as the editor.
             let i = l.icon;
-            fill(gpu, theme.text, i, 16.0 * s);
+            fill(gpu, theme.accent, i, 16.0 * s);
             unsafe {
                 gpu.brush.SetColor(&if theme.dark { rgb(0x1c1c1e, 1.0) } else { rgb(0xffffff, 1.0) });
             }
-            let (inset, arm, width) = (16.0 * s, 10.0 * s, 3.0 * s);
-            for (x, y, sx, sy) in [
-                (i.left + inset, i.top + inset, 1.0, 1.0),
-                (i.right - inset, i.top + inset, -1.0, 1.0),
-                (i.left + inset, i.bottom - inset, 1.0, -1.0),
-                (i.right - inset, i.bottom - inset, -1.0, -1.0),
-            ] {
-                line((x, y), (x + sx * arm, y), width);
-                line((x, y), (x, y + sy * arm), width);
-            }
-            let centre = Vector2 { X: (i.left + i.right) / 2.0, Y: (i.top + i.bottom) / 2.0 };
-            unsafe {
-                gpu.d2d.DrawEllipse(
-                    &D2D1_ELLIPSE { point: centre, radiusX: 6.0 * s, radiusY: 6.0 * s },
-                    &gpu.brush,
-                    width,
-                    None,
-                );
-            }
+            kadr_render::scene::concept_icon(gpu, "mark", i, theme.on_accent, 36.0 * s);
             text(gpu, &f.name, "Kadr", l.name, theme.text);
-            text(gpu, &f.centered, &format!("Версия {}", env!("CARGO_PKG_VERSION")), l.version, theme.text_muted);
+            text(gpu, &f.version, &format!("Версия {}", env!("CARGO_PKG_VERSION")), l.version, theme.text_muted);
 
             group(l.update);
-            let status = rect(l.update.left + 16.0 * s, l.update.top, l.check.left - 8.0 * s, l.update.bottom);
+            let status = rect(l.update.left + 40.0 * s, l.update.top, l.check.left - 8.0 * s, l.update.bottom);
+            kadr_render::scene::concept_icon(
+                gpu,
+                if st.checking { "spinner" } else { "check-circle" },
+                rect(l.update.left + 14.0 * s, l.update.top, l.update.left + 32.0 * s, l.update.bottom),
+                theme.text_muted,
+                18.0 * s,
+            );
             let ink = if st.checking { theme.text_muted } else { theme.text };
             text(gpu, &f.label, if st.checking { "Проверяю…" } else { st.update.as_str() }, status, ink);
             button(l.check, Hit::Check, "Проверить", !st.checking);
@@ -706,26 +722,35 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
                 l.about,
                 theme.text,
             );
-            for (r, feature) in l.features.iter().zip(FEATURES) {
-                let dot = rect(
-                    r.left,
-                    (r.top + r.bottom) / 2.0 - 2.0 * s,
-                    r.left + 4.0 * s,
-                    (r.top + r.bottom) / 2.0 + 2.0 * s,
+            for ((r, feature), icon) in
+                l.features.iter().zip(FEATURES).zip(["record", "pen", "shield", "translate", "history", "keyboard"])
+            {
+                kadr_render::scene::concept_icon(
+                    gpu,
+                    icon,
+                    rect(r.left, r.top, r.left + 14.0 * s, r.bottom),
+                    theme.text_muted,
+                    14.0 * s,
                 );
-                fill(gpu, theme.text_muted, dot, 2.0 * s);
-                text(gpu, &f.label, feature, rect(r.left + 12.0 * s, r.top, r.right, r.bottom), theme.text);
+                text(gpu, &f.hint, feature, rect(r.left + 22.0 * s, r.top, r.right, r.bottom), theme.text);
             }
             button(l.report, Hit::Report, "Нашли ошибку?", true);
-            button(l.support, Hit::Support, "Поддержать на Boosty", true);
+            button(l.support, Hit::Support, "Поддержать", true);
         }
         View::Report => {
             text(
                 gpu,
                 &f.label,
-                "‹ О программе",
-                rect(l.back.left + 8.0 * s, l.back.top, l.back.right, l.back.bottom),
+                "О программе",
+                rect(l.back.left + 30.0 * s, l.back.top, l.back.right, l.back.bottom),
                 link(Hit::Back),
+            );
+            kadr_render::scene::concept_icon(
+                gpu,
+                "back",
+                rect(l.back.left + 8.0 * s, l.back.top, l.back.left + 28.0 * s, l.back.bottom),
+                link(Hit::Back),
+                20.0 * s,
             );
             text(gpu, &f.title, "Сообщить об ошибке", l.title, theme.text);
             text(gpu, &f.hint, "Что случилось?", l.text_label, theme.text_muted);
@@ -736,13 +761,15 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
                 (Field::Contact, l.contact, &st.contact, &st.contact_edit, "@ник в Telegram или почта"),
             ] {
                 let focused = st.focus == field;
-                fill(gpu, theme.group, r, 10.0 * s);
+                fill(gpu, theme.control, r, 14.0 * s);
                 let edge = if focused {
                     theme.accent
                 } else {
                     mix(theme.hairline, theme.text_muted, 0.5 * glow(Hit::Field(field)))
                 };
-                stroke(gpu, edge, inflate(r, -0.5), 10.0 * s, if focused { 1.5 * s } else { 1.0 });
+                if focused {
+                    stroke(gpu, edge, inflate(r, -0.5), 14.0 * s, 2.0 * s);
+                }
                 let inner = inflate(r, -1.5 * s);
                 unsafe {
                     gpu.d2d.PushAxisAlignedClip(&inner, D2D1_ANTIALIAS_MODE_ALIASED);
@@ -805,17 +832,16 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
 
             // «Версия, система и журнал»: a switch, as in «Настройки».
             let r = l.details;
-            group(r);
             fill(gpu, fade(theme.tint, 0.6 * glow(Hit::Details)), inflate(r, -3.0 * s), 9.0 * s);
             let top = rect(r.left + 16.0 * s, r.top + 4.0 * s, r.right - 80.0 * s, r.top + ROW * s * 0.55);
             let bottom = rect(r.left + 16.0 * s, r.top + ROW * s * 0.5, r.right - 80.0 * s, r.bottom - 4.0 * s);
             text(gpu, &f.label, "Версия, система и журнал", top, theme.text);
-            text(gpu, &f.hint, "Без снимков и текста с экрана", bottom, theme.text_muted);
+            text(gpu, &f.small, "Без снимков и текста с экрана", bottom, theme.text_muted);
             let on = st.knob.value(now);
             let track = rect(
-                r.right - 60.0 * s,
+                r.right - 52.0 * s,
                 r.top + (ROW - 24.0) / 2.0 * s,
-                r.right - 16.0 * s,
+                r.right - 12.0 * s,
                 r.top + (ROW + 24.0) / 2.0 * s,
             );
             fill(gpu, mix(theme.track, theme.accent, on.clamp(0.0, 1.0)), track, 12.0 * s);
@@ -831,10 +857,10 @@ fn paint(device: &Device, st: &State, size: (u32, u32)) -> bool {
             let (bg, ink) = if ready {
                 (mix(theme.accent, theme.on_selected, 0.12 * hover), theme.on_accent)
             } else {
-                (theme.tint, theme.text_muted)
+                (fade(theme.accent, 0.38), fade(theme.on_accent, 0.38))
             };
-            fill(gpu, bg, l.send, 10.0 * s);
-            text(gpu, &f.chip, if st.sending { "Отправляю…" } else { "Отправить" }, l.send, ink);
+            fill(gpu, bg, l.send, 22.0 * s);
+            text(gpu, &f.primary, if st.sending { "Отправляю…" } else { "Отправить" }, l.send, ink);
             match &st.sent {
                 Some(Ok(())) => text(gpu, &f.hint, "Спасибо! Отчёт ушёл автору.", l.status, theme.text),
                 Some(Err(e)) => text(gpu, &f.hint, e, l.status, glass::error_ink(&theme)),

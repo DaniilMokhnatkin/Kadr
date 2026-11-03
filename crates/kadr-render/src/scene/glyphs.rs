@@ -11,6 +11,7 @@ use windows::Win32::Graphics::Direct2D::{
 
 /// Stroke width in grid units.
 const STROKE: f32 = 1.75;
+mod v4_data;
 
 struct Pen<'a> {
     gpu: &'a Gpu,
@@ -19,6 +20,7 @@ struct Pen<'a> {
     x: f32,
     y: f32,
     s: f32,
+    stroke: f32,
 }
 
 impl Pen<'_> {
@@ -40,7 +42,7 @@ impl Pen<'_> {
             if filled {
                 self.gpu.d2d.FillGeometry(&geometry, &self.gpu.brush, None);
             } else {
-                self.gpu.d2d.DrawGeometry(&geometry, &self.gpu.brush, STROKE * self.s, self.style.as_ref());
+                self.gpu.d2d.DrawGeometry(&geometry, &self.gpu.brush, self.stroke * self.s.abs(), self.style.as_ref());
             }
         }
     }
@@ -119,6 +121,7 @@ pub(super) fn draw(gpu: &Gpu, button: ToolbarButton, r: D2D_RECT_F, ink: D2D1_CO
         x: (r.left + r.right) / 2.0 - 12.0 * scale,
         y: (r.top + r.bottom) / 2.0 - 12.0 * scale,
         s: scale,
+        stroke: STROKE,
     };
     unsafe {
         gpu.brush.SetColor(&ink);
@@ -298,5 +301,43 @@ pub(super) fn draw(gpu: &Gpu, button: ToolbarButton, r: D2D_RECT_F, ink: D2D1_CO
             p.path(&curve);
         }
         _ => {}
+    }
+}
+
+/// The original SVG outlines from Claude's reference, at the source's 20px icon size.
+pub(super) fn v4(gpu: &Gpu, name: &str, r: D2D_RECT_F, ink: D2D1_COLOR_F, size: f32) {
+    let Ok(factory) = (unsafe { gpu.d2d.GetFactory() }) else { return };
+    let style = unsafe {
+        factory.CreateStrokeStyle(
+            &D2D1_STROKE_STYLE_PROPERTIES {
+                startCap: D2D1_CAP_STYLE_ROUND,
+                endCap: D2D1_CAP_STYLE_ROUND,
+                dashCap: D2D1_CAP_STYLE_ROUND,
+                lineJoin: D2D1_LINE_JOIN_ROUND,
+                ..Default::default()
+            },
+            None,
+        )
+    }
+    .ok();
+    let signed = if name == "forward" { -size } else { size };
+    let p = Pen {
+        gpu,
+        factory,
+        style,
+        x: (r.left + r.right - signed) / 2.0,
+        y: (r.top + r.bottom - signed) / 2.0,
+        s: signed / 24.0,
+        stroke: if name == "chevron-small" { 2.4 } else { 1.7 },
+    };
+    unsafe {
+        gpu.brush.SetColor(&ink);
+    }
+    for (points, closed, filled) in v4_data::outlines(match name {
+        "forward" => "back",
+        "chevron-small" => "chevron",
+        _ => name,
+    }) {
+        p.figure(points, *closed, *filled);
     }
 }

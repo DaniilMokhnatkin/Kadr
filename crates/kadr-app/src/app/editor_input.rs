@@ -248,11 +248,16 @@ impl App {
             ToolbarButton::Color(index) => d.set_color(index),
             ToolbarButton::WidthValue(width) => d.set_width(width),
             ToolbarButton::Width => d.set_width(if d.width >= 8 { 1 } else { d.width + 1 }),
-            ToolbarButton::TextPlain => d.set_text_style(kadr_doc::annotation::TextStyle::Plain),
-            ToolbarButton::TextFilled => d.set_text_style(kadr_doc::annotation::TextStyle::Filled),
-            ToolbarButton::TextOutline => d.set_text_style(kadr_doc::annotation::TextStyle::Outline),
-            ToolbarButton::TextCallout => d.toggle_callout(),
+            ToolbarButton::TextPlain => d.set_text_presentation(kadr_doc::annotation::TextStyle::Plain, false),
+            ToolbarButton::TextFilled => d.set_text_presentation(kadr_doc::annotation::TextStyle::Filled, false),
+            ToolbarButton::TextOutline => d.set_text_presentation(kadr_doc::annotation::TextStyle::Outline, false),
+            ToolbarButton::TextCallout => d.set_text_presentation(d.text_style, true),
             ToolbarButton::Strength => d.set_strength((d.strength + 1) % 3),
+            ToolbarButton::StrengthStep(increase) => d.set_strength(if increase {
+                d.strength.saturating_add(1).min(2)
+            } else {
+                d.strength.saturating_sub(1)
+            }),
             ToolbarButton::Undo => d.undo(),
             ToolbarButton::Redo => d.redo(),
             _ => {}

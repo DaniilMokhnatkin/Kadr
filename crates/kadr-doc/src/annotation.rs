@@ -67,7 +67,7 @@ impl Tool {
     ];
 }
 pub const COLORS: [[u8; 3]; 6] =
-    [[239, 68, 68], [250, 204, 21], [34, 197, 94], [56, 189, 248], [255, 255, 255], [17, 17, 17]];
+    [[255, 69, 58], [255, 214, 10], [48, 209, 88], [10, 132, 255], [255, 255, 255], [29, 29, 31]];
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TextStyle {
     #[default]

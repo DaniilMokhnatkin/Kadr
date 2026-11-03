@@ -43,6 +43,11 @@ pub struct TextStyles {
     figure: Style,
     lead: Style,
     button: Style,
+    dock_label: Style,
+    dock_strong: Style,
+    dock_small: Style,
+    dock_heading: Style,
+    dock_option: Style,
     toolbar: std::cell::RefCell<Option<(ToolbarKey, Option<ToolbarLayout>)>>,
     motion: std::cell::RefCell<transition::State>,
     chrome: std::cell::RefCell<transition::Chrome>,
@@ -66,6 +71,11 @@ impl TextStyles {
             figure: style(DWRITE_FONT_WEIGHT_REGULAR, dip::TEXT, true)?,
             lead: style(DWRITE_FONT_WEIGHT_REGULAR, dip::LEAD, true)?,
             button: style(DWRITE_FONT_WEIGHT_REGULAR, dip::TITLE, false)?,
+            dock_label: style(DWRITE_FONT_WEIGHT_REGULAR, 13.0, false)?,
+            dock_strong: style(DWRITE_FONT_WEIGHT_SEMI_BOLD, 13.0, false)?,
+            dock_small: style(DWRITE_FONT_WEIGHT_REGULAR, 11.0, false)?,
+            dock_heading: style(DWRITE_FONT_WEIGHT_SEMI_BOLD, 12.0, false)?,
+            dock_option: style(DWRITE_FONT_WEIGHT(500), 12.0, false)?,
             toolbar: Default::default(),
             motion: Default::default(),
             chrome: Default::default(),
@@ -181,6 +191,7 @@ pub enum ToolbarButton {
     Color(usize),
     Width,
     Strength,
+    StrengthStep(bool),
     TextPlain,
     TextFilled,
     TextOutline,
@@ -226,6 +237,8 @@ impl ToolbarButton {
             Self::Color(_) => "Цвет",
             Self::Width => "Толщина",
             Self::Strength => "Сила",
+            Self::StrengthStep(false) => "Слабее",
+            Self::StrengthStep(true) => "Сильнее",
             Self::TextPlain => "Без фона",
             Self::TextFilled => "С фоном",
             Self::TextOutline => "Обводка",
@@ -360,6 +373,11 @@ pub struct Scene<'a> {
 /// One toolbar icon, for Kadr's other windows (the viewer) to share the editor's family.
 pub fn icon(gpu: &Gpu, button: ToolbarButton, r: D2D_RECT_F, ink: D2D1_COLOR_F, scale: f32) {
     glyphs::draw(gpu, button, r, ink, scale);
+}
+
+/// Icons shared by the concept 04 editor and its About/report sheet.
+pub fn concept_icon(gpu: &Gpu, name: &str, r: D2D_RECT_F, ink: D2D1_COLOR_F, size: f32) {
+    glyphs::v4(gpu, name, r, ink, size);
 }
 
 pub fn draw(
@@ -1896,7 +1914,7 @@ fn draw_smart(gpu: &Gpu, theme: &Theme, scene: &Scene, fx: SmartFx, now: f64) {
 mod toolbar_tests {
     use super::*;
     #[test]
-    fn concept_v4_uses_a_934_by_112_dip_dock_without_permanent_properties() {
+    fn concept_v4_matches_the_reference_928_by_112_dip_dock() {
         let shared = Shared::new().unwrap();
         let text = TextStyles::new(&shared, 1.0).unwrap();
         let e = EditorBar {
@@ -1914,7 +1932,9 @@ mod toolbar_tests {
         let l = toolbar_layout(&shared, &text, (1440.0, 900.0), 1.0, rect(100.0, 100.0, 1100.0, 600.0), Some(e))
             .unwrap()
             .unwrap();
-        assert_eq!(l.panel.right - l.panel.left, 934.0);
+        // Chromium measurement of the canonical HTML: 927.859375 CSS px. DirectWrite
+        // font metrics can differ by a fraction of a pixel across Windows versions.
+        assert!((l.panel.right - l.panel.left - 927.8594).abs() < 2.0, "{:?}", l.panel);
         assert_eq!(l.panel.bottom - l.panel.top, 112.0);
     }
     #[test]
@@ -2128,7 +2148,8 @@ mod toolbar_tests {
         )
         .unwrap()
         .unwrap();
-        assert!(blur.buttons.iter().any(|b| b.0 == ToolbarButton::Strength));
+        assert!(blur.buttons.iter().any(|b| b.0 == ToolbarButton::StrengthStep(false)));
+        assert!(blur.buttons.iter().any(|b| b.0 == ToolbarButton::StrengthStep(true)));
         assert!(!blur.buttons.iter().any(|b| matches!(b.0, ToolbarButton::Color(_) | ToolbarButton::Width)));
     }
 

@@ -27,6 +27,41 @@ impl Bounds {
     fn active(&self, now: f64) -> bool {
         self.0.iter().any(|s| s.active(now))
     }
+    fn liquid_target(&mut self, r: D2D_RECT_F, now: f64) {
+        if self.0.iter().zip([r.left, r.top, r.right, r.bottom]).all(|(s, v)| s.goal() == v) {
+            return;
+        }
+        let at = self.value(now);
+        let dx = r.left + r.right - at.left - at.right;
+        let dy = r.top + r.bottom - at.top - at.bottom;
+        for (i, (spring, value)) in self.0.iter_mut().zip([r.left, r.top, r.right, r.bottom]).enumerate() {
+            let lead = match i {
+                0 => dx < 0.0,
+                1 => dy < 0.0,
+                2 => dx > 0.0,
+                _ => dy > 0.0,
+            };
+            let distance = if i % 2 == 0 { dx } else { dy };
+            let (k, c): (f32, f32) = if lead || distance.abs() < 1.0 { (640.0, 40.0) } else { (230.0, 26.0) };
+            spring.target_with(
+                value,
+                Curve { response: std::f32::consts::TAU / k.sqrt(), damping: c / (2.0 * k.sqrt()) },
+                now,
+            );
+        }
+    }
+    fn liquid_value(&self, now: f64) -> D2D_RECT_F {
+        let mut r = self.value(now);
+        let width = self.0[2].goal() - self.0[0].goal();
+        let height = self.0[3].goal() - self.0[1].goal();
+        let thin = (height * 0.16).min(((r.right - r.left) - width).max(0.0) * 0.045);
+        let narrow = (width * 0.16).min(((r.bottom - r.top) - height).max(0.0) * 0.045);
+        r.top += thin;
+        r.bottom -= thin;
+        r.left += narrow;
+        r.right -= narrow;
+        r
+    }
 }
 struct Control {
     id: usize,
@@ -63,6 +98,7 @@ pub(super) struct Button {
     pub property: bool,
 }
 pub(super) struct Layout {
+    pub radios: [Option<D2D_RECT_F>; 3],
     pub panel: D2D_RECT_F,
     pub opacity: f32,
     /// Appearance transform around `anchor`: uniform scale, then vertical lift in pixels.
@@ -111,6 +147,7 @@ impl Layout {
 }
 #[derive(Default)]
 pub(super) struct State {
+    radios: [Option<Bounds>; 3],
     panel: Option<Bounds>,
     opacity: Option<Spring>,
     appear: Option<Spring>,
@@ -146,6 +183,8 @@ fn code(b: ToolbarButton) -> usize {
         ToolbarButton::Color(i) => 40 + i,
         ToolbarButton::Width => 48,
         ToolbarButton::Strength => 49,
+        ToolbarButton::StrengthStep(false) => 78,
+        ToolbarButton::StrengthStep(true) => 79,
         ToolbarButton::Undo => 50,
         ToolbarButton::Redo => 51,
         ToolbarButton::Crop => 56,
@@ -182,6 +221,10 @@ fn enabled(b: ToolbarButton, e: Option<EditorBar>) -> bool {
     e.is_none_or(|e| match b {
         ToolbarButton::Undo => e.undo,
         ToolbarButton::Redo => e.redo,
+        ToolbarButton::StrengthStep(false) => e.strength > 0,
+        ToolbarButton::StrengthStep(true) => e.strength < 2,
+        ToolbarButton::RecentPage(false) => e.ui.page > 0,
+        ToolbarButton::RecentPage(true) => (e.ui.page + 1) * 6 < e.ui.recent_count,
         _ => true,
     })
 }
@@ -189,9 +232,15 @@ fn selected(b: ToolbarButton, property: bool, e: Option<EditorBar>) -> bool {
     match b {
         ToolbarButton::Tool(t) => e.is_some_and(|e| e.tool == t || (t == Tool::Blur && e.tool.is_blur() && !property)),
         ToolbarButton::Color(i) => e.is_some_and(|e| e.color == i),
-        ToolbarButton::TextPlain => e.is_some_and(|e| e.text_style == kadr_doc::annotation::TextStyle::Plain),
-        ToolbarButton::TextFilled => e.is_some_and(|e| e.text_style == kadr_doc::annotation::TextStyle::Filled),
-        ToolbarButton::TextOutline => e.is_some_and(|e| e.text_style == kadr_doc::annotation::TextStyle::Outline),
+        ToolbarButton::TextPlain => {
+            e.is_some_and(|e| !e.callout && e.text_style == kadr_doc::annotation::TextStyle::Plain)
+        }
+        ToolbarButton::TextFilled => {
+            e.is_some_and(|e| !e.callout && e.text_style == kadr_doc::annotation::TextStyle::Filled)
+        }
+        ToolbarButton::TextOutline => {
+            e.is_some_and(|e| !e.callout && e.text_style == kadr_doc::annotation::TextStyle::Outline)
+        }
         ToolbarButton::TextCallout => e.is_some_and(|e| e.callout),
         ToolbarButton::Smart => e.is_some_and(|e| e.smart != SmartUi::Off),
         ToolbarButton::Pin => e.is_some_and(|e| e.ui.pinned),
@@ -255,6 +304,15 @@ fn glide(state: &mut Option<Bounds>, goal: Option<D2D_RECT_F>, now: f64) -> Opti
     }
     state.as_ref().map(|b| b.value(now))
 }
+fn liquid(state: &mut Option<Bounds>, goal: Option<D2D_RECT_F>, now: f64) -> Option<D2D_RECT_F> {
+    let Some(r) = goal else {
+        *state = None;
+        return None;
+    };
+    let state = state.get_or_insert_with(|| Bounds::new(r, Curve::GLIDE));
+    state.liquid_target(r, now);
+    Some(state.liquid_value(now))
+}
 
 impl State {
     pub fn clear(&mut self) {
@@ -265,6 +323,7 @@ impl State {
             || self.opacity.is_some_and(|p| p.active(now))
             || self.appear.is_some_and(|p| p.active(now))
             || self.indicator.as_ref().is_some_and(|p| p.active(now))
+            || self.radios.iter().flatten().any(|p| p.active(now))
             || self.swatch.as_ref().is_some_and(|p| p.active(now))
             || self.controls.iter().any(|c| {
                 c.bounds.active(now)
@@ -303,9 +362,23 @@ impl State {
             ) && selected(b, p, e)
         });
         let swatch_goal = slot(&poses, |b, p| matches!(b, ToolbarButton::Color(_)) && selected(b, p, e));
+        let radio_goals = [
+            slot(&poses, |b, p| matches!(b, ToolbarButton::Censor(_)) && selected(b, p, e)),
+            slot(&poses, |b, p| matches!(b, ToolbarButton::WidthValue(_)) && selected(b, p, e)),
+            slot(&poses, |b, p| {
+                matches!(
+                    b,
+                    ToolbarButton::TextPlain
+                        | ToolbarButton::TextFilled
+                        | ToolbarButton::TextOutline
+                        | ToolbarButton::TextCallout
+                ) && selected(b, p, e)
+            }),
+        ];
         let (anchor_point, direction) = anchor(target.panel, target.sel);
         if !animate {
             return Layout {
+                radios: radio_goals,
                 panel: target.panel,
                 opacity: 1.0,
                 scale: 1.0,
@@ -414,7 +487,8 @@ impl State {
         }
         self.controls.retain(|c| c.live || c.opacity.active(now) || c.opacity.value(now) > 0.001);
 
-        let indicator = glide(&mut self.indicator, tool_goal, now);
+        let indicator = liquid(&mut self.indicator, tool_goal, now);
+        let radios = std::array::from_fn(|i| liquid(&mut self.radios[i], radio_goals[i], now));
         // The ring appears with its row instead of flying in, and stays in place while the row
         // leaves: it fades with its swatch rather than vanishing a frame early.
         let swatch = match (&self.swatch, swatch_goal) {
@@ -442,6 +516,7 @@ impl State {
             self.last_tip = Some(now);
         }
         Layout {
+            radios,
             tip,
             panel: panel.value(now),
             opacity: opacity.value(now).clamp(0.0, 1.0),
@@ -552,5 +627,34 @@ impl Hint {
             s.target_at(1.0, now, now + 0.45);
         }
         (s.value(now), self.kind)
+    }
+}
+
+#[cfg(test)]
+mod concept_motion_tests {
+    use super::*;
+    #[test]
+    fn liquid_selection_stretches_and_can_be_reversed_without_a_jump() {
+        let mut b = Bounds::new(rect(0.0, 0.0, 80.0, 44.0), Curve::GLIDE);
+        b.liquid_target(rect(240.0, 0.0, 320.0, 44.0), 0.0);
+        let frame = b.liquid_value(0.07);
+        assert!(frame.right - frame.left > 80.0);
+        assert!(frame.top > 0.0 && frame.bottom < 44.0);
+        let before = b.value(0.07);
+        b.liquid_target(rect(-80.0, 0.0, 0.0, 44.0), 0.07);
+        let after = b.value(0.07);
+        for (x, y) in [before.left, before.top, before.right, before.bottom].into_iter().zip([
+            after.left,
+            after.top,
+            after.right,
+            after.bottom,
+        ]) {
+            assert!((x - y).abs() < 0.001, "retargeting jumped from {before:?} to {after:?}");
+        }
+        let end = b.liquid_value(2.0);
+        assert!((end.left + 80.0).abs() < 0.01 && end.right.abs() < 0.01);
+        let mut state = Some(b);
+        assert!(liquid(&mut state, None, 2.0).is_none());
+        assert!(state.is_none());
     }
 }
