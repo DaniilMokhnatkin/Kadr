@@ -33,6 +33,8 @@ use windows_numerics::{Matrix3x2, Vector2};
 
 pub enum Request {
     Load(String),
+    Pin(String, bool),
+    Delete(String),
     Clear,
     Close,
     Refresh,
@@ -55,9 +57,12 @@ enum Hit {
     Back,
     Clear,
     Card(usize),
+    Pin(usize),
+    Delete(usize),
 }
 
 struct Layout {
+    scale: f32,
     close: D2D_RECT_F,
     back: Option<D2D_RECT_F>,
     clear: D2D_RECT_F,
@@ -92,7 +97,7 @@ fn layout(width: f32, s: f32, count: usize, returning: bool) -> Layout {
             rect(left, top, left + tile_w.round(), top + tile_h)
         })
         .collect();
-    Layout { close, back, clear, cards }
+    Layout { scale: s, close, back, clear, cards }
 }
 
 fn desired_height(width: f32, s: f32, count: usize) -> f32 {
@@ -113,11 +118,23 @@ fn hit(l: &Layout, x: f32, y: f32, cards: usize, can_clear: bool) -> Option<Hit>
     if can_clear && inside(l.clear, x, y) {
         return Some(Hit::Clear);
     }
+    for (i, r) in l.cards.iter().take(cards).enumerate() {
+        if inside(card_button(*r, l.scale, false), x, y) {
+            return Some(Hit::Pin(i));
+        }
+        if inside(card_button(*r, l.scale, true), x, y) {
+            return Some(Hit::Delete(i));
+        }
+    }
     l.cards
         .iter()
         .take(cards)
         .position(|c| inside(rect(c.left, c.top, c.right, c.bottom + LABEL * 0.6), x, y))
         .map(Hit::Card)
+}
+fn card_button(r: D2D_RECT_F, s: f32, delete: bool) -> D2D_RECT_F {
+    let x = if delete { r.right - 40.0 * s } else { r.left + 8.0 * s };
+    rect(x, r.top + 8.0 * s, x + 32.0 * s, r.top + 40.0 * s)
 }
 
 fn count_label(n: usize) -> String {
@@ -199,6 +216,7 @@ impl Fonts {
 struct Card {
     id: String,
     created_ms: u64,
+    pinned: bool,
     bitmap: Option<(ID2D1Bitmap1, f32, f32)>,
     hover: Spring,
     enter: Spring,
@@ -274,7 +292,7 @@ impl State {
         let now = self.now();
         for (which, value) in [(self.hover, 0.0), (h, 1.0)] {
             match which {
-                Some(Hit::Card(i)) => {
+                Some(Hit::Card(i) | Hit::Pin(i) | Hit::Delete(i)) => {
                     if let Some(c) = self.cards.get_mut(i) {
                         let curve = if value > 0.5 { Curve::HOVER_IN } else { Curve::HOVER_OUT };
                         c.hover.target_with(value, curve, now);
@@ -291,10 +309,10 @@ impl State {
     }
     fn press(&mut self, h: Option<Hit>) {
         let now = self.now();
-        if let Some(old) = self.pressed.filter(|o| !matches!(o, Hit::Card(_))) {
+        if let Some(old) = self.pressed.filter(|o| !matches!(o, Hit::Card(_) | Hit::Pin(_) | Hit::Delete(_))) {
             self.button(old).1.target_with(0.0, Curve::POP, now);
         }
-        if let Some(b) = h.filter(|b| !matches!(b, Hit::Card(_))) {
+        if let Some(b) = h.filter(|b| !matches!(b, Hit::Card(_) | Hit::Pin(_) | Hit::Delete(_))) {
             self.button(b).1.target_with(1.0, Curve::HOVER_IN, now);
         }
         self.pressed = h;
@@ -463,6 +481,7 @@ impl Window {
                     Card {
                         id: e.id,
                         created_ms: e.created_ms,
+                        pinned: e.pinned,
                         bitmap,
                         hover: Spring::with(0.0, Curve::HOVER_IN).precise(0.002),
                         enter,
@@ -687,7 +706,7 @@ fn paint(ui: &Ui, st: &State, size: (f32, f32), now: f64, opaque: bool) -> bool 
     let neutral = mix(theme.tint, theme.tint_strong, hover);
     fill(gpu, mix(neutral, rgb(0xd70015, 1.0), danger), b, 9.0 * s);
     let ink = if can_clear { mix(theme.text, theme.on_accent, danger) } else { theme.disabled };
-    let label = if st.confirming { "Удалить все?" } else { "Очистить" };
+    let label = if st.confirming { "Удалить незакреплённые?" } else { "Очистить всё" };
     text(gpu, &ui.fonts.button, label, b, ink);
     unsafe {
         ctx.SetTransform(&Matrix3x2::identity());
@@ -723,6 +742,22 @@ fn paint(ui: &Ui, st: &State, size: (f32, f32), now: f64, opaque: bool) -> bool 
             None => fill(gpu, fade(theme.tile, opacity), *r, radius),
         }
         stroke(gpu, fade(theme.hairline, opacity), inflate(*r, -0.5), radius, 1.0);
+        for delete in [false, true] {
+            let target = card_button(*r, s, delete);
+            fill(
+                gpu,
+                fade(if card.pinned && !delete { theme.accent } else { theme.surface }, opacity * 0.94),
+                target,
+                16.0 * s,
+            );
+            kadr_render::scene::icon(
+                gpu,
+                if delete { kadr_render::scene::ToolbarButton::Close } else { kadr_render::scene::ToolbarButton::Pin },
+                target,
+                fade(if card.pinned && !delete { theme.on_accent } else { theme.text }, opacity),
+                s * 0.8,
+            );
+        }
         unsafe {
             ctx.SetTransform(&scaled_about(*r, 1.0, 0.0, rise));
         }
@@ -910,6 +945,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                         Some(Request::Clear)
                     }
                     Hit::Card(i) => st.cards.get(i).map(|c| Request::Load(c.id.clone())),
+                    Hit::Pin(i) => st.cards.get(i).map(|c| Request::Pin(c.id.clone(), !c.pinned)),
+                    Hit::Delete(i) => st.cards.get(i).map(|c| Request::Delete(c.id.clone())),
                     Hit::Close | Hit::Back => Some(Request::Close),
                 })
             });
@@ -1034,6 +1071,7 @@ pub fn preview(
             }),
             id: e.id,
             created_ms: e.created_ms,
+            pinned: e.pinned,
             hover: Spring::with(0.0, Curve::HOVER_IN),
             enter: Spring::with(1.0, Curve::POP),
         })
@@ -1085,6 +1123,18 @@ mod tests {
         let l = layout(WIDTH, 1.0, 0, false);
         let c = l.clear;
         assert_eq!(hit(&l, (c.left + c.right) / 2.0, (c.top + c.bottom) / 2.0, 0, false), None);
+    }
+    #[test]
+    fn pin_and_delete_have_separate_targets_without_opening_the_capture() {
+        for s in [1.0, 1.5, 2.0] {
+            let l = layout(WIDTH * s, s, 6, false);
+            for (i, r) in l.cards.iter().enumerate() {
+                for (delete, expected) in [(false, Hit::Pin(i)), (true, Hit::Delete(i))] {
+                    let b = card_button(*r, s, delete);
+                    assert_eq!(hit(&l, (b.left + b.right) / 2.0, (b.top + b.bottom) / 2.0, 6, true), Some(expected));
+                }
+            }
+        }
     }
     #[test]
     fn window_is_created_hidden_and_does_not_take_focus() {

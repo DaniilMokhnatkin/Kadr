@@ -27,6 +27,8 @@ pub enum Command {
     Load(String),
     List,
     Clear,
+    Pin { id: String, pinned: bool },
+    Delete(String),
     Limit(usize),
     Shutdown,
 }
@@ -122,6 +124,7 @@ impl Worker {
                                 store.update(&token.id, &document, true, &captured)?;
                                 frames.insert(token.id.clone(), captured);
                                 emit(Event::Persisted(token));
+                                emit(Event::List(store.list()?));
                             }
                             Command::State { token, document, open } => {
                                 if let Some(captured) = frames.get(&token.id) {
@@ -148,7 +151,17 @@ impl Worker {
                             Command::List => emit(Event::List(store.list()?)),
                             Command::Clear => {
                                 store.clear()?;
-                                frames.clear();
+                                let retained = store.list()?;
+                                frames.retain(|id, _| retained.iter().any(|e| &e.id == id));
+                                emit(Event::List(store.list()?));
+                            }
+                            Command::Pin { id, pinned } => {
+                                store.set_pinned(&id, pinned)?;
+                                emit(Event::List(store.list()?));
+                            }
+                            Command::Delete(id) => {
+                                store.remove(&id)?;
+                                frames.remove(&id);
                                 emit(Event::List(store.list()?));
                             }
                             Command::Limit(max) => {

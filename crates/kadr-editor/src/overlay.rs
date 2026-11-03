@@ -272,6 +272,9 @@ impl Overlay {
     pub fn toolbar_press(&self, button: ToolbarButton) {
         self.text.press_toolbar(button);
     }
+    pub fn toolbar_buttons(&self, shared: &Shared, selection: RECT, editor: scene::EditorBar) -> Vec<ToolbarButton> {
+        scene::toolbar_buttons(shared, &self.text, self.rect, self.scale, selection, editor)
+    }
 
     pub fn contains(&self, p: POINT) -> bool {
         let r = self.rect;

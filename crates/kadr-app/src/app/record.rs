@@ -7,7 +7,7 @@ use crate::recorder::{self, Event, Recording};
 use std::sync::mpsc::{Receiver, Sender};
 
 pub(super) struct RecordState {
-    pending: Option<DocRect>,
+    pending: Option<(DocRect, bool, bool)>,
     running: Option<(Recording, DocRect)>,
     tx: Sender<Event>,
     rx: Receiver<Event>,
@@ -27,12 +27,17 @@ impl App {
         if region.width() < 16 || region.height() < 16 {
             return;
         }
-        self.record.pending = Some(region);
+        let audio = self
+            .active
+            .as_ref()
+            .map(|a| (a.bar.system_audio, a.bar.microphone))
+            .unwrap_or((true, self.config.capture.microphone));
+        self.record.pending = Some((region, audio.0, audio.1));
         self.begin_exit(false, None);
     }
 
     pub(super) fn start_pending_record(&mut self) {
-        let Some(region) = self.record.pending.take() else { return };
+        let Some((region, system_audio, microphone)) = self.record.pending.take() else { return };
         if self.record.running.is_some() {
             return;
         }
@@ -49,7 +54,7 @@ impl App {
         let name = kadr_export::file::timestamp_name().replacen("Screenshot", "Video", 1);
         let path = folder.join(format!("{name}.{}", self.config.capture.video.name()));
         let (tx, host) = (self.record.tx.clone(), self.hwnd.0 as isize);
-        let recording = recorder::start(region, path, self.config.capture.microphone, move |event| {
+        let recording = recorder::start_with_audio(region, path, system_audio, microphone, move |event| {
             let _ = tx.send(event);
             unsafe {
                 let _ = PostMessageW(Some(HWND(host as *mut _)), WM_APP_RECORD, WPARAM(0), LPARAM(0));

@@ -131,6 +131,23 @@ pub(super) fn draw(gpu: &Gpu, button: ToolbarButton, r: D2D_RECT_F, ink: D2D1_CO
         }
     };
     match button {
+        ToolbarButton::Menu(BarMenu::More) => {
+            for x in [5.0, 12.0, 19.0] {
+                p.dot((x, 12.0), 1.5);
+            }
+        }
+        ToolbarButton::Menu(BarMenu::Shapes | BarMenu::Blur) | ToolbarButton::RecentPage(_) => {
+            p.path(&[(8.0, 10.0), (12.0, 14.0), (16.0, 10.0)]);
+        }
+        ToolbarButton::Original => {
+            p.shape(&[(2.5, 12.0), (7.0, 7.0), (17.0, 7.0), (21.5, 12.0), (17.0, 17.0), (7.0, 17.0)]);
+            p.ellipse((12.0, 12.0), 3.0, 3.0);
+        }
+        ToolbarButton::About => {
+            p.ellipse((12.0, 12.0), 8.5, 8.5);
+            p.line((12.0, 11.0), (12.0, 17.0));
+            p.dot((12.0, 7.0), 0.8);
+        }
         ToolbarButton::Tool(tool) => match tool {
             Tool::Select => p.shape(&[
                 (6.5, 3.5),
@@ -223,11 +240,17 @@ pub(super) fn draw(gpu: &Gpu, button: ToolbarButton, r: D2D_RECT_F, ink: D2D1_CO
         }
         // An eye under a stroke: «hide what should not be seen».
         ToolbarButton::Smart => {
-            let mut eye = quad((3.0, 12.0), (12.0, 3.0), (21.0, 12.0));
-            eye.extend(quad((21.0, 12.0), (12.0, 21.0), (3.0, 12.0)).into_iter().skip(1));
-            p.shape(&eye);
-            p.ellipse((12.0, 12.0), 2.6, 2.6);
-            p.line((5.0, 19.0), (19.0, 5.0));
+            p.shape(&[
+                (12.0, 3.0),
+                (20.0, 6.5),
+                (19.0, 14.0),
+                (16.0, 18.0),
+                (12.0, 21.0),
+                (8.0, 18.0),
+                (5.0, 14.0),
+                (4.0, 6.5),
+            ]);
+            p.line((8.0, 11.0), (16.0, 11.0));
         }
         // Scan corners around a T: «text from the picture».
         ToolbarButton::Text => {

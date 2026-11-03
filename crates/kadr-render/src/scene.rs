@@ -25,8 +25,10 @@ use crate::annotations::{self, Cache, View};
 use crate::gpu::{Gpu, Shared};
 use crate::theme::{Theme, dip};
 use kadr_doc::annotation::{COLORS, Tool};
+mod dock;
 mod glyphs;
 mod transition;
+pub use dock::{BarMenu, BarState, RecentItem};
 
 struct Style {
     format: IDWriteTextFormat,
@@ -50,6 +52,7 @@ pub struct TextStyles {
     animate: std::cell::Cell<bool>,
     epoch: std::time::Instant,
     time_override: std::cell::Cell<Option<f64>>,
+    recent_bitmaps: std::cell::RefCell<Vec<(std::sync::Arc<kadr_doc::Image>, ID2D1Bitmap1)>>,
 }
 
 impl TextStyles {
@@ -71,6 +74,7 @@ impl TextStyles {
             animate: std::cell::Cell::new(false),
             epoch: std::time::Instant::now(),
             time_override: std::cell::Cell::new(None),
+            recent_bitmaps: Default::default(),
         })
     }
     /// Static by default for exports/fixtures; only interactive surfaces enable motion.
@@ -185,11 +189,25 @@ pub enum ToolbarButton {
     Redo,
     /// Keep only part of the picture (the viewer).
     Crop,
+    Menu(BarMenu),
+    Censor(Censor),
+    WidthValue(u32),
+    Original,
+    About,
+    PinWindow,
+    RecentOpen(usize),
+    RecentPin(usize),
+    RecentDelete(usize),
+    RecentClear,
+    RecentPage(bool),
+    SystemAudio,
+    Microphone,
+    StartRecord,
 }
 
 impl ToolbarButton {
     pub const ALL: [ToolbarButton; 8] =
-        [Self::Copy, Self::Record, Self::SaveAs, Self::Pin, Self::Recent, Self::Text, Self::Translate, Self::Close];
+        [Self::Copy, Self::Record, Self::SaveAs, Self::Pin, Self::Recent, Self::Text, Self::Translate, Self::Save];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -215,18 +233,35 @@ impl ToolbarButton {
             Self::Undo => "Отменить · Ctrl+Z",
             Self::Redo => "Повторить · Ctrl+Y",
             Self::Crop => "Обрезать",
+            Self::Menu(menu) => menu.label(),
+            Self::Censor(level) => level.name(),
+            Self::WidthValue(_) => "Толщина линии",
+            Self::Original => "Показать оригинал",
+            Self::About => "О программе…",
+            Self::PinWindow => "Поверх окон",
+            Self::RecentOpen(_) => "Открыть снимок",
+            Self::RecentPin(_) => "Закрепить в недавних",
+            Self::RecentDelete(_) => "Удалить снимок",
+            Self::RecentClear => "Очистить всё",
+            Self::RecentPage(true) => "Следующие снимки",
+            Self::RecentPage(false) => "Предыдущие снимки",
+            Self::SystemAudio => "Звук компьютера",
+            Self::Microphone => "Микрофон",
+            Self::StartRecord => "Начать запись",
         }
     }
 }
 
 /// Панель кнопок у выделения; `hovered` — кнопка под курсором.
 #[derive(Clone, Copy, Default)]
-pub struct Toolbar {
+pub struct Toolbar<'a> {
     pub hovered: Option<ToolbarButton>,
     pub editor: Option<EditorBar>,
+    pub recent: &'a [RecentItem],
 }
 #[derive(Clone, Copy, PartialEq)]
 pub struct EditorBar {
+    pub ui: BarState,
     pub text_style: kadr_doc::annotation::TextStyle,
     pub callout: bool,
     pub tool: Tool,
@@ -284,6 +319,11 @@ pub enum SmartUi {
     Scanning(Censor),
     On(Censor, u16),
 }
+impl SmartUi {
+    pub fn toggled(self, last: Censor) -> Option<Censor> {
+        if self == Self::Off { Some(last) } else { None }
+    }
+}
 
 /// Что нарисовать поверх кадра. Одинаково для всех мониторов: каждый рисует свою часть.
 #[derive(Clone, Copy, Default)]
@@ -293,7 +333,7 @@ pub struct Marks<'a> {
     /// Маркеры на рамке — только у готового выделения.
     pub handles: bool,
     pub magnifier: Option<&'a Magnifier>,
-    pub toolbar: Option<Toolbar>,
+    pub toolbar: Option<Toolbar<'a>>,
     pub hud: Option<&'a Hud>,
     pub drawing: Option<View<'a>>,
     /// The highlight is a hovered window, not a selection: let it glide between windows.
@@ -471,6 +511,8 @@ pub fn draw(
 
 #[derive(Clone)]
 struct ToolbarLayout {
+    track: Option<D2D_RECT_F>,
+    popup: Option<D2D_RECT_F>,
     panel: D2D_RECT_F,
     /// Selection the panel is attached to: the panel grows out of that edge.
     sel: D2D_RECT_F,
@@ -515,6 +557,9 @@ fn build_toolbar_layout(
     sel: D2D_RECT_F,
     editor: Option<EditorBar>,
 ) -> Result<Option<ToolbarLayout>> {
+    if let Some(e) = editor {
+        return dock::build(shared, text, size, scale, sel, e);
+    }
     let (w, h) = size;
     let (corner_x, corner_y) = (sel.right - 1.0, sel.bottom - 1.0);
     if corner_x < 0.0 || corner_y < 0.0 || corner_x >= w || corner_y >= h {
@@ -691,7 +736,14 @@ fn build_toolbar_layout(
     }
     let context =
         editor.filter(|e| e.tool != Tool::Select).map(|e| measure(shared, &text.label, e.tool.label())).transpose()?;
-    Ok(Some(ToolbarLayout { panel: rect(x, y, x + panel_w, y + panel_h), sel, buttons, context }))
+    Ok(Some(ToolbarLayout {
+        panel: rect(x, y, x + panel_w, y + panel_h),
+        sel,
+        buttons,
+        context,
+        track: None,
+        popup: None,
+    }))
 }
 
 /// Какая кнопка панели под точкой `at` (координаты экрана) — по той же раскладке, что и отрисовка.
@@ -715,6 +767,18 @@ pub fn toolbar_hit(
     let target = toolbar_layout(shared, text, size, scale, sel, editor).ok()??;
     let layout = text.displayed(&target, editor, None, scale);
     let (x, y) = layout.unproject((at.0 - ox) as f32, (at.1 - oy) as f32);
+    if editor.is_some() {
+        if let Some(c) = layout.buttons.iter().rev().find(|c| {
+            c.live && c.opacity > 0.02 && x >= c.rect.left && x < c.rect.right && y >= c.rect.top && y < c.rect.bottom
+        }) {
+            return Some(if c.enabled { c.button } else { ToolbarButton::Surface });
+        }
+        return [Some(layout.panel), target.popup]
+            .into_iter()
+            .flatten()
+            .any(|r| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
+            .then_some(ToolbarButton::Surface);
+    }
     let clip = layout.property_clip();
     if let Some(c) = layout.buttons.iter().rev().find(|c| {
         c.opacity > 0.02
@@ -728,6 +792,48 @@ pub fn toolbar_hit(
     }
     let r = layout.panel;
     (x >= r.left && x < r.right && y >= r.top && y < r.bottom).then_some(ToolbarButton::Surface)
+}
+
+/// Keyboard navigation follows the same visible layout and popup as pointer hit testing.
+pub fn toolbar_buttons(
+    shared: &Shared,
+    text: &TextStyles,
+    surface: RECT,
+    scale: f32,
+    selection: RECT,
+    editor: EditorBar,
+) -> Vec<ToolbarButton> {
+    let local = rect(
+        (selection.left - surface.left) as f32,
+        (selection.top - surface.top) as f32,
+        (selection.right - surface.left) as f32,
+        (selection.bottom - surface.top) as f32,
+    );
+    let Ok(Some(l)) = toolbar_layout(
+        shared,
+        text,
+        ((surface.right - surface.left) as f32, (surface.bottom - surface.top) as f32),
+        scale,
+        local,
+        Some(editor),
+    ) else {
+        return Vec::new();
+    };
+    l.buttons
+        .iter()
+        .filter(|(b, r, _)| {
+            let visible = l.popup.is_none_or(|p| {
+                r.left >= p.left && r.right <= p.right + 0.1 && r.top >= p.top && r.bottom <= p.bottom + 0.1
+            });
+            visible
+                && match b {
+                    ToolbarButton::Undo => editor.undo,
+                    ToolbarButton::Redo => editor.redo,
+                    _ => true,
+                }
+        })
+        .map(|b| b.0)
+        .collect()
 }
 
 /// Floating glass panel: the screenshot shows through it blurred and tinted, under a soft shadow and a
@@ -744,6 +850,9 @@ fn draw_toolbar(
     toolbar: Toolbar,
     scrim: D2D1_COLOR_F,
 ) -> Result<()> {
+    if toolbar.editor.is_some() {
+        return dock::draw(gpu, shared, text, theme, scene, sel, toolbar);
+    }
     let size = (scene.size.0 as f32, scene.size.1 as f32);
     let Some(target) = toolbar_layout(shared, text, size, scene.scale, sel, toolbar.editor)? else {
         text.reset_toolbar_motion();
@@ -1787,11 +1896,34 @@ fn draw_smart(gpu: &Gpu, theme: &Theme, scene: &Scene, fx: SmartFx, now: f64) {
 mod toolbar_tests {
     use super::*;
     #[test]
+    fn concept_v4_uses_a_934_by_112_dip_dock_without_permanent_properties() {
+        let shared = Shared::new().unwrap();
+        let text = TextStyles::new(&shared, 1.0).unwrap();
+        let e = EditorBar {
+            ui: Default::default(),
+            text_style: Default::default(),
+            callout: false,
+            tool: Tool::Arrow,
+            color: 0,
+            width: 3,
+            strength: 1,
+            undo: false,
+            redo: false,
+            smart: Default::default(),
+        };
+        let l = toolbar_layout(&shared, &text, (1440.0, 900.0), 1.0, rect(100.0, 100.0, 1100.0, 600.0), Some(e))
+            .unwrap()
+            .unwrap();
+        assert_eq!(l.panel.right - l.panel.left, 934.0);
+        assert_eq!(l.panel.bottom - l.panel.top, 112.0);
+    }
+    #[test]
     fn replacing_palette_with_blur_controls_does_not_ghost_two_different_glyphs() {
         let shared = Shared::new().unwrap();
         let text = TextStyles::new(&shared, 1.0).unwrap();
         text.enable_motion(true);
         let e = EditorBar {
+            ui: Default::default(),
             text_style: Default::default(),
             callout: false,
             tool: Tool::Rectangle,
@@ -1825,6 +1957,7 @@ mod toolbar_tests {
         text.enable_motion(true);
         let sel = rect(100.0, 100.0, 900.0, 500.0);
         let e = EditorBar {
+            ui: Default::default(),
             text_style: Default::default(),
             callout: false,
             tool: Tool::Select,
@@ -1840,7 +1973,7 @@ mod toolbar_tests {
         text.displayed(&first, Some(e), Some(None), 1.0);
         text.set_animation_time(Some(0.7));
         let before = text.displayed(&first, Some(e), Some(None), 1.0);
-        let next_e = EditorBar { tool: Tool::Rectangle, ..e };
+        let next_e = EditorBar { smart: SmartUi::On(Censor::Hard, 3), ..e };
         let next = toolbar_layout(&shared, &text, (1280.0, 720.0), 1.0, sel, Some(next_e)).unwrap().unwrap();
         text.set_animation_time(Some(1.0));
         let start = text.displayed(&next, Some(next_e), Some(None), 1.0);
@@ -1875,8 +2008,10 @@ mod toolbar_tests {
         let text = TextStyles::new(&shared, 1.0).unwrap();
         let scene = Scene { frame: None, origin: (0, 0), size: (1280, 720), scale: 1.0, marks: Marks::default() };
         let bar = Toolbar {
+            recent: &[],
             hovered: Some(ToolbarButton::Width),
             editor: Some(EditorBar {
+                ui: Default::default(),
                 text_style: Default::default(),
                 callout: false,
                 tool: Tool::Select,
@@ -1919,6 +2054,7 @@ mod toolbar_tests {
         let shared = Shared::new().unwrap();
         let text = TextStyles::new(&shared, 1.0).unwrap();
         let e = Some(EditorBar {
+            ui: Default::default(),
             text_style: Default::default(),
             callout: false,
             tool: Tool::Select,
@@ -1956,6 +2092,7 @@ mod toolbar_tests {
         let shared = Shared::new().unwrap();
         let text = TextStyles::new(&shared, 1.0).unwrap();
         let editor = EditorBar {
+            ui: Default::default(),
             text_style: Default::default(),
             callout: false,
             tool: Tool::Select,
@@ -1983,7 +2120,11 @@ mod toolbar_tests {
             (1280.0, 720.0),
             1.0,
             rect(100.0, 100.0, 900.0, 500.0),
-            Some(EditorBar { tool: Tool::Blur, ..editor }),
+            Some(EditorBar {
+                tool: Tool::Blur,
+                ui: BarState { menu: Some(BarMenu::Properties), ..Default::default() },
+                ..editor
+            }),
         )
         .unwrap()
         .unwrap();
@@ -1999,6 +2140,7 @@ mod toolbar_tests {
             for width in [360.0, 640.0, 1280.0] {
                 for tool in Tool::ALL {
                     let editor = EditorBar {
+                        ui: Default::default(),
                         text_style: Default::default(),
                         callout: false,
                         tool,
@@ -2041,6 +2183,7 @@ mod toolbar_tests {
             let size = (1280.0 * s, 720.0 * s);
             let selection = rect(200.0 * s, 100.0 * s, 1100.0 * s, 500.0 * s);
             let editor = Some(EditorBar {
+                ui: Default::default(),
                 text_style: Default::default(),
                 callout: false,
                 tool: Tool::Select,

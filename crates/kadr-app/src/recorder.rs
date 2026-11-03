@@ -64,7 +64,13 @@ impl Recording {
 
 /// Starts recording `region` (desktop pixels) into `path`, with the microphone mixed in when
 /// `microphone`; `notify` is called from the worker.
-pub fn start(region: Rect, path: PathBuf, microphone: bool, notify: impl Fn(Event) + Send + 'static) -> Recording {
+pub fn start_with_audio(
+    region: Rect,
+    path: PathBuf,
+    system_audio: bool,
+    microphone: bool,
+    notify: impl Fn(Event) + Send + 'static,
+) -> Recording {
     let stop = Arc::new(AtomicBool::new(false));
     let cancel = Arc::new(AtomicBool::new(false));
     let (s, c) = (stop.clone(), cancel.clone());
@@ -72,7 +78,7 @@ pub fn start(region: Rect, path: PathBuf, microphone: bool, notify: impl Fn(Even
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         }
-        let result = record(region, &path, microphone, &s, &c, &notify);
+        let result = record(region, &path, (system_audio, microphone), &s, &c, &notify);
         if c.load(Ordering::Relaxed) {
             let _ = std::fs::remove_file(&path);
         }
@@ -91,7 +97,7 @@ pub fn fit(region: Rect, monitor: Rect) -> Option<Rect> {
 fn record(
     region: Rect,
     path: &std::path::Path,
-    microphone: bool,
+    audio: (bool, bool),
     stop: &AtomicBool,
     cancel: &AtomicBool,
     notify: &dyn Fn(Event),
@@ -126,7 +132,7 @@ fn record(
     // A `.gif` path: a silent animation for chats, at a calmer pace; anything else is MP4 with sound.
     let gif = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("gif"));
     let frame = if gif { GIF_FRAME } else { FRAME };
-    let mut sound = if gif { None } else { Sound::start(microphone) };
+    let mut sound = if gif { None } else { Sound::start(audio.0, audio.1) };
     let sink = if gif {
         Sink::Gif(GifWriter::new(path, w, h).map_err(|e| Error::new(windows::Win32::Foundation::E_FAIL, e))?)
     } else {
@@ -605,8 +611,8 @@ struct Sound {
 }
 
 impl Sound {
-    fn start(microphone: bool) -> Option<Self> {
-        let speakers = in_time("звук компьютера", Source::speakers);
+    fn start(system_audio: bool, microphone: bool) -> Option<Self> {
+        let speakers = if system_audio { in_time("звук компьютера", Source::speakers) } else { None };
         let rate = speakers.as_ref().map_or(48_000, |(_, rate)| *rate);
         let mic = if microphone { in_time("микрофон", move || Source::microphone(rate)) } else { None };
         let (main, microphone) = match (speakers, mic) {
@@ -684,6 +690,10 @@ mod tests {
     fn records_a_short_clip_into_a_playable_mp4() {
         record_clip(false);
     }
+    #[test]
+    fn disabled_sound_inputs_do_not_open_an_audio_device() {
+        assert!(Sound::start(false, false).is_none());
+    }
 
     /// The same with the microphone asked for: mixed in when there is one, and when there is none
     /// (or Windows does not allow it) the video is still recorded.
@@ -711,7 +721,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("kadr-record-{}-{microphone}.mp4", std::process::id()));
         let (tx, rx) = std::sync::mpsc::channel();
         let ticks = tx.clone();
-        let rec = start(Rect::new(0, 0, 320, 240), path.clone(), microphone, move |e| match e {
+        let rec = start_with_audio(Rect::new(0, 0, 320, 240), path.clone(), true, microphone, move |e| match e {
             Event::Tick(_) => {
                 let _ = ticks.send(None);
             }
@@ -748,7 +758,7 @@ mod tests {
     fn records_a_gif_that_loops_for_about_as_long_as_it_ran() {
         let path = std::env::temp_dir().join(format!("kadr-record-{}.gif", std::process::id()));
         let (tx, rx) = std::sync::mpsc::channel();
-        let rec = start(Rect::new(0, 0, 320, 240), path.clone(), false, move |e| {
+        let rec = start_with_audio(Rect::new(0, 0, 320, 240), path.clone(), false, false, move |e| {
             if let Event::Done(r) = e {
                 let _ = tx.send(r);
             }

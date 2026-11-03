@@ -372,6 +372,19 @@ pub fn restyle() {
         }
     }
 }
+/// Esc is a global capture hotkey while the editor is open. Its owner forwards it here.
+pub fn escape() -> bool {
+    let action = with(|st| unsafe { IsWindowVisible(st.hwnd) }.as_bool().then_some((st.hwnd, st.view))).flatten();
+    if let Some((hwnd, view)) = action {
+        if view == View::Report {
+            switch(hwnd, View::About);
+        } else {
+            hide(hwnd);
+        }
+        return true;
+    }
+    false
+}
 
 pub fn show(instance: HINSTANCE) {
     if STATE.with(|s| s.borrow().is_none()) {
@@ -447,7 +460,7 @@ pub fn show(instance: HINSTANCE) {
     });
     let Some((hwnd, x, y, w, h)) = placed else { return };
     unsafe {
-        let _ = SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER);
+        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, h, SET_WINDOW_POS_FLAGS(0));
         glass::match_appearance(hwnd);
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);

@@ -15,6 +15,7 @@ const GLOW: f64 = 0.84;
 
 #[derive(Default)]
 pub(super) struct Smart {
+    original: bool,
     /// The level being searched right now.
     scanning: Option<Censor>,
     /// Results of an older search (the session closed or the user pressed again) are ignored.
@@ -125,15 +126,6 @@ fn ease(t: f64) -> f32 {
     (t * t * t * (t * (t * 6.0 - 15.0) + 10.0)) as f32
 }
 
-fn next(level: Option<Censor>) -> Option<Censor> {
-    match level {
-        None => Some(Censor::Light),
-        Some(Censor::Light) => Some(Censor::Hard),
-        Some(Censor::Hard) => Some(Censor::Full),
-        Some(Censor::Full) => None,
-    }
-}
-
 impl App {
     pub(super) fn smart_needs_frames(&self) -> bool {
         self.smart.scanning.is_some()
@@ -160,6 +152,15 @@ impl App {
 
     /// Per area: rect, how much original shows over the blur, and the outline strength.
     pub(super) fn smart_fx(&self) -> (bool, Vec<(RECT, f32, f32)>) {
+        if self.smart.original {
+            return (
+                false,
+                self.active
+                    .as_ref()
+                    .map(|a| a.drawing.smart_shapes().into_iter().map(|r| (win_rect(r), 1.0, 0.1)).collect())
+                    .unwrap_or_default(),
+            );
+        }
         // Play the sweep only after the complete censor layer has been prepared.
         // OCR can take seconds; it must not compete with the reveal animation.
         let scanning = self.smart.anim.as_ref().is_some_and(|a| a.showing);
@@ -219,14 +220,22 @@ impl App {
         }
     }
 
-    pub(super) fn toggle_smart(&mut self) {
+    pub(super) fn toggle_original(&mut self) {
+        self.smart.original = !self.smart.original;
+        self.request_redraw();
+    }
+    pub(super) fn original_visible(&self) -> bool {
+        self.smart.original
+    }
+
+    pub(super) fn set_censor(&mut self, to: Option<Censor>) {
         if self.smart.anim.is_some() {
             return;
         }
         let Some(active) = &mut self.active else {
             return;
         };
-        let to = next(self.smart.scanning.or(self.smart.level));
+        self.smart.original = false;
         // A search still running belongs to the level being left.
         self.smart.job += 1;
         self.smart.scanning = None;
@@ -566,13 +575,11 @@ mod tests {
         assert!(animation.stagger() < STAGGER);
     }
     #[test]
-    fn the_pill_steps_off_light_hard_full_and_back_to_off() {
-        let mut level = None;
-        let mut seen = Vec::new();
-        for _ in 0..4 {
-            level = next(level);
-            seen.push(level);
+    fn the_censor_button_turns_off_any_level_and_restores_the_last_choice() {
+        for level in [Censor::Light, Censor::Hard, Censor::Full] {
+            assert_eq!(SmartUi::Off.toggled(level), Some(level));
+            assert_eq!(SmartUi::On(level, 3).toggled(level), None);
+            assert_eq!(SmartUi::Scanning(level).toggled(level), None);
         }
-        assert_eq!(seen, [Some(Censor::Light), Some(Censor::Hard), Some(Censor::Full), None]);
     }
 }

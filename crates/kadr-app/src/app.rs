@@ -49,6 +49,7 @@ use kadr_win::privileges::{self, ProcessInfo};
 use kadr_win::{log, log_info, log_warn, wide};
 
 mod clips;
+mod dock_input;
 mod drafts;
 mod editor_input;
 mod exit;
@@ -130,6 +131,7 @@ struct Active {
     draft: Option<drafts::DraftState>,
     drawing: Drawing,
     text_surrogate: Option<u16>,
+    bar: kadr_render::scene::BarState,
 }
 
 pub struct App {
@@ -173,6 +175,7 @@ pub struct App {
     /// The translation lens waiting for the overlay to leave: the picture and what goes over it.
     lens_pending: Option<(Arc<Image>, crate::lens::Content)>,
     smart: smart::Smart,
+    last_censor: kadr_render::scene::Censor,
     /// Long screenshot in progress, and the area waiting for the overlay to leave first.
     text_tx: Sender<text::TextResult>,
     text_rx: Receiver<text::TextResult>,
@@ -182,6 +185,8 @@ pub struct App {
     last_region: Option<DocRect>,
     recent: crate::recent_worker::Worker,
     recent_window: Option<crate::recent_window::Window>,
+    recent_entries: Vec<kadr_store::recent::Entry>,
+    recent_items: Vec<kadr_render::scene::RecentItem>,
     loading_recent: bool,
     recovery_notice: bool,
     bench_mode: bool,
@@ -285,6 +290,7 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
             bubble_pending: None,
             lens_pending: None,
             smart: Default::default(),
+            last_censor: kadr_render::scene::Censor::Light,
             text_tx,
             text_rx,
             record: record::RecordState::default(),
@@ -292,6 +298,8 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
             last_region: None,
             recent,
             recent_window: None,
+            recent_entries: Vec::new(),
+            recent_items: Vec::new(),
             loading_recent: false,
             recovery_notice: false,
             bench_mode: bench.is_some(),
@@ -472,6 +480,9 @@ impl App {
     }
 
     fn on_hotkey(&mut self, id: i32, queue_ms: u32) {
+        if id == HK_ESC && crate::about_window::escape() {
+            return;
+        }
         // While recording, any capture key stops the recording: PrtSc starts and ends it.
         if self.stop_recording() {
             return;
@@ -750,6 +761,7 @@ impl App {
             draft: None,
             drawing: Drawing::default(),
             text_surrogate: None,
+            bar: kadr_render::scene::BarState { microphone: self.config.capture.microphone, ..Default::default() },
         });
         self.source = source;
         self.render_all();
@@ -925,8 +937,9 @@ impl App {
                     && active.drawing.tool == kadr_doc::annotation::Tool::Select
                     && active.drawing.selected.is_none(),
                 toolbar: session.show_toolbar().then_some(Toolbar {
+                    recent: &self.recent_items,
                     hovered: active.hovered,
-                    editor: Some(editor_bar(&active.drawing, self.smart_ui(&active.drawing))),
+                    editor: Some(editor_bar(&active.drawing, self.smart_ui(&active.drawing), self.bar_state(active))),
                 }),
                 magnifier: magnifier.as_ref(),
                 hud: if i == active.hud_overlay { hud.as_ref() } else { None },
@@ -1027,6 +1040,11 @@ impl App {
             }
             return;
         }
+        if msg == WM_LBUTTONDOWN && self.active.as_ref().is_some_and(|a| a.bar.menu.is_some()) {
+            self.active.as_mut().unwrap().bar.menu = None;
+            self.request_redraw();
+            return;
+        }
         if self.drawing_pointer(hwnd, msg, p) {
             return;
         }
@@ -1050,13 +1068,16 @@ impl App {
     }
 
     fn on_key(&mut self, vk: u16, down: bool) {
+        if down && self.dock_key(vk) {
+            return;
+        }
         if down && mods().ctrl && !self.active.as_ref().is_some_and(|a| a.drawing.typing()) {
             if vk == 0x44 {
-                self.pin();
+                self.pin_recent();
                 return;
             }
             if vk == 0x48 {
-                self.show_recent();
+                self.dock_button(ToolbarButton::Recent);
                 return;
             }
             // Ctrl+Shift+C: the text in the selection; Ctrl+T: its translation.
@@ -1367,11 +1388,19 @@ impl App {
         }
         let selection = win_rect(active.session.selection()?);
         self.overlays.iter().find_map(|o| {
-            o.toolbar_hit(&self.shared, selection, p, Some(editor_bar(&active.drawing, self.smart_ui(&active.drawing))))
+            o.toolbar_hit(
+                &self.shared,
+                selection,
+                p,
+                Some(editor_bar(&active.drawing, self.smart_ui(&active.drawing), self.bar_state(active))),
+            )
         })
     }
 
     fn press(&mut self, button: ToolbarButton) {
+        if self.dock_button(button) {
+            return;
+        }
         match button {
             ToolbarButton::Surface => {}
             ToolbarButton::Copy => self.export(Export::Copy),
@@ -1382,7 +1411,7 @@ impl App {
             ToolbarButton::Recent => self.show_recent(),
             ToolbarButton::Text => self.copy_text(),
             ToolbarButton::Translate => self.translate_selection(),
-            ToolbarButton::Smart => self.toggle_smart(),
+            ToolbarButton::Smart => self.set_censor(Some(self.last_censor)),
             ToolbarButton::Record => self.start_record_from_selection(),
             _ => self.editor_button(button),
         }
@@ -1716,8 +1745,13 @@ fn yes(value: bool) -> &'static str {
     if value { "да" } else { "нет" }
 }
 
-fn editor_bar(d: &Drawing, smart: kadr_render::scene::SmartUi) -> kadr_render::scene::EditorBar {
+fn editor_bar(
+    d: &Drawing,
+    smart: kadr_render::scene::SmartUi,
+    ui: kadr_render::scene::BarState,
+) -> kadr_render::scene::EditorBar {
     kadr_render::scene::EditorBar {
+        ui,
         text_style: d.text_style,
         callout: d.callout,
         tool: d.tool,

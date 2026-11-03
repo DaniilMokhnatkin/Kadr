@@ -12,6 +12,9 @@ pub(super) struct DraftState {
     view: Option<(DocRect, DocRect)>,
 }
 impl App {
+    pub(super) fn pause_for_recent(&mut self) {
+        self.pause_capture();
+    }
     pub(super) fn hide_recent_before_capture(&mut self) {
         self.finish_paused();
         let viewer = crate::viewer::close_now();
@@ -35,7 +38,7 @@ impl App {
         }
     }
     pub(super) fn start_draft(&mut self) {
-        if !self.config.recent.enabled || self.bench_mode {
+        if (!self.config.recent.enabled && !self.active.as_ref().is_some_and(|a| a.bar.pinned)) || self.bench_mode {
             return;
         }
         let Some(active) = &self.active else { return };
@@ -136,6 +139,12 @@ impl App {
                 self.close_session();
                 self.recent.send(Command::Clear);
             }
+            Some(Request::Pin(id, pinned)) => {
+                self.recent.send(Command::Pin { id, pinned });
+            }
+            Some(Request::Delete(id)) => {
+                self.recent.send(Command::Delete(id));
+            }
             Some(Request::Close) => {
                 self.loading_recent = false;
                 self.resume_capture();
@@ -150,21 +159,20 @@ impl App {
         while let Ok(event) = self.recent.events.try_recv() {
             match event {
                 Event::Ready { entries, recovered } => {
-                    if let Some(window) = &self.recent_window {
-                        window.set_entries(entries);
-                    }
+                    self.cache_recent(entries);
                     if recovered > 0 {
                         self.notify("Снимок не был сохранён", "Он доступен в «Недавних». Нажмите, чтобы восстановить.");
                         self.recovery_notice = true;
                     }
                 }
                 Event::List(entries) => {
-                    if let Some(window) = &self.recent_window {
-                        window.set_entries(entries);
-                    }
+                    self.cache_recent(entries);
                 }
                 Event::Persisted(token) => {
-                    log_info!("черновик {} записан, ревизия {}", token.id, token.revision)
+                    log_info!("черновик {} записан, ревизия {}", token.id, token.revision);
+                    if self.active.as_ref().is_some_and(|a| a.bar.menu == Some(kadr_render::scene::BarMenu::Recent)) {
+                        self.recent.send(Command::List);
+                    }
                 }
                 Event::Loaded { id, draft } => {
                     if !self.loading_recent {
@@ -183,7 +191,11 @@ impl App {
                     }
                 }
                 Event::Error(error) => {
+                    let was_loading = self.loading_recent;
                     self.loading_recent = false;
+                    if was_loading {
+                        self.resume_capture();
+                    }
                     log_warn!("Недавние: {error}");
                     if let Some(window) = &self.recent_window {
                         window.error(&error);
@@ -285,6 +297,7 @@ impl App {
             draft: Some(DraftState { token, document: draft.document, view }),
             drawing,
             text_surrogate: None,
+            bar: kadr_render::scene::BarState { microphone: self.config.capture.microphone, ..Default::default() },
         });
         self.source = "Недавние";
         self.render_all();
@@ -398,6 +411,7 @@ mod tests {
             hovered: None,
             draft: None,
             text_surrogate: None,
+            bar: Default::default(),
         });
         let mut active = None;
         assert!(resume_active(&mut active, &mut paused));

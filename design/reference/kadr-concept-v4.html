@@ -1,0 +1,879 @@
+<!doctype html>
+<html lang="ru" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kadr — концепт 04</title>
+<style>
+/* Kadr · concept 04.
+   Editorial discipline (4px grid, one accent, no ornament) with Apple materials and motion.
+   Geometry: every control is 44px; one gap of 8px; corners are concentric:
+   dock 30 = control 22 + padding 8; blob 18 = control 22 − inset 4; tile 14 = popover 22 − padding 8. */
+:root{
+  color-scheme:dark;
+  --font:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;
+  --font-display:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI Variable Display","Segoe UI",system-ui,sans-serif;
+  --control:44px;--gap:8px;--inset:4px;
+  --r-control:22px;--r-blob:18px;--r-dock:30px;--r-pop:22px;--r-tile:14px;
+  --ease:cubic-bezier(.32,.72,0,1);--ease-out:cubic-bezier(.2,.8,.2,1);
+  --t-fast:140ms;--t-mid:240ms;--t-slow:420ms;
+
+  --page:#0d0d0e;--panel:#1c1c1e;--well:#28282b;--popover:#1c1c1e;--switch-off:#48484b;
+  --hover:rgb(255 255 255 / .07);--press:rgb(255 255 255 / .12);
+  --ink:#f5f5f7;--ink-2:#a1a1a6;--line:rgb(255 255 255 / .1);
+  --accent:#0071e3;--accent-hover:#0077ed;--on-accent:#fff;
+  --tint:rgb(10 132 255 / .2);--tint-ink:#4da3ff;
+  --red:#ff453a;--focus:#64a8ff;
+  --edge:inset 0 0 0 .5px rgb(255 255 255 / .1);
+  --float:0 0 0 .5px rgb(0 0 0 / .5),0 18px 48px rgb(0 0 0 / .36),0 2px 6px rgb(0 0 0 / .2);
+  --dock-shadow:inset 0 0 0 1px rgb(255 255 255 / .09),0 4px 16px rgb(0 0 0 / .1);
+}
+:root[data-theme="light"]{
+  color-scheme:light;
+  --page:#f5f5f7;--panel:#fbfbfd;--well:#ececf0;--popover:#fbfbfd;--switch-off:#d6d6db;
+  --hover:rgb(0 0 0 / .05);--press:rgb(0 0 0 / .09);
+  --ink:#1d1d1f;--ink-2:#636366;--line:rgb(0 0 0 / .1);
+  --tint:rgb(0 113 227 / .12);--tint-ink:#0062c4;
+  --red:#e5342a;--focus:#0058b9;
+  --edge:inset 0 0 0 .5px rgb(0 0 0 / .06);
+  --float:0 0 0 .5px rgb(0 0 0 / .1),0 18px 44px rgb(0 0 0 / .18),0 2px 6px rgb(0 0 0 / .07);
+  --dock-shadow:inset 0 0 0 1px rgb(0 0 0 / .08),0 4px 16px rgb(0 0 0 / .1);
+}
+*,*::before,*::after{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--ink);font:13px/1.4 var(--font);-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+h1,h2,h3,p{margin:0}
+[hidden]:not(.popover){display:none!important}
+button,select,output{font:inherit;color:inherit}
+button{background:none;border:0;padding:0;margin:0;cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.i{width:20px;height:20px;flex:none;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.i .solid{fill:currentColor;stroke:none}
+.i.chev{width:10px;height:10px;stroke-width:2.4;margin-left:-1px;opacity:.7}
+kbd{font:inherit}
+
+/* Buttons ------------------------------------------------------------ */
+.btn{position:relative;display:inline-flex;align-items:center;justify-content:center;gap:6px;height:var(--control);min-width:var(--control);padding:0 14px;border-radius:var(--r-control);font-size:13px;font-weight:400;white-space:nowrap;transition:background-color var(--t-fast) var(--ease-out),color var(--t-fast) var(--ease-out),transform var(--t-mid) var(--ease)}
+.btn.icon{width:var(--control);padding:0}
+.btn:hover:not(:disabled){background:var(--hover)}
+.btn:active:not(:disabled){background:var(--press);transform:scale(.96)}
+.btn:disabled{opacity:.38;cursor:default}
+.btn[aria-pressed="true"]{background:var(--tint);color:var(--tint-ink)}
+.btn.primary{background:var(--accent);color:var(--on-accent);font-weight:600;padding:0 16px}
+.btn.primary:hover:not(:disabled){background:var(--accent-hover)}
+.btn.primary .return{opacity:.75;margin-left:2px}
+.btn.block{width:100%}
+
+/* Segmented tracks with the liquid selection ------------------------- */
+.track{--cols:2;position:relative;isolation:isolate;display:grid;grid-template-columns:repeat(var(--cols),minmax(var(--control),1fr));grid-auto-rows:var(--control);min-width:0;background:var(--well);border-radius:var(--r-control)}
+.tools{--cols:8}.levels{--cols:3}.widths{--cols:4}.styles{--cols:4}
+.seg{position:relative;display:flex;align-items:center;justify-content:center;gap:2px;min-width:0;height:var(--control);color:var(--ink);font-size:13px;font-weight:500;white-space:nowrap}
+button.seg::before{content:"";position:absolute;inset:var(--inset);border-radius:var(--r-blob);background:var(--hover);opacity:0;transition:opacity var(--t-fast) var(--ease-out)}
+button.seg:hover::before,button.seg[aria-expanded="true"]::before{opacity:1}
+button.seg:focus-visible{outline:none}
+button.seg:focus-visible::after{content:"";position:absolute;inset:1px;z-index:2;border-radius:calc(var(--r-control) - 1px);box-shadow:0 0 0 2px var(--focus);pointer-events:none}
+.liquid{position:absolute;inset:0;z-index:1;display:grid;grid-template-columns:inherit;grid-auto-rows:inherit;background:var(--accent);clip-path:inset(50%);pointer-events:none}
+.liquid .seg,.liquid .seg *{color:var(--on-accent)!important;opacity:1}
+.seg.level{flex-direction:column;gap:1px;line-height:1.2;padding:0 8px}
+.lv-name{font-weight:600}
+.lv-desc{font-size:11px;font-weight:400;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.track.small .seg{font-size:12px}
+
+/* Presentation ------------------------------------------------------- */
+.skip{position:absolute;z-index:60;left:12px;top:-60px;padding:10px 14px;border-radius:var(--r-control);background:var(--panel);color:var(--ink)}
+.skip:focus{top:12px}
+.top{display:flex;align-items:center;gap:20px;max-width:1440px;margin:0 auto;padding:18px 32px}
+.brand{display:flex;align-items:center;gap:10px;font:600 22px/1 var(--font-display);letter-spacing:-.02em}
+.brand .i{width:24px;height:24px;stroke-width:1.6}
+.top-meta{color:var(--ink-2);font-size:13px}
+.theme{margin-left:auto;width:216px}
+
+.stage{position:relative;isolation:isolate;overflow:hidden;display:flex;flex-direction:column;align-items:center;padding:40px 24px 132px;background:#8fa6ad}
+.wallpaper,.dim{position:absolute;inset:0;width:100%;height:100%}
+.wallpaper{z-index:-1}
+.dim{z-index:1;pointer-events:none}
+.shot{position:relative;width:min(990px,100%);height:416px}
+.window{position:absolute;inset:0;overflow:hidden;border-radius:14px;background:#f8f9fc;color:#292d35}
+.window-bar{position:relative;display:flex;align-items:center;justify-content:center;height:44px;padding:0 24px;color:#646c79;font-size:12px}
+.window-bar span:last-child{position:absolute;right:24px}
+.window-bar i{display:inline-block;width:8px;height:8px;margin-left:6px;border-radius:50%;background:#c3c8cf}
+.sample{display:grid;grid-template-columns:1fr 1fr;gap:56px;padding:28px 72px 30px}
+.sample h2{margin-bottom:10px;font:600 25px/1.2 var(--font-display);letter-spacing:-.02em}
+.muted{color:#5d6672;font-size:12px}
+.lines{display:grid;gap:14px;margin-top:20px}
+.line{display:flex;justify-content:space-between;gap:20px;font-size:13px;white-space:nowrap}
+.line .key{color:#5d6672;font-size:12px}
+.line span:last-child{font-weight:500}
+.note{margin-top:18px;font-size:13px;line-height:1.8;color:#4a5260}
+.private{display:inline-block;transition:filter var(--t-mid) var(--ease-out)}
+.private.masked{filter:blur(5px);user-select:none}
+.capture{position:absolute;top:53px;left:40px;right:40px;bottom:18px;z-index:2;border:1px solid #fff;outline:1px solid rgb(0 0 0 / .45);pointer-events:none}
+.size{position:absolute;left:-1px;top:-34px;display:flex;align-items:center;height:26px;padding:0 10px;border-radius:13px;background:#1c1c1e;color:#f5f5f7;font-size:12px;font-variant-numeric:tabular-nums}
+.handle{position:absolute;width:9px;height:9px;border-radius:50%;background:#fff;box-shadow:0 0 0 1px rgb(0 0 0 / .35);transform:translate(-50%,-50%)}
+.tl{left:0;top:0}.tc{left:50%;top:0}.tr{left:100%;top:0}.ml{left:0;top:50%}.mr{left:100%;top:50%}.bl{left:0;top:100%}.bc{left:50%;top:100%}.br{left:100%;top:100%}
+
+/* Dock --------------------------------------------------------------- */
+.dock{position:relative;z-index:3;display:flex;flex-direction:column;gap:var(--gap);width:max-content;max-width:100%;margin-top:20px;padding:var(--gap);border-radius:var(--r-dock);background:var(--panel);box-shadow:var(--dock-shadow)}
+.row{display:flex;align-items:center;gap:var(--gap);min-width:0}
+.row-edit .tools{flex:1 1 auto}
+.props .dot{width:14px;height:14px;border-radius:50%;background:var(--dot,#fff);box-shadow:inset 0 0 0 1px rgb(127 127 127 / .5)}
+.props output{min-width:30px;text-align:left;font-variant-numeric:tabular-nums}
+.drawer{display:grid;grid-template-rows:0fr;margin-top:calc(var(--gap) * -1);transition:grid-template-rows 260ms var(--ease),margin-top 260ms var(--ease)}
+.drawer[data-open="true"]{grid-template-rows:1fr;margin-top:0;transition-duration:var(--t-slow)}
+.drawer-inner{min-height:0;overflow:hidden}
+.drawer .row{opacity:0;transform:translateY(-8px) scale(.985);transform-origin:50% 0;transition:opacity 160ms var(--ease-out),transform 260ms var(--ease)}
+.drawer[data-open="true"] .row{opacity:1;transform:none;transition:opacity var(--t-mid) var(--ease-out) 60ms,transform var(--t-slow) var(--ease)}
+.drawer .btn:focus-visible{outline-offset:-2px}
+.row-privacy .levels{flex:1 1 auto}
+.privacy-status{display:grid;min-width:140px;padding:0 6px;line-height:1.25}
+.privacy-status strong{font-size:13px;font-weight:600;font-variant-numeric:tabular-nums}
+.privacy-status span{font-size:11px;color:var(--ink-2)}
+.row-output>*{flex:1 1 auto}
+.rec{width:20px;height:20px;color:var(--red)}
+.badge{display:grid;place-items:center;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--well);color:var(--ink-2);font-size:11px;font-weight:600;font-variant-numeric:tabular-nums}
+.split{display:flex;border-radius:var(--r-control);transition:background-color var(--t-fast) var(--ease-out)}
+.split:hover{background:var(--hover)}
+.split .btn:hover:not(:disabled){background:none}
+.split .btn:first-child{flex:1 1 auto;padding-right:8px}
+.split .btn.icon{flex:none}
+.censor-count{display:none}
+.btn[aria-pressed="true"] .badge{background:var(--accent);color:var(--on-accent)}
+.split .btn.icon::before{content:"";position:absolute;left:0;top:14px;bottom:14px;width:1px;background:var(--line)}
+
+/* Popovers ----------------------------------------------------------- */
+.popover{position:absolute;bottom:calc(100% + var(--gap));left:0;z-index:20;width:var(--w,280px);padding:var(--gap);border-radius:var(--r-pop);background:var(--popover);color:var(--ink);box-shadow:var(--float),var(--edge);transform-origin:var(--origin,50%) 100%;transition:opacity 180ms var(--ease-out),transform 320ms var(--ease),display 320ms allow-discrete}
+.popover[hidden]{display:none;opacity:0;transform:translateY(6px) scale(.96);transition-duration:120ms,160ms,160ms}
+@starting-style{.popover:not([hidden]){opacity:0;transform:translateY(6px) scale(.96)}}
+.popover :focus-visible{outline-offset:-2px}
+.popover .btn.primary:focus-visible{outline-offset:2px}
+.pop-title{display:flex;align-items:baseline;justify-content:space-between;padding:6px 12px 10px;font-size:12px;font-weight:600;color:var(--ink-2)}
+.pop-title span{font-weight:400}
+.choices{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--gap)}
+.choice{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;height:76px;border-radius:var(--r-tile);background:var(--well);font-size:12px;font-weight:500;transition:background-color var(--t-fast) var(--ease-out),transform var(--t-mid) var(--ease)}
+.choice .i{width:22px;height:22px}
+.choice:hover{background:var(--press)}
+.choice:active{transform:scale(.96)}
+.choice[aria-pressed="true"]{background:var(--accent);color:var(--on-accent)}
+.menu-item{display:flex;align-items:center;gap:10px;width:100%;height:var(--control);padding:0 12px;border-radius:var(--r-tile);font-size:13px;text-align:left;transition:background-color var(--t-fast) var(--ease-out)}
+.menu-item:hover{background:var(--hover)}
+.menu-item kbd{margin-left:auto;color:var(--ink-2);font-size:12px}
+.menu-item[aria-pressed="true"]{background:var(--accent);color:var(--on-accent)}
+.menu-item[aria-pressed="true"] kbd{color:var(--on-accent)}
+.menu-sep{height:1px;margin:4px 12px;background:var(--line)}
+.field-label{display:block;padding:10px 12px 6px;font-size:12px;color:var(--ink-2)}
+.field-label:first-child{padding-top:4px}
+.swatches{display:grid;grid-template-columns:repeat(6,1fr)}
+.swatch{display:grid;place-items:center;height:var(--control);border-radius:var(--r-tile)}
+.swatch:hover{background:var(--hover)}
+.swatch span{width:24px;height:24px;border-radius:50%;background:var(--c);box-shadow:inset 0 0 0 1px rgb(127 127 127 / .45);transition:box-shadow var(--t-fast) var(--ease-out)}
+.swatch[aria-pressed="true"] span{box-shadow:inset 0 0 0 1px rgb(127 127 127 / .45),0 0 0 2px var(--popover),0 0 0 4px var(--ink)}
+.stepper{display:flex;align-items:center;justify-content:space-between;height:var(--control);border-radius:var(--r-control);background:var(--well)}
+.stepper output{font-size:13px;font-weight:600;font-variant-numeric:tabular-nums}
+.switch-row{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;height:var(--control);padding:0 12px;border-radius:var(--r-tile);text-align:left;font-size:13px}
+.switch-row:hover{background:var(--hover)}
+.switch-row .label{display:flex;align-items:center;gap:10px}
+.switch{position:relative;flex:none;width:40px;height:24px;border-radius:12px;background:var(--switch-off);transition:background-color var(--t-mid) var(--ease-out)}
+.switch::after{content:"";position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgb(0 0 0 / .3);transition:transform var(--t-slow) var(--ease)}
+[aria-checked="true"] .switch{background:var(--accent)}
+[aria-checked="true"] .switch::after{transform:translateX(16px)}
+.select{position:relative}
+.select select{width:100%;height:var(--control);padding:0 40px 0 12px;border:0;border-radius:var(--r-tile);background:var(--well);appearance:none;cursor:pointer}
+.select .i{position:absolute;right:12px;top:12px;pointer-events:none;color:var(--ink-2)}
+.pop-hint{padding:8px 12px 4px;font-size:12px;color:var(--ink-2)}
+.pop-actions{margin-top:var(--gap)}
+.pop-head{display:flex;align-items:center;justify-content:space-between;gap:var(--gap)}
+.pop-head .pop-title{flex:1;padding-bottom:6px}
+.pop-head .btn{color:var(--tint-ink)}
+.recent-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--gap)}
+.recent-item{position:relative;min-width:0}
+.recent-open{display:grid;gap:6px;width:100%;padding:0 0 6px;border-radius:var(--r-tile);text-align:left;transition:background-color var(--t-fast) var(--ease-out)}
+.recent-open:hover{background:var(--hover)}
+.recent-open strong,.recent-open small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.recent-art{display:grid;place-items:center;aspect-ratio:4/3;border-radius:var(--r-tile);background:var(--tone)}
+.mini{position:absolute;top:0;display:grid;place-items:center;width:var(--control);height:var(--control);border-radius:var(--r-control);color:#fff;opacity:0;transition:opacity var(--t-fast) var(--ease-out)}
+.mini.pin{left:0}.mini.del{right:0}
+.mini .i{position:relative;width:16px;height:16px}
+.recent-item:hover .mini,.recent-item:has(:focus-visible) .mini,.mini[aria-pressed="true"]{opacity:1}
+@media (hover:none){.mini{opacity:1}}
+.mini::before{content:"";position:absolute;inset:8px;border-radius:50%;background:rgb(20 20 22 / .72);transition:background-color var(--t-fast) var(--ease-out),transform var(--t-mid) var(--ease)}
+.mini:hover::before{background:rgb(20 20 22 / .9)}
+.mini:active::before{transform:scale(.9)}
+.mini[aria-pressed="true"]::before{background:var(--accent)}
+.recent-empty{grid-column:1 / -1;padding:28px 12px;border-radius:var(--r-tile);background:var(--well);color:var(--ink-2);text-align:center}
+.recent-art span{display:grid;align-content:start;gap:5px;width:72%;height:62%;padding:9px 8px;border-radius:4px;background:#f4f5f7}
+.recent-art i{display:block;height:3px;border-radius:2px;background:#8c95a1}
+.recent-art i:first-child{width:62%;height:5px;background:#33414f}
+.recent-open strong{padding:0 8px;font-size:12px;font-weight:500}
+.recent-open small{padding:0 8px;margin-top:-4px;color:var(--ink-2);font-size:11px}
+
+/* Floating bits ------------------------------------------------------ */
+.tip{position:fixed;z-index:50;left:0;top:0;display:flex;align-items:center;gap:8px;height:28px;padding:0 10px;border-radius:14px;background:var(--popover);color:var(--ink);box-shadow:var(--float),var(--edge);font-size:12px;white-space:nowrap;pointer-events:none;opacity:0;transform:translateY(4px);transition:opacity 120ms var(--ease-out),transform 200ms var(--ease)}
+.tip.show{opacity:1;transform:none}
+.tip kbd{color:var(--ink-2)}
+.status{position:absolute;z-index:5;left:50%;bottom:24px;display:flex;align-items:center;height:36px;max-width:calc(100% - 32px);padding:0 18px;border-radius:18px;background:var(--panel);color:var(--ink);box-shadow:var(--float),var(--edge);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;opacity:0;transform:translate(-50%,8px);transition:opacity 200ms var(--ease-out),transform var(--t-slow) var(--ease)}
+.status.show{opacity:1;transform:translate(-50%,0)}
+.recording{position:absolute;z-index:4;left:50%;bottom:72px;display:flex;align-items:center;gap:var(--gap);padding:4px;border-radius:26px;background:var(--panel);box-shadow:var(--float),var(--edge);transform:translateX(-50%)}
+.recording .rec{margin-left:10px}
+.recording strong{min-width:92px;font-size:13px;font-weight:600;font-variant-numeric:tabular-nums}
+.recording .stop{color:var(--red)}
+.closed{position:absolute;inset:0;z-index:10;display:grid;place-items:center;background:rgb(0 0 0 / .32)}
+.closed>div{display:grid;gap:12px;justify-items:center;width:300px;padding:24px var(--gap) var(--gap);border-radius:var(--r-dock);background:var(--panel);box-shadow:var(--float),var(--edge);text-align:center}
+.closed h2{font:600 17px/1.3 var(--font-display)}
+.closed p{color:var(--ink-2)}
+
+/* About sheet: padding 8 like the dock, so its corner 30 is concentric with the 22 controls */
+.sheet-backdrop{position:absolute;inset:0;z-index:12;display:grid;place-items:center;padding:24px 12px;background:rgb(0 0 0 / .32);transition:opacity 200ms var(--ease-out)}
+@starting-style{.sheet-backdrop{opacity:0}.sheet{transform:translateY(8px) scale(.97)}}
+.sheet{position:relative;width:min(400px,100%);padding:var(--gap);border-radius:var(--r-dock);background:var(--panel);color:var(--ink);box-shadow:var(--float),var(--edge);transition:transform var(--t-slow) var(--ease)}
+.sheet:focus{outline:none}
+.sheet :focus-visible{outline-offset:-2px}
+.sheet .btn.primary:focus-visible{outline-offset:2px}
+.sheet-view{display:grid;gap:var(--gap)}
+.sheet-close{position:absolute;top:0;right:0}
+.about-head{display:grid;justify-items:center;gap:4px;padding:24px 16px 8px;text-align:center}
+.app-icon{display:grid;place-items:center;width:64px;height:64px;margin-bottom:8px;border-radius:16px;background:var(--accent);color:var(--on-accent)}
+.app-icon .i{width:36px;height:36px;stroke-width:1.5}
+.about-head h2{font:600 22px/1.2 var(--font-display);letter-spacing:-.02em}
+.about-version{color:var(--ink-2);font-size:12px;font-variant-numeric:tabular-nums}
+.update-row{display:flex;align-items:center;justify-content:space-between;gap:var(--gap);padding-left:14px;border-radius:var(--r-control);background:var(--well)}
+.update-status{display:flex;align-items:center;gap:8px;min-width:0;font-size:13px}
+.update-status .i{width:18px;height:18px;color:var(--ink-2)}
+.update-row[aria-busy="true"] .update-status .i{animation:spin 900ms linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.about-text{padding:8px 14px 0;font-size:13px;line-height:1.5}
+.features{display:grid;grid-template-columns:1fr 1fr;gap:10px 16px;margin:0;padding:8px 14px 16px;list-style:none;font-size:12px}
+.features li{display:flex;align-items:center;gap:8px}
+.features .i{width:16px;height:16px;color:var(--ink-2)}
+.sheet-actions{display:grid;grid-template-columns:1fr 1fr;gap:var(--gap)}
+.sheet-actions.one{grid-template-columns:1fr}
+.btn.tonal{background:var(--well);color:var(--ink);text-decoration:none}
+.btn.tonal:hover:not(:disabled){background:var(--press)}
+.sheet-bar{display:flex;justify-content:space-between}
+.btn.back{padding-left:8px;gap:2px;color:var(--tint-ink)}
+.report-title{padding:4px 14px 0;font:600 17px/1.3 var(--font-display)}
+.sheet .field-label{padding:4px 14px 0}
+.sheet textarea,.sheet input{width:100%;padding:12px 14px;border:0;border-radius:var(--r-tile);background:var(--well);color:var(--ink);font:inherit;line-height:1.45}
+.sheet textarea{min-height:104px;resize:vertical}
+.sheet input{height:var(--control);padding-block:0}
+.sheet textarea::placeholder,.sheet input::placeholder{color:var(--ink-2)}
+.optional{color:var(--ink-2)}
+.report-attach{display:grid}
+.switch-row .label.two{display:grid;gap:1px}
+.switch-row small{color:var(--ink-2);font-size:11px}
+
+.notes{display:grid;grid-template-columns:repeat(4,1fr);gap:40px;max-width:1440px;margin:0 auto;padding:40px 32px 20px}
+.notes h2{margin-bottom:8px;font:600 17px/1.3 var(--font-display);letter-spacing:-.01em}
+.notes p{font-size:14px;line-height:1.55}
+.proto{max-width:1440px;margin:0 auto;padding:12px 32px 40px;color:var(--ink-2);font-size:12px}
+
+/* Narrow ------------------------------------------------------------- */
+@media (max-width:980px){
+  .row-edit{flex-wrap:wrap}
+  .row-edit .tools{flex:1 1 100%}
+  .row-edit>:not(.tools){flex:1 1 0}
+  .row-output{display:grid;grid-template-columns:repeat(4,1fr)}
+  .row-output .primary{grid-column:span 2}
+  .privacy-status{min-width:0}
+  .notes{grid-template-columns:1fr;gap:24px}
+}
+@media (max-width:680px){
+  .top{flex-wrap:wrap;gap:12px;padding:16px}
+  .theme{width:100%;margin-left:0}
+  .stage{padding:24px 12px 132px}
+  .shot{height:340px}
+  .sample{display:block;padding:24px 28px}
+  .sample-right{display:none}
+  .capture{top:50px;left:16px;right:16px;bottom:14px}
+  .row-output{grid-template-columns:repeat(2,1fr)}
+  .privacy-status{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+  #censor[aria-pressed="true"] .censor-count{display:grid}
+  .notes{padding:32px 16px 16px}
+  .proto{padding:12px 16px 32px}
+}
+@media (max-width:440px){
+  .tools{--cols:4}
+  .seg.level .lv-desc{display:none}
+}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{transition-duration:0s!important;animation:none!important}
+}
+@media (forced-colors:active){
+  .btn,.seg,.choice,.menu-item{border:1px solid ButtonText}
+  .liquid{forced-color-adjust:none;background:Highlight}
+  .liquid .seg,.liquid .seg *{color:HighlightText!important}
+  [aria-pressed="true"],[aria-checked="true"]{outline:2px solid Highlight}
+  .private.masked{visibility:hidden}
+  .swatch span,.props .dot{forced-color-adjust:none}
+}
+</style>
+</head>
+<body>
+<svg aria-hidden="true" style="display:none" xmlns="http://www.w3.org/2000/svg"><defs>
+<symbol id="i-cursor" viewBox="0 0 24 24"><path d="M6 3.5 18.5 12l-5.7 1.3-2.9 5.7z"/></symbol>
+<symbol id="i-arrow" viewBox="0 0 24 24"><path d="M6 18 18 6M9.5 6H18v8.5"/></symbol>
+<symbol id="i-line" viewBox="0 0 24 24"><path d="M5.5 18.5 18.5 5.5"/></symbol>
+<symbol id="i-rect" viewBox="0 0 24 24"><rect x="4" y="5.5" width="16" height="13" rx="3"/></symbol>
+<symbol id="i-ellipse" viewBox="0 0 24 24"><ellipse cx="12" cy="12" rx="8.5" ry="7"/></symbol>
+<symbol id="i-pen" viewBox="0 0 24 24"><path d="m14.5 5.5 4 4M4.5 19.5l1-4.5L16 4.5a2.1 2.1 0 0 1 3 3L8.5 18z"/></symbol>
+<symbol id="i-text" viewBox="0 0 24 24"><path d="M5 7.5V5h14v2.5M12 5v14M9 19h6"/></symbol>
+<symbol id="i-counter" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M10.3 9.6 12.4 8v8M10.2 16h4.2"/></symbol>
+<symbol id="i-blur" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="3.5"/><circle class="solid" cx="8" cy="9" r="1.1"/><circle class="solid" cx="12" cy="9" r="1.1"/><circle class="solid" cx="16" cy="9" r="1.1"/><circle class="solid" cx="8" cy="12" r="1.1"/><circle class="solid" cx="12" cy="12" r="1.1"/><circle class="solid" cx="16" cy="12" r="1.1"/><circle class="solid" cx="8" cy="15" r="1.1"/><circle class="solid" cx="12" cy="15" r="1.1"/><circle class="solid" cx="16" cy="15" r="1.1"/></symbol>
+<symbol id="i-blur-ellipse" viewBox="0 0 24 24"><ellipse cx="12" cy="12" rx="9" ry="7.5"/><circle class="solid" cx="9" cy="9.5" r="1.1"/><circle class="solid" cx="15" cy="9.5" r="1.1"/><circle class="solid" cx="7" cy="12.5" r="1.1"/><circle class="solid" cx="12" cy="12.5" r="1.1"/><circle class="solid" cx="17" cy="12.5" r="1.1"/><circle class="solid" cx="9.5" cy="15.5" r="1.1"/><circle class="solid" cx="14.5" cy="15.5" r="1.1"/></symbol>
+<symbol id="i-blur-brush" viewBox="0 0 24 24"><path d="m12.5 12.5 7-8.2a1.4 1.4 0 0 1 2 2l-8 7.4M12 12c4 3.5.5 9-8 8 2.4-1.6 1.2-4.4 3.6-6.6 1.3-1.2 3-1.8 4.4-1.4"/></symbol>
+<symbol id="i-spotlight" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="3.5"/><rect x="8" y="8.5" width="8" height="7" rx="2"/></symbol>
+<symbol id="i-redact" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="3.5"/><rect class="solid" x="7" y="10" width="10" height="4" rx="1"/></symbol>
+<symbol id="i-eraser" viewBox="0 0 24 24"><path d="M9 19.5h10.5M5 14.2l8.4-8.5a2 2 0 0 1 2.8 0l2.6 2.6a2 2 0 0 1 0 2.8l-7.4 7.5a3 3 0 0 1-2.1.9H8.6L5 15.9a1.2 1.2 0 0 1 0-1.7zM9.5 9.8l4.7 4.7"/></symbol>
+<symbol id="i-lens" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 4.5 4.5M8 10.5h5M10.5 8v5"/></symbol>
+<symbol id="i-more" viewBox="0 0 24 24"><circle class="solid" cx="6" cy="12" r="1.5"/><circle class="solid" cx="12" cy="12" r="1.5"/><circle class="solid" cx="18" cy="12" r="1.5"/></symbol>
+<symbol id="i-chevron" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></symbol>
+<symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3.5 5 6.2v5.6c0 4.3 3 7.3 7 8.7 4-1.4 7-4.4 7-8.7V6.2z"/><path d="M9 12h6"/></symbol>
+<symbol id="i-undo" viewBox="0 0 24 24"><path d="M9 14 4.5 9.5 9 5"/><path d="M4.5 9.5H15a4.5 4.5 0 0 1 0 9h-2.5"/></symbol>
+<symbol id="i-redo" viewBox="0 0 24 24"><path d="m15 14 4.5-4.5L15 5"/><path d="M19.5 9.5H9a4.5 4.5 0 0 0 0 9h2.5"/></symbol>
+<symbol id="i-record" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle class="solid" cx="12" cy="12" r="4.5"/></symbol>
+<symbol id="i-history" viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.4-5.7M4 4.5V8h3.5M12 8v4.2l2.8 1.8"/></symbol>
+<symbol id="i-pin" viewBox="0 0 24 24"><path d="M9 4h6l-1 5.2 3 3.3H7l3-3.3zM12 12.5V20"/></symbol>
+<symbol id="i-ocr" viewBox="0 0 24 24"><path d="M8 4H5.5A1.5 1.5 0 0 0 4 5.5V8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M4 16v2.5A1.5 1.5 0 0 0 5.5 20H8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8.5 9h7M12 9v7"/></symbol>
+<symbol id="i-translate" viewBox="0 0 24 24"><path d="M4 5h10M9 3v2M6 5c.5 3.5 3 6.5 6.5 8M12 5c-.7 4-3.4 7.4-7 9.5M13 20l3.8-9 3.7 9M14.3 17h5"/></symbol>
+<symbol id="i-save" viewBox="0 0 24 24"><path d="M12 4v11m-4.5-4.5L12 15l4.5-4.5M5 15.5V19a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3.5"/></symbol>
+<symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11" height="11" rx="2.5"/><path d="M15.5 5.5V5A1.5 1.5 0 0 0 14 3.5H5A1.5 1.5 0 0 0 3.5 5v9A1.5 1.5 0 0 0 5 15.5h.5"/></symbol>
+<symbol id="i-return" viewBox="0 0 24 24"><path d="M19 5v6a3 3 0 0 1-3 3H6m3.5-3.5L6 14l3.5 3.5"/></symbol>
+<symbol id="i-close" viewBox="0 0 24 24"><path d="m6.5 6.5 11 11M17.5 6.5l-11 11"/></symbol>
+<symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+<symbol id="i-volume" viewBox="0 0 24 24"><path d="M11 5 6.5 9H3.5v6h3l4.5 4zM15 9c1.6 1.6 1.6 4.4 0 6M18 6.5c3 3 3 8 0 11"/></symbol>
+<symbol id="i-mic" viewBox="0 0 24 24"><rect x="8.5" y="3" width="7" height="11.5" rx="3.5"/><path d="M5.5 10.5v1a6.5 6.5 0 0 0 13 0v-1M12 18v3"/></symbol>
+<symbol id="i-stop" viewBox="0 0 24 24"><rect class="solid" x="6.5" y="6.5" width="11" height="11" rx="2.5"/></symbol>
+<symbol id="i-minus" viewBox="0 0 24 24"><path d="M6 12h12"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M6 12h12M12 6v12"/></symbol>
+<symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5.5"/><circle class="solid" cx="12" cy="7.8" r="1.1"/></symbol>
+<symbol id="i-bug" viewBox="0 0 24 24"><rect x="7.5" y="7" width="9" height="12" rx="4.5"/><path d="M9.5 7.5a2.5 2.5 0 0 1 5 0M12 11v8M7.5 12H4M20 12h-3.5M7.8 16.5 5 18.5M16.2 16.5l2.8 2M8 9.2 5.5 7.5M16 9.2l2.5-1.7"/></symbol>
+<symbol id="i-heart" viewBox="0 0 24 24"><path d="M12 19.5s-7.5-4.4-7.5-9.7A4.3 4.3 0 0 1 12 7.2a4.3 4.3 0 0 1 7.5 2.6c0 5.3-7.5 9.7-7.5 9.7z"/></symbol>
+<symbol id="i-keyboard" viewBox="0 0 24 24"><rect x="3" y="6.5" width="18" height="11" rx="2.5"/><path d="M7 10.5h.5m3 0h.5m3 0h.5m3 0h.5M8.5 14h7"/></symbol>
+<symbol id="i-check-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="m8.5 12.2 2.4 2.4 4.6-4.8"/></symbol>
+<symbol id="i-spinner" viewBox="0 0 24 24"><path d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5"/></symbol>
+<symbol id="i-back" viewBox="0 0 24 24"><path d="m14.5 6-6 6 6 6"/></symbol>
+<symbol id="i-mark" viewBox="0 0 24 24"><path d="M9 3.5H5A1.5 1.5 0 0 0 3.5 5v4M15 3.5h4A1.5 1.5 0 0 1 20.5 5v4M3.5 15v4A1.5 1.5 0 0 0 5 20.5h4M20.5 15v4a1.5 1.5 0 0 1-1.5 1.5h-4"/><circle cx="12" cy="12" r="3"/></symbol>
+</defs></svg>
+
+<a class="skip" href="#tools">К инструментам снимка</a>
+
+<header class="top">
+  <h1 class="brand"><svg class="i" aria-hidden="true"><use href="#i-mark"/></svg>Kadr</h1>
+  <p class="top-meta">Концепт 04 · панель редактора снимка</p>
+  <div class="track theme" role="radiogroup" aria-label="Тема концепта">
+    <button class="seg" role="radio" data-value="light" aria-checked="false" tabindex="-1">Светлая</button>
+    <button class="seg" role="radio" data-value="dark" aria-checked="true" tabindex="0">Тёмная</button>
+    <span class="liquid" aria-hidden="true"></span>
+  </div>
+</header>
+
+<main>
+<section class="stage" id="stage" data-ui aria-label="Демонстрация редактора снимка">
+  <svg class="wallpaper" aria-hidden="true" viewBox="0 0 1600 800" preserveAspectRatio="xMidYMid slice"><rect width="1600" height="800" fill="#9aafb5"/><path d="M0 310 210 142l182 178L726 68l284 290 390-210 200 210v442H0z" fill="#79959d"/><path d="M0 510 282 306l318 310L960 265l300 310 340-220v445H0z" fill="#597c89"/><path d="m0 680 410-258 260 368 280-188 240 95 410-180v283H0z" fill="#3d626f"/><path d="M0 800h1600V656c-420 230-980-252-1600 144" fill="#30545f"/></svg>
+  <svg class="dim" id="dim" aria-hidden="true"><path id="dim-path" fill="rgb(10 16 24 / .38)" fill-rule="evenodd"/></svg>
+
+  <div class="shot">
+    <div class="window" aria-hidden="true">
+      <div class="window-bar"><span>Письмо от клиента</span><span><i></i><i></i><i></i></span></div>
+      <div class="sample">
+        <div>
+          <h2><span class="private" data-min="3">Детали встречи</span></h2>
+          <div class="muted"><span class="private" data-min="3">Демонстрационный документ</span></div>
+          <div class="lines">
+            <div class="line"><span class="key private" data-min="3">Контакт</span><span class="private" data-min="2">Александр Волков</span></div>
+            <div class="line"><span class="key private" data-min="3">Почта</span><span class="private" data-min="1">alex@studio.test</span></div>
+            <div class="line"><span class="key private" data-min="3">Телефон</span><span class="private" data-min="1">+7 (900) 000-00-00</span></div>
+            <div class="line"><span class="key private" data-min="3">Код доступа</span><span class="private" data-min="1">842 619</span></div>
+          </div>
+        </div>
+        <div class="sample-right">
+          <div class="muted"><span class="private" data-min="3">План на четверг</span></div>
+          <div class="lines">
+            <div class="line"><span class="key private" data-min="3">Адрес</span><span class="private" data-min="2">Лесная улица, 24</span></div>
+            <div class="line"><span class="key private" data-min="3">Профиль</span><span class="private" data-min="2">@alex_volkov</span></div>
+          </div>
+          <p class="note"><span class="private" data-min="3">Обсудим материалы и согласуем детали.</span><br><span class="private" data-min="3">Возьмите с собой предыдущие эскизы.</span></p>
+          <p class="note"><span class="private" data-min="3">Ответьте на письмо, если планы изменятся.</span></p>
+        </div>
+      </div>
+    </div>
+    <div class="capture" id="capture" aria-hidden="true"><span class="size" id="size">910 × 346</span><i class="handle tl"></i><i class="handle tc"></i><i class="handle tr"></i><i class="handle ml"></i><i class="handle mr"></i><i class="handle bl"></i><i class="handle bc"></i><i class="handle br"></i></div>
+  </div>
+
+  <div class="dock" id="dock" role="group" aria-label="Панель редактора">
+    <div class="row row-edit">
+      <div class="track tools" id="tools" role="group" aria-label="Инструменты разметки"></div>
+      <button class="btn" id="censor" aria-pressed="false" aria-expanded="false" aria-controls="privacy" data-tip="Автоматическая цензура"><svg class="i" aria-hidden="true"><use href="#i-shield"/></svg><span>Цензура</span><span class="badge censor-count" id="censor-count" aria-hidden="true">0</span></button>
+      <button class="btn icon" id="undo" aria-label="Отменить" aria-keyshortcuts="Control+Z" data-tip="Отменить" data-key="Ctrl Z" disabled><svg class="i" aria-hidden="true"><use href="#i-undo"/></svg></button>
+      <button class="btn icon" id="redo" aria-label="Повторить" aria-keyshortcuts="Control+Y" data-tip="Повторить" data-key="Ctrl Y" disabled><svg class="i" aria-hidden="true"><use href="#i-redo"/></svg></button>
+      <button class="btn props" id="properties" aria-haspopup="dialog" aria-expanded="false" aria-controls="props-pop" aria-label="Цвет и толщина" data-tip="Цвет и толщина"><span class="dot" aria-hidden="true"></span><output id="width-value">3 px</output></button>
+    </div>
+
+    <div class="drawer" id="privacy" data-open="false" aria-hidden="true" inert>
+      <div class="drawer-inner">
+        <div class="row row-privacy">
+          <div class="track levels" id="levels" role="radiogroup" aria-label="Уровень автоматической цензуры">
+            <button class="seg level" role="radio" data-value="1" aria-checked="true" tabindex="0"><span class="lv-name">Лёгкая</span><span class="lv-desc">Контакты и коды</span></button>
+            <button class="seg level" role="radio" data-value="2" aria-checked="false" tabindex="-1"><span class="lv-name">Жёсткая</span><span class="lv-desc">Плюс имена и адреса</span></button>
+            <button class="seg level" role="radio" data-value="3" aria-checked="false" tabindex="-1"><span class="lv-name">Полная</span><span class="lv-desc">Весь текст</span></button>
+            <span class="liquid" aria-hidden="true"></span>
+          </div>
+          <p class="privacy-status" aria-live="polite"><strong id="count">2 фрагмента</strong><span id="count-note">скрыто на снимке</span></p>
+          <button class="btn icon" id="peek" aria-pressed="false" aria-label="Показать оригинал" data-tip="Показать оригинал"><svg class="i" aria-hidden="true"><use href="#i-eye"/></svg></button>
+        </div>
+      </div>
+    </div>
+
+    <div class="row row-output" role="group" aria-label="Действия со снимком">
+      <button class="btn" id="record" aria-haspopup="dialog" aria-expanded="false" aria-controls="record-pop"><svg class="i rec" aria-hidden="true"><use href="#i-record"/></svg><span>Запись</span></button>
+      <button class="btn" id="recent" aria-haspopup="dialog" aria-expanded="false" aria-controls="recent-pop" aria-keyshortcuts="Control+H" aria-label="Недавние"><svg class="i" aria-hidden="true"><use href="#i-history"/></svg><span>Недавние</span><span class="badge" id="recent-count" aria-hidden="true">6</span></button>
+      <button class="btn" id="pin" aria-pressed="false" aria-keyshortcuts="Control+D" aria-label="Закрепить в недавних" data-tip="Оставить в недавних" data-key="Ctrl D"><svg class="i" aria-hidden="true"><use href="#i-pin"/></svg><span>Закрепить</span></button>
+      <button class="btn" data-command="ocr" aria-keyshortcuts="Control+Shift+C" aria-label="Скопировать текст" data-tip="Скопировать текст" data-key="Ctrl Shift C"><svg class="i" aria-hidden="true"><use href="#i-ocr"/></svg><span>Текст</span></button>
+      <button class="btn" id="translate" aria-haspopup="dialog" aria-expanded="false" aria-controls="translate-pop" aria-keyshortcuts="Control+T"><svg class="i" aria-hidden="true"><use href="#i-translate"/></svg><span>Перевести</span></button>
+      <div class="split">
+        <button class="btn" data-command="save" aria-keyshortcuts="Control+S" data-tip="Сохранить" data-key="Ctrl S"><svg class="i" aria-hidden="true"><use href="#i-save"/></svg><span>Сохранить</span></button>
+        <button class="btn icon" id="save-options" aria-label="Другие способы сохранения" aria-haspopup="menu" aria-expanded="false" aria-controls="save-pop"><svg class="i" aria-hidden="true"><use href="#i-chevron"/></svg></button>
+      </div>
+      <button class="btn primary" data-command="copy" aria-keyshortcuts="Control+C"><svg class="i" aria-hidden="true"><use href="#i-copy"/></svg><span>Копировать</span><svg class="i return" aria-hidden="true"><use href="#i-return"/></svg></button>
+    </div>
+
+    <!-- Popovers open above the dock, centred on their trigger -->
+    <div class="popover" id="props-pop" role="dialog" aria-label="Цвет и толщина" style="--w:304px" hidden>
+      <span class="field-label" id="color-label">Цвет</span>
+      <div class="swatches" id="swatches" role="group" aria-labelledby="color-label"></div>
+      <span class="field-label" id="width-label">Толщина</span>
+      <div class="track widths small" id="widths" role="radiogroup" aria-labelledby="width-label">
+        <button class="seg" role="radio" data-value="2">2 px</button><button class="seg" role="radio" data-value="3">3 px</button><button class="seg" role="radio" data-value="5">5 px</button><button class="seg" role="radio" data-value="8">8 px</button>
+        <span class="liquid" aria-hidden="true"></span>
+      </div>
+      <div id="text-style-block" hidden>
+        <span class="field-label" id="style-label">Оформление текста</span>
+        <div class="track styles small" id="styles" role="radiogroup" aria-labelledby="style-label">
+          <button class="seg" role="radio" data-value="0">Без фона</button><button class="seg" role="radio" data-value="1">Фон</button><button class="seg" role="radio" data-value="2">Обводка</button><button class="seg" role="radio" data-value="3">Выноска</button>
+          <span class="liquid" aria-hidden="true"></span>
+        </div>
+      </div>
+      <div id="strength-block" hidden>
+        <span class="field-label" id="strength-label">Сила эффекта</span>
+        <div class="stepper" role="group" aria-labelledby="strength-label">
+          <button class="btn icon" id="weaker" aria-label="Слабее"><svg class="i" aria-hidden="true"><use href="#i-minus"/></svg></button>
+          <output id="strength" aria-live="polite">3</output>
+          <button class="btn icon" id="stronger" aria-label="Сильнее"><svg class="i" aria-hidden="true"><use href="#i-plus"/></svg></button>
+        </div>
+      </div>
+    </div>
+
+    <div class="popover" id="record-pop" role="dialog" aria-label="Запись выделенной области" style="--w:288px" hidden>
+      <p class="pop-title">Запись области<span>демо</span></p>
+      <button class="switch-row" role="switch" aria-checked="true" id="system-audio"><span class="label"><svg class="i" aria-hidden="true"><use href="#i-volume"/></svg>Звук компьютера</span><span class="switch" aria-hidden="true"></span></button>
+      <button class="switch-row" role="switch" aria-checked="false" id="microphone"><span class="label"><svg class="i" aria-hidden="true"><use href="#i-mic"/></svg>Микрофон</span><span class="switch" aria-hidden="true"></span></button>
+      <div class="pop-actions"><button class="btn primary block" id="start-recording">Начать запись</button></div>
+    </div>
+
+    <div class="popover" id="recent-pop" role="dialog" aria-label="Недавние снимки" tabindex="-1" style="--w:456px" hidden>
+      <div class="pop-head"><p class="pop-title">Недавние<span id="recent-meta"></span></p><button class="btn" id="clear-recent">Очистить всё</button></div>
+      <div class="recent-grid" id="recent-grid"></div>
+    </div>
+
+    <div class="popover" id="translate-pop" role="dialog" aria-label="Перевод текста" style="--w:288px" hidden>
+      <label class="field-label" for="language">Направление</label>
+      <div class="select"><select id="language"><option>Английский → русский</option><option>Русский → английский</option></select><svg class="i" aria-hidden="true"><use href="#i-chevron"/></svg></div>
+      <div class="pop-actions"><button class="btn primary block" data-command="translate">Перевести</button></div>
+    </div>
+
+    <div class="popover" id="save-pop" role="menu" aria-label="Сохранение" style="--w:248px" hidden>
+      <button class="menu-item" role="menuitem" data-command="save-as"><svg class="i" aria-hidden="true"><use href="#i-save"/></svg><span>Сохранить как…</span><kbd>Ctrl Shift S</kbd></button>
+      <p class="pop-hint">По умолчанию PNG</p>
+    </div>
+  </div>
+
+  <div class="recording" id="recording" role="group" aria-label="Управление записью, демо" hidden>
+    <svg class="i rec" aria-hidden="true"><use href="#i-record"/></svg>
+    <strong id="timer">00:00</strong>
+    <button class="btn stop" id="stop-recording"><svg class="i" aria-hidden="true"><use href="#i-stop"/></svg>Остановить</button>
+    <button class="btn icon" id="cancel-recording" aria-label="Отменить запись"><svg class="i" aria-hidden="true"><use href="#i-close"/></svg></button>
+  </div>
+  <div class="status" id="status" role="status" aria-live="polite" aria-atomic="true"></div>
+  <div class="sheet-backdrop" id="about" hidden>
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="about-title" tabindex="-1">
+      <section class="sheet-view" id="about-main">
+        <button class="btn icon sheet-close" data-close aria-label="Закрыть"><svg class="i" aria-hidden="true"><use href="#i-close"/></svg></button>
+        <div class="about-head">
+          <span class="app-icon" aria-hidden="true"><svg class="i"><use href="#i-mark"/></svg></span>
+          <h2 id="about-title">Kadr</h2>
+          <p class="about-version">Версия 1.0.8 · 1 ноября 2026</p>
+        </div>
+        <div class="update-row">
+          <span class="update-status" role="status"><svg class="i" aria-hidden="true"><use href="#i-check-circle"/></svg><span id="update-text">Установлена последняя версия</span></span>
+          <button class="btn" id="check-updates" aria-label="Проверить обновления">Проверить</button>
+        </div>
+        <p class="about-text">Kadr снимает и записывает экран, размечает снимки и сам скрывает личные данные, прежде чем вы ими поделитесь.</p>
+        <ul class="features">
+          <li><svg class="i" aria-hidden="true"><use href="#i-record"/></svg>Снимок и запись экрана</li>
+          <li><svg class="i" aria-hidden="true"><use href="#i-pen"/></svg>15 инструментов разметки</li>
+          <li><svg class="i" aria-hidden="true"><use href="#i-shield"/></svg>Скрытие личных данных</li>
+          <li><svg class="i" aria-hidden="true"><use href="#i-translate"/></svg>Распознавание и перевод</li>
+          <li><svg class="i" aria-hidden="true"><use href="#i-history"/></svg>Недавние с закреплением</li>
+          <li><svg class="i" aria-hidden="true"><use href="#i-keyboard"/></svg>Горячие клавиши</li>
+        </ul>
+        <div class="sheet-actions">
+          <button class="btn tonal" id="report-open"><svg class="i" aria-hidden="true"><use href="#i-bug"/></svg>Нашли ошибку?</button>
+          <a class="btn tonal" href="https://boosty.to/justvoiceacting/donate" target="_blank" rel="noopener" aria-label="Поддержать на Boosty, откроется в браузере"><svg class="i" aria-hidden="true"><use href="#i-heart"/></svg>Поддержать</a>
+        </div>
+      </section>
+      <section class="sheet-view" id="about-report" hidden>
+        <div class="sheet-bar">
+          <button class="btn back" id="report-back"><svg class="i" aria-hidden="true"><use href="#i-back"/></svg>О программе</button>
+          <button class="btn icon" data-close aria-label="Закрыть"><svg class="i" aria-hidden="true"><use href="#i-close"/></svg></button>
+        </div>
+        <h2 class="report-title" id="report-title">Сообщить об ошибке</h2>
+        <label class="field-label" for="report-text">Что случилось?</label>
+        <textarea id="report-text" rows="4" placeholder="Например: после записи не открылись недавние"></textarea>
+        <label class="field-label" for="report-contact">Как вам ответить <span class="optional">· необязательно</span></label>
+        <input id="report-contact" type="text" autocomplete="off" spellcheck="false" placeholder="@ник в Telegram или почта">
+        <div class="report-attach">
+          <button class="switch-row" role="switch" aria-checked="true" id="attach-system"><span class="label two"><span>Версия и система</span><small id="system-line">Kadr 1.0 · Windows</small></span><span class="switch" aria-hidden="true"></span></button>
+          <button class="switch-row" role="switch" aria-checked="false" id="attach-shot"><span class="label two"><span>Приложить этот снимок</span><small id="shot-line">Цензура выключена, данные будут видны</small></span><span class="switch" aria-hidden="true"></span></button>
+        </div>
+        <div class="sheet-actions one"><button class="btn primary block" id="report-send" disabled>Отправить</button></div>
+      </section>
+    </div>
+  </div>
+  <div class="closed" id="closed" role="dialog" aria-modal="true" aria-labelledby="closed-title" hidden><div><h2 id="closed-title">Снимок закрыт</h2><p>Так панель уходит по Esc.</p><button class="btn primary block" id="restart">Вернуться к макету</button></div></div>
+</section>
+
+<section class="notes" aria-label="Что изменилось в концепте">
+  <div><h2>Один ритм</h2><p>Все кнопки высотой 44&nbsp;px, между ними и по краям 8&nbsp;px. Скругления вложены друг в друга: панель 30, кнопки 22, выбор 18, плитки 14.</p></div>
+  <div><h2>Выбор перетекает</h2><p>Подсветка тянется к новой иконке и собирается на ней, как капля. Её можно перебить следующим нажатием. С клавиатуры работает так же, а при «уменьшении движения» переключается сразу.</p></div>
+  <div><h2>Без пустот</h2><p>Инструменты стоят сегментами на всю строку. Цензура выезжает строкой из трёх уровней с подсказкой, что каждый скрывает. Отдельное «Выкл» не нужно: панель закрывается той же кнопкой.</p></div>
+  <div><h2>Закрепить значит оставить</h2><p>Закреплённый снимок лежит в «Недавних», пока вы не удалите его сами. «Очистить всё» его пропускает.</p></div>
+</section>
+<p class="proto">Интерактивный концепт. Цензура размывает демонстрационный текст, запись показывает таймер, в недавних лежат примеры снимков. Экспорт и распознавание текста обозначены как демо. Приложение Kadr не изменялось.</p>
+</main>
+
+<div class="tip" id="tip" aria-hidden="true"></div>
+
+<script>
+const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
+const reduceMotion=matchMedia('(prefers-reduced-motion: reduce)');
+
+/* Liquid selection --------------------------------------------------
+   Each edge of the blob is its own spring. The edge that leads the move is stiff,
+   the trailing edge is soft, so the blob stretches toward the target, thins while
+   stretched and gathers on arrival. A new target mid-flight keeps the velocity. */
+const LEAD=[640,40],TRAIL=[230,26];
+class Liquid{
+  constructor(track){
+    this.track=track;this.layer=track.querySelector(':scope > .liquid');
+    this.x=null;this.v=[0,0,0,0];this.goal=null;this.spec=[LEAD,LEAD,LEAD,LEAD];this.el=null;this.raf=0;
+    new ResizeObserver(()=>this.el&&this.to(this.el,true)).observe(track);
+  }
+  rect(el){const i=4;return[el.offsetLeft+i,el.offsetTop+i,el.offsetLeft+el.offsetWidth-i,el.offsetTop+el.offsetHeight-i]}
+  to(el,instant=false){
+    this.el=el;if(!el||!el.offsetWidth)return;
+    const g=this.rect(el);
+    if(instant||!this.x||reduceMotion.matches){cancelAnimationFrame(this.raf);this.raf=0;this.x=g.slice();this.v=[0,0,0,0];this.goal=g;this.draw();return}
+    const dx=(g[0]+g[2])-(this.x[0]+this.x[2]),dy=(g[1]+g[3])-(this.x[1]+this.x[3]);
+    const pick=(d,lead)=>Math.abs(d)<1?LEAD:(lead?LEAD:TRAIL);
+    this.spec=[pick(dx,dx<0),pick(dy,dy<0),pick(dx,dx>0),pick(dy,dy>0)];
+    this.goal=g;
+    if(!this.raf){this.last=performance.now();this.raf=requestAnimationFrame(t=>this.tick(t))}
+  }
+  tick(now){
+    let dt=Math.min(.05,(now-this.last)/1000);this.last=now;
+    while(dt>0){const h=Math.min(1/240,dt);dt-=h;
+      for(let i=0;i<4;i++){const[k,c]=this.spec[i];this.v[i]+=(-k*(this.x[i]-this.goal[i])-c*this.v[i])*h;this.x[i]+=this.v[i]*h}}
+    const settled=this.x.every((x,i)=>Math.abs(x-this.goal[i])<.25&&Math.abs(this.v[i])<4);
+    if(settled){this.x=this.goal.slice();this.v=[0,0,0,0];this.raf=0}else this.raf=requestAnimationFrame(t=>this.tick(t));
+    this.draw();
+  }
+  draw(){
+    let[l,t,r,b]=this.x;const[gl,gt,gr,gb]=this.goal;
+    const thin=Math.min((gb-gt)*.16,Math.max(0,(r-l)-(gr-gl))*.045),narrow=Math.min((gr-gl)*.16,Math.max(0,(b-t)-(gb-gt))*.045);
+    t+=thin;b-=thin;l+=narrow;r-=narrow;
+    const W=this.layer.offsetWidth,H=this.layer.offsetHeight,R=Math.max(0,Math.min(18,(b-t)/2,(r-l)/2));
+    this.layer.style.clipPath=`inset(${t.toFixed(2)}px ${(W-r).toFixed(2)}px ${(H-b).toFixed(2)}px ${l.toFixed(2)}px round ${R.toFixed(2)}px)`;
+  }
+}
+const liquids=new Map();
+function liquidOf(track){if(!liquids.has(track))liquids.set(track,new Liquid(track));return liquids.get(track)}
+// The blob layer carries a copy of every segment in the selected colour, so icons and labels
+// change colour exactly where the blob covers them.
+function mirror(track){const layer=track.querySelector(':scope > .liquid');layer.innerHTML=[...track.querySelectorAll(':scope > .seg')].map(b=>`<span class="${b.className}">${b.innerHTML}</span>`).join('')}
+
+/* Segmented radio groups ------------------------------------------- */
+function segmented(track,onPick){
+  const radios=[...track.querySelectorAll(':scope > [role="radio"]')];
+  radios.forEach((r,i)=>{
+    r.addEventListener('click',()=>onPick(r.dataset.value));
+    r.addEventListener('keydown',e=>{
+      const step={ArrowRight:1,ArrowDown:1,ArrowLeft:-1,ArrowUp:-1}[e.key];
+      if(step===undefined&&e.key!=='Home'&&e.key!=='End')return;
+      e.preventDefault();e.stopPropagation();
+      const n=e.key==='Home'?0:e.key==='End'?radios.length-1:(i+step+radios.length)%radios.length;
+      radios[n].focus();onPick(radios[n].dataset.value);
+    });
+  });
+  mirror(track);
+}
+function check(track,value,instant){
+  let on;track.querySelectorAll(':scope > [role="radio"]').forEach(r=>{const hit=r.dataset.value===String(value);r.setAttribute('aria-checked',String(hit));r.tabIndex=hit?0:-1;if(hit)on=r});
+  liquidOf(track).to(on,instant);
+}
+
+/* Data -------------------------------------------------------------- */
+const tools=[['select','cursor','Выбор','V'],['arrow','arrow','Стрелка','A'],['line','line','Линия','L'],['rect','rect','Рамка','R'],['ellipse','ellipse','Овал','O'],['pen','pen','Перо','P'],['eraser','eraser','Ластик','M'],['lens','lens','Лупа','G'],['text','text','Текст','T'],['counter','counter','Нумерация','N'],['blur','blur','Размытие','B'],['blur-ellipse','blur-ellipse','Размытие овалом','E'],['blur-brush','blur-brush','Кисть размытия','U'],['spotlight','spotlight','Размытие вокруг','I'],['redact','redact','Скрыть вручную','X']];
+const tool=id=>tools.find(t=>t[0]===id);
+const groups={
+  figures:{title:'Фигуры',items:['line','rect','ellipse'],labels:['Линия','Рамка','Овал'],rest:'rect'},
+  blurs:{title:'Размытие',items:['blur','blur-ellipse','blur-brush'],labels:['Область','Овал','Кисть'],rest:'blur'},
+  more:{title:'Ещё',items:['eraser','lens','spotlight','redact'],rest:null}
+};
+const layout=['select','arrow','@figures','pen','text','counter','@blurs','@more'];
+const levels=['Выключена','Лёгкая','Жёсткая','Полная'];
+const palette=[['#ff453a','Красный'],['#ffd60a','Жёлтый'],['#30d158','Зелёный'],['#0a84ff','Синий'],['#ffffff','Белый'],['#1d1d1f','Чёрный']];
+// Recent captures. A pinned capture stays until it is deleted by hand; "Clear all" skips it.
+let recent=[{id:1,time:'14:38',title:'Детали встречи',tone:'#829ba2',current:true},{id:2,time:'13:12',title:'Заметки',tone:'#a3b09f'},{id:3,time:'Вчера',title:'Фрагмент экрана',tone:'#9a9cac'},{id:4,time:'Вчера',title:'Таблица расходов',tone:'#a7a08f',pinned:true},{id:5,time:'1 ноября',title:'Схема сети',tone:'#8f9fb8'},{id:6,time:'31 октября',title:'Чек заказа',tone:'#a69aa8'}];
+const state={tool:'select',level:0,last:1,peek:false,color:'#ffffff',width:3,textStyle:0,strength:3,history:[],index:-1};
+const icon=(n,cls='i')=>`<svg class="${cls}" aria-hidden="true"><use href="#i-${n}"/></svg>`;
+const plural=(n,f)=>{const a=n%10,b=n%100;return f[a===1&&b!==11?0:a>=2&&a<=4&&(b<12||b>14)?1:2]};
+
+/* Build the tool track and its menus ------------------------------- */
+const dock=$('#dock'),toolsTrack=$('#tools');
+toolsTrack.innerHTML=layout.map(key=>{
+  if(key[0]!=='@'){const t=tool(key);return `<button class="seg" data-tool="${key}" aria-pressed="false" aria-label="${t[2]}" aria-keyshortcuts="${t[3]}" data-tip="${t[2]}" data-key="${t[3]}">${icon(t[1])}</button>`}
+  const id=key.slice(1),g=groups[id];
+  return `<button class="seg group" id="${id}" aria-haspopup="true" aria-expanded="false" aria-controls="${id}-pop" aria-label="${g.title}" data-tip="${g.title}"></button>`;
+}).join('')+'<span class="liquid" aria-hidden="true"></span>';
+for(const[id,g]of Object.entries(groups)){
+  const pop=document.createElement('div');pop.className='popover';pop.id=id+'-pop';pop.hidden=true;pop.setAttribute('role','dialog');pop.setAttribute('aria-label',g.title);
+  if(id==='more'){
+    pop.style.setProperty('--w','264px');
+    pop.innerHTML=g.items.map(k=>{const t=tool(k);return `<button class="menu-item" data-tool="${k}" aria-pressed="false">${icon(t[1])}<span>${t[2]}</span><kbd>${t[3]}</kbd></button>`}).join('')+`<div class="menu-sep" role="separator"></div><button class="menu-item" id="about-open">${icon('info')}<span>О программе</span></button><button class="menu-item" id="close">${icon('close')}<span>Закрыть снимок</span><kbd>Esc</kbd></button>`;
+  }else{
+    pop.style.setProperty('--w','280px');
+    pop.innerHTML=`<p class="pop-title">${g.title}</p><div class="choices">`+g.items.map((k,i)=>`<button class="choice" data-tool="${k}" aria-pressed="false" aria-label="${tool(k)[2]}">${icon(tool(k)[1])}<span>${g.labels[i]}</span></button>`).join('')+'</div>';
+  }
+  dock.append(pop);
+}
+$('#swatches').innerHTML=palette.map(([c,n])=>`<button class="swatch" data-color="${c}" aria-label="${n}" aria-pressed="false" style="--c:${c}"><span></span></button>`).join('');
+function renderRecent(focus){
+  recent.sort((a,b)=>(b.pinned?1:0)-(a.pinned?1:0)||a.id-b.id);
+  const n=recent.length,loose=recent.filter(r=>!r.pinned).length;
+  $('#recent-grid').innerHTML=n?recent.map(r=>`<div class="recent-item${r.pinned?' pinned':''}">
+    <button class="recent-open" data-open="${r.id}" aria-label="Открыть «${r.title}», ${r.time}${r.pinned?', закреплён':''}"><span class="recent-art" style="--tone:${r.tone}"><span><i></i><i></i><i></i><i></i></span></span><strong>${r.title}</strong><small>${r.current?'Этот снимок · ':''}${r.time}</small></button>
+    <button class="mini pin" data-pin="${r.id}" aria-pressed="${!!r.pinned}" aria-label="${r.pinned?'Открепить':'Закрепить'} «${r.title}»">${icon('pin')}</button><button class="mini del" data-del="${r.id}" aria-label="Удалить «${r.title}»">${icon('close')}</button>
+  </div>`).join(''):'<p class="recent-empty">Недавних снимков нет</p>';
+  $('#recent-meta').textContent=n?`${n} ${plural(n,['снимок','снимка','снимков'])}`:'';
+  $('#recent-count').textContent=n;$('#recent-count').hidden=!n;
+  $('#recent').setAttribute('aria-label',n?`Недавние, ${n} ${plural(n,['снимок','снимка','снимков'])}`:'Недавние');
+  $('#clear-recent').disabled=!loose;
+  const cur=recent.find(r=>r.current);
+  $('#pin').setAttribute('aria-pressed',String(!!cur?.pinned));
+  $('#pin').dataset.tip=cur?.pinned?'Закреплён в недавних':'Оставить в недавних';
+  if(focus){const el=$(focus);(el&&!el.disabled?el:$('#recent-grid button')||$('#recent-pop')).focus()}
+}
+renderRecent();
+
+/* Paint ------------------------------------------------------------ */
+function groupOf(id){return Object.keys(groups).find(g=>groups[g].items.includes(id))}
+function syncGroups(){
+  for(const[id,g]of Object.entries(groups)){
+    const b=$('#'+id),active=g.items.includes(state.tool);
+    const shown=active?state.tool:g.rest;
+    b.innerHTML=shown?icon(tool(shown)[1])+icon('chevron','i chev'):icon('more');
+    b.setAttribute('aria-pressed',String(active));
+    b.setAttribute('aria-label',active?`${g.title}: ${tool(state.tool)[2]}`:g.title);
+    b.dataset.tip=active?`${tool(state.tool)[2]}`:g.title;b.dataset.key=active?tool(state.tool)[3]:'';
+  }
+  mirror(toolsTrack);
+}
+function paint(instant=false){
+  const lv=state.level;
+  let count=0;
+  $$('.private').forEach(el=>{const mask=lv>0&&lv>=Number(el.dataset.min);if(mask)count++;el.classList.toggle('masked',mask&&!state.peek)});
+  // tools
+  $$('[data-tool]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.tool===state.tool)));
+  syncGroups();
+  const g=groupOf(state.tool);
+  liquidOf(toolsTrack).to(g?$('#'+g):toolsTrack.querySelector(`[data-tool="${state.tool}"]`),instant);
+  // censorship
+  const drawer=$('#privacy'),open=lv>0;
+  if(!open&&drawer.contains(document.activeElement))$('#censor').focus();
+  drawer.dataset.open=String(open);drawer.setAttribute('aria-hidden',String(!open));drawer.inert=!open;
+  $('#censor').setAttribute('aria-pressed',String(open));$('#censor').setAttribute('aria-expanded',String(open));
+  if(open)state.last=lv;
+  check($('#levels'),state.last,instant||!open);
+  $('#peek').setAttribute('aria-pressed',String(state.peek));
+  $('#peek').setAttribute('aria-label',state.peek?'Скрыть оригинал':'Показать оригинал');$('#peek').dataset.tip=$('#peek').getAttribute('aria-label');
+  $('#count').textContent=state.peek?'Оригинал':`${count} ${plural(count,['фрагмент','фрагмента','фрагментов'])}`;
+  $('#count-note').textContent=state.peek?'показан без цензуры':'скрыто на снимке';
+  $('#censor-count').textContent=count;
+  // properties
+  $('.props .dot').style.setProperty('--dot',state.color);$('#width-value').textContent=state.width+' px';
+  $$('[data-color]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.color===state.color)));
+  $('#text-style-block').hidden=state.tool!=='text';
+  $('#strength-block').hidden=!['blur','blur-ellipse','blur-brush','spotlight','lens'].includes(state.tool);
+  $('#strength').textContent=state.strength;$('#weaker').disabled=state.strength<=1;$('#stronger').disabled=state.strength>=10;
+  if(!$('#props-pop').hidden){check($('#widths'),state.width,true);check($('#styles'),state.textStyle,true)}
+  // history
+  $('#undo').disabled=state.index<=0;$('#redo').disabled=state.index>=state.history.length-1;
+}
+function remember(){state.history=state.history.slice(0,state.index+1);state.history.push({tool:state.tool,level:state.level,color:state.color,width:state.width});state.index=state.history.length-1;paint()}
+function undo(){if(state.index>0){state.index--;Object.assign(state,state.history[state.index]);state.peek=false;paint()}}
+function redo(){if(state.index<state.history.length-1){state.index++;Object.assign(state,state.history[state.index]);state.peek=false;paint()}}
+
+/* Popovers --------------------------------------------------------- */
+let openTrigger=null;
+function closePops(restore=false){
+  $$('.popover').forEach(p=>{if(p.hidden)return;p.hidden=true;const t=$(`[aria-controls="${p.id}"]`);t?.setAttribute('aria-expanded','false');if(restore)t?.focus()});
+  openTrigger=null;
+}
+function openPop(id,trigger){
+  const pop=$('#'+id),wasOpen=!pop.hidden;closePops();hideTip();if(wasOpen)return;
+  pop.hidden=false;trigger.setAttribute('aria-expanded','true');openTrigger=trigger;
+  const d=dock.getBoundingClientRect(),b=trigger.getBoundingClientRect();
+  pop.style.maxWidth=(d.width-16)+'px';
+  const w=pop.offsetWidth,anchor=b.left+b.width/2-d.left;
+  const left=Math.max(8,Math.min(anchor-w/2,d.width-w-8));
+  pop.style.left=left+'px';pop.style.setProperty('--origin',(anchor-left)+'px');
+  if(id==='props-pop'){check($('#widths'),state.width,true);check($('#styles'),state.textStyle,true)}
+  const focusable=[...pop.querySelectorAll('button,select')].filter(el=>!el.disabled&&el.offsetParent);
+  (focusable.find(el=>el.matches('[data-tool][aria-pressed="true"],[data-color][aria-pressed="true"],[data-open],[aria-checked="true"]'))||focusable[0])?.focus();
+}
+[['figures','figures-pop'],['blurs','blurs-pop'],['more','more-pop'],['properties','props-pop'],['record','record-pop'],['recent','recent-pop'],['translate','translate-pop'],['save-options','save-pop']]
+  .forEach(([id,pop])=>$('#'+id).addEventListener('click',e=>openPop(pop,e.currentTarget)));
+document.addEventListener('click',e=>{if(!e.target.closest('.popover,[aria-controls$="-pop"]'))closePops()});
+
+/* Tooltip: one floating label, macOS timing ------------------------ */
+const tip=$('#tip');let tipTimer=0,tipWarm=0;
+function showTip(el){
+  if(!el.dataset.tip||el.getAttribute('aria-expanded')==='true'||$$('.popover').some(p=>!p.hidden))return;
+  tip.innerHTML=`<span>${el.dataset.tip}</span>`+(el.dataset.key?`<kbd>${el.dataset.key}</kbd>`:'');
+  const r=el.getBoundingClientRect(),w=tip.offsetWidth;
+  tip.style.left=Math.max(8,Math.min(r.left+r.width/2-w/2,innerWidth-w-8))+'px';tip.style.top=(r.top-36)+'px';
+  tip.classList.add('show');tipWarm=Date.now();
+}
+function hideTip(){clearTimeout(tipTimer);tip.classList.remove('show')}
+document.addEventListener('pointerover',e=>{const el=e.target.closest('[data-tip]');if(!el)return;clearTimeout(tipTimer);tipTimer=setTimeout(()=>showTip(el),Date.now()-tipWarm<900?0:500)});
+document.addEventListener('pointerout',e=>{const el=e.target.closest('[data-tip]');if(el&&!el.contains(e.relatedTarget)){hideTip();tipWarm=Date.now()}});
+document.addEventListener('focusin',e=>{const el=e.target.closest('[data-tip]');if(el&&el.matches(':focus-visible'))showTip(el);else hideTip()});
+document.addEventListener('pointerdown',hideTip);addEventListener('scroll',hideTip,{passive:true});
+
+/* Wiring ----------------------------------------------------------- */
+$$('[data-tool]').forEach(b=>b.addEventListener('click',()=>{state.tool=b.dataset.tool;const inPop=b.closest('.popover');remember();if(inPop)closePops(true)}));
+toolsTrack.addEventListener('keydown',e=>{
+  const btns=[...toolsTrack.querySelectorAll(':scope > button')],i=btns.indexOf(document.activeElement);
+  const step={ArrowRight:1,ArrowLeft:-1}[e.key];if(i<0||!step)return;
+  e.preventDefault();btns[(i+step+btns.length)%btns.length].focus();
+});
+$('#censor').addEventListener('click',()=>{closePops();state.level=state.level?0:state.last;state.peek=false;remember();announce(state.level?`Цензура включена: ${levels[state.level].toLowerCase()}.`:'Цензура выключена.')});
+segmented($('#levels'),v=>{state.level=Number(v);state.peek=false;remember();announce(`${levels[state.level]}: ${$('#count').textContent} скрыто. Пример в макете.`)});
+$('#peek').addEventListener('click',()=>{state.peek=!state.peek;paint()});
+segmented($('#widths'),v=>{state.width=Number(v);remember();check($('#widths'),v)});
+segmented($('#styles'),v=>{state.textStyle=Number(v);check($('#styles'),v)});
+$('#weaker').addEventListener('click',()=>{state.strength=Math.max(1,state.strength-1);paint()});
+$('#stronger').addEventListener('click',()=>{state.strength=Math.min(10,state.strength+1);paint()});
+$$('[data-color]').forEach(b=>b.addEventListener('click',()=>{state.color=b.dataset.color;remember()}));
+$('#undo').addEventListener('click',undo);$('#redo').addEventListener('click',redo);
+$$('[role="switch"]').forEach(s=>s.addEventListener('click',()=>s.setAttribute('aria-checked',String(s.getAttribute('aria-checked')!=='true'))));
+segmented($('.theme'),v=>{document.documentElement.dataset.theme=v;check($('.theme'),v)});
+$('#pin').addEventListener('click',()=>{
+  let cur=recent.find(r=>r.current);
+  if(!cur){cur={id:0,time:'14:38',title:'Детали встречи',tone:'#829ba2',current:true};recent.push(cur)}
+  cur.pinned=!cur.pinned;renderRecent();
+  announce(cur.pinned?'Снимок закреплён в недавних. «Очистить всё» его не удалит.':'Снимок откреплён.');
+});
+$('#recent-grid').addEventListener('click',e=>{
+  const b=e.target.closest('button');if(!b)return;e.stopPropagation();
+  const id=Number(b.dataset.open??b.dataset.pin??b.dataset.del),r=recent.find(x=>x.id===id);if(!r)return;
+  if('open' in b.dataset){closePops(true);announce(`Открыт снимок «${r.title}». Демо.`);return}
+  if('pin' in b.dataset){r.pinned=!r.pinned;renderRecent(`[data-pin="${id}"]`);announce(r.pinned?`«${r.title}» закреплён.`:`«${r.title}» откреплён.`);return}
+  const i=recent.indexOf(r);recent.splice(i,1);
+  const next=recent[Math.min(i,recent.length-1)];
+  renderRecent(next?`[data-open="${next.id}"]`:'#clear-recent');announce(`«${r.title}» удалён.`);
+});
+$('#clear-recent').addEventListener('click',e=>{
+  e.stopPropagation();const before=recent.length;recent=recent.filter(r=>r.pinned);
+  const gone=before-recent.length;renderRecent('[data-open]');
+  announce(`Удалено ${gone} ${plural(gone,['снимок','снимка','снимков'])}.${recent.length?' Закреплённые остались.':''}`);
+});
+const commands={ocr:'Текст со снимка скопирован',translate:'Текст переведён',save:'Снимок сохранён','save-as':'Открыто окно «Сохранить как»',copy:'Снимок скопирован'};
+function command(key){closePops(true);announce(commands[key]+'. Демо.')}
+$$('[data-command]').forEach(b=>b.addEventListener('click',()=>command(b.dataset.command)));
+
+let toastTimer=0;
+function announce(text){const s=$('#status');s.textContent=text;s.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>s.classList.remove('show'),3200)}
+
+let recTimer=0,seconds=0;
+function stopRecording(cancel=false){clearInterval(recTimer);$('#recording').hidden=true;announce(cancel?'Запись отменена.':'Запись остановлена. Видео в демо не создаётся.');$('#record').focus()}
+$('#start-recording').addEventListener('click',()=>{closePops();seconds=0;$('#timer').textContent='00:00';$('#recording').hidden=false;$('#stop-recording').focus();clearInterval(recTimer);recTimer=setInterval(()=>{seconds++;$('#timer').textContent=String(Math.floor(seconds/60)).padStart(2,'0')+':'+String(seconds%60).padStart(2,'0')},1000)});
+$('#stop-recording').addEventListener('click',()=>stopRecording());$('#cancel-recording').addEventListener('click',()=>stopRecording(true));
+
+function closeScene(){closePops();$('#closed').hidden=false;$('#restart').focus()}
+$('#close').addEventListener('click',closeScene);
+$('#restart').addEventListener('click',()=>{$('#closed').hidden=true;toolsTrack.querySelector('[data-tool="select"]').focus()});
+$('#closed').addEventListener('keydown',e=>{if(e.key==='Tab'){e.preventDefault();$('#restart').focus()}});
+
+/* About Kadr and the bug report ------------------------------------ */
+const about=$('#about');
+function aboutView(name){
+  $('#about-main').hidden=name!=='main';$('#about-report').hidden=name!=='report';
+  $('.sheet').setAttribute('aria-labelledby',name==='main'?'about-title':'report-title');
+}
+function openAbout(){closePops();hideTip();aboutView('main');about.hidden=false;$('.sheet').focus()}
+function closeAbout(){about.hidden=true;$('#more').focus()}
+$('#about-open').addEventListener('click',openAbout);
+about.addEventListener('click',e=>{if(e.target===about||e.target.closest('[data-close]'))closeAbout()});
+$('#check-updates').addEventListener('click',()=>{
+  const row=$('.update-row'),b=$('#check-updates'),use=row.querySelector('use');
+  row.setAttribute('aria-busy','true');b.disabled=true;use.setAttribute('href','#i-spinner');$('#update-text').textContent='Проверяю обновления…';
+  setTimeout(()=>{row.removeAttribute('aria-busy');b.disabled=false;use.setAttribute('href','#i-check-circle');$('#update-text').textContent='Последняя версия, проверено сейчас'},1200);
+});
+$('#report-open').addEventListener('click',()=>{
+  const ua=navigator.userAgent,os=/Windows/.test(ua)?'Windows':/Mac/.test(ua)?'macOS':'Linux';
+  $('#system-line').textContent=`Kadr 1.0.8 · ${os} · ${Math.round(screen.width*devicePixelRatio)} × ${Math.round(screen.height*devicePixelRatio)}`;
+  $('#shot-line').textContent=state.level?`Уйдёт с цензурой: ${levels[state.level].toLowerCase()}`:'Цензура выключена, данные будут видны';
+  aboutView('report');$('#report-text').focus();
+});
+$('#report-back').addEventListener('click',()=>{aboutView('main');$('#report-open').focus()});
+$('#report-text').addEventListener('input',e=>{$('#report-send').disabled=e.target.value.trim().length<3});
+$('#report-send').addEventListener('click',()=>{$('#report-text').value='';$('#report-contact').value='';$('#report-send').disabled=true;closeAbout();announce('Спасибо! Отчёт отправлен. Демо.')});
+about.addEventListener('keydown',e=>{
+  if(e.key!=='Tab')return;
+  const f=[...about.querySelectorAll('button,a,textarea,input')].filter(el=>!el.disabled&&el.offsetParent);
+  const first=f[0],last=f[f.length-1],at=document.activeElement;
+  if(e.shiftKey&&(at===first||at===$('.sheet'))){e.preventDefault();last.focus()}
+  else if(!e.shiftKey&&at===last){e.preventDefault();first.focus()}
+});
+
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'){e.preventDefault();hideTip();
+    if(!about.hidden){if(!$('#about-report').hidden){aboutView('main');$('#report-open').focus()}else closeAbout();return}
+    if($$('.popover').some(p=>!p.hidden))return closePops(true);
+    if(!$('#recording').hidden)return stopRecording(true);
+    if($('#closed').hidden)closeScene();return}
+  if(!$('#closed').hidden||!about.hidden||e.target.matches('input,select,textarea')||e.altKey)return;
+  if(e.ctrlKey||e.metaKey){const k=e.key.toLowerCase();if(!['z','y','c','s','h','t','d'].includes(k))return;e.preventDefault();
+    if(k==='z')undo();else if(k==='y')redo();else if(k==='h')openPop('recent-pop',$('#recent'));else if(k==='t')openPop('translate-pop',$('#translate'));else if(k==='d')$('#pin').click();
+    else command(k==='s'?(e.shiftKey?'save-as':'save'):(e.shiftKey?'ocr':'copy'));return}
+  const t=tools.find(t=>t[3].toLowerCase()===e.key.toLowerCase());
+  if(t&&!e.target.closest('[role="radio"]')){e.preventDefault();state.tool=t[0];remember()}
+});
+
+/* Stage: the dimmed area outside the selection, and its size label */
+const stage=$('#stage');
+function frame(){
+  const s=stage.getBoundingClientRect(),c=$('#capture').getBoundingClientRect();
+  const x=c.left-s.left,y=c.top-s.top;
+  $('#dim').setAttribute('viewBox',`0 0 ${s.width} ${s.height}`);
+  $('#dim-path').setAttribute('d',`M0 0H${s.width}V${s.height}H0Z M${x} ${y}h${c.width}v${c.height}h${-c.width}Z`);
+  $('#size').textContent=`${Math.round(c.width)} × ${Math.round(c.height)}`;
+}
+new ResizeObserver(frame).observe(stage);
+
+remember();
+paint(true);check($('.theme'),'dark',true);
+document.fonts?.ready.then(()=>{liquids.forEach(l=>l.el&&l.to(l.el,true));frame()});
+</script>
+</body>
+</html>

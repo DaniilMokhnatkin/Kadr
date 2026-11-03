@@ -80,12 +80,12 @@ impl Theme {
     fn porcelain_dark() -> Self {
         Self {
             scrim: rgb(0x000000, 0.48),
-            surface: rgb(0x2c2c2e, 1.0),
+            surface: rgb(0x1c1c1e, 1.0),
             border: rgb(0x3a3a3c, 1.0),
-            control: rgb(0x3a3a3c, 0.92),
+            control: rgb(0x28282b, 1.0),
             selected: rgb(0x0b3a6e, 1.0),
             on_selected: rgb(0x66b0ff, 1.0),
-            accent: rgb(0x0a6cdf, 1.0),
+            accent: rgb(0x0071e3, 1.0),
             on_accent: rgb(0xffffff, 1.0),
             disabled: rgb(0x636366, 1.0),
             text: rgb(0xf5f5f7, 1.0),
@@ -112,10 +112,10 @@ impl Theme {
             surface: rgb(0xfbfbfd, 1.0),
             border: rgb(0xd6d6dc, 1.0),
             // Pills sit on glass: nearly opaque so contrast does not depend on the screenshot.
-            control: rgb(0xe6e6eb, 0.92),
+            control: rgb(0xececf0, 1.0),
             selected: rgb(0xdbe7fb, 1.0),
             on_selected: rgb(0x005fcc, 1.0),
-            accent: rgb(0x0a6cdf, 1.0),
+            accent: rgb(0x0071e3, 1.0),
             on_accent: rgb(0xffffff, 1.0),
             disabled: rgb(0x929298, 1.0),
             text: rgb(0x1d1d1f, 1.0),

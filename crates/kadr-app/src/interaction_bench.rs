@@ -90,6 +90,7 @@ pub fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
         ));
     }
     let editor = Some(EditorBar {
+        ui: Default::default(),
         text_style: Default::default(),
         callout: false,
         tool: Tool::Select,

@@ -186,6 +186,7 @@ impl App {
         } else {
             return false;
         }
+        active.bar.select_tool(d.tool);
         self.schedule_draft();
         self.request_redraw();
         true
@@ -240,8 +241,12 @@ impl App {
         };
         let d = &mut active.drawing;
         match button {
-            ToolbarButton::Tool(tool) => d.set_tool(tool),
+            ToolbarButton::Tool(tool) => {
+                d.set_tool(tool);
+                active.bar.select_tool(tool);
+            }
             ToolbarButton::Color(index) => d.set_color(index),
+            ToolbarButton::WidthValue(width) => d.set_width(width),
             ToolbarButton::Width => d.set_width(if d.width >= 8 { 1 } else { d.width + 1 }),
             ToolbarButton::TextPlain => d.set_text_style(kadr_doc::annotation::TextStyle::Plain),
             ToolbarButton::TextFilled => d.set_text_style(kadr_doc::annotation::TextStyle::Filled),

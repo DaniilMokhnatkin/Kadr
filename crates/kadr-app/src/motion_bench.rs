@@ -147,8 +147,10 @@ pub fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 marks: Marks {
                     selection: Some(RECT { left: 400, top: 200, right: 2000, bottom: 1100 }),
                     toolbar: Some(Toolbar {
+                        recent: &[],
                         hovered: Some(if frame % 50 < 25 { ToolbarButton::Tool(tool) } else { ToolbarButton::Save }),
                         editor: Some(EditorBar {
+                            ui: Default::default(),
                             text_style: Default::default(),
                             callout: false,
                             tool,

@@ -94,6 +94,13 @@ fn main() {
         }
         return;
     }
+    if let Some(i) = flag("--dock-snapshots") {
+        if let Err(e) = snapshot::dock_set(args.get(i + 1).map_or("dock-snapshots", String::as_str)) {
+            eprintln!("dock snapshots: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Some(i) = flag("--interaction-bench") {
         let path = args.get(i + 1).map_or("interaction-bench.txt", String::as_str);
         if let Err(e) = interaction_bench::run(path) {

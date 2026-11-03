@@ -149,6 +149,20 @@ fn code(b: ToolbarButton) -> usize {
         ToolbarButton::Undo => 50,
         ToolbarButton::Redo => 51,
         ToolbarButton::Crop => 56,
+        ToolbarButton::Menu(m) => 64 + m as usize,
+        ToolbarButton::Censor(c) => 70 + c as usize,
+        ToolbarButton::WidthValue(w) => 80 + w as usize,
+        ToolbarButton::Original => 90,
+        ToolbarButton::About => 91,
+        ToolbarButton::PinWindow => 92,
+        ToolbarButton::RecentClear => 93,
+        ToolbarButton::RecentPage(next) => 94 + usize::from(next),
+        ToolbarButton::SystemAudio => 96,
+        ToolbarButton::Microphone => 97,
+        ToolbarButton::StartRecord => 98,
+        ToolbarButton::RecentOpen(i) => 128 + i * 3,
+        ToolbarButton::RecentPin(i) => 129 + i * 3,
+        ToolbarButton::RecentDelete(i) => 130 + i * 3,
     }
 }
 fn property(b: ToolbarButton, occurrence: usize) -> bool {
@@ -180,19 +194,36 @@ fn selected(b: ToolbarButton, property: bool, e: Option<EditorBar>) -> bool {
         ToolbarButton::TextOutline => e.is_some_and(|e| e.text_style == kadr_doc::annotation::TextStyle::Outline),
         ToolbarButton::TextCallout => e.is_some_and(|e| e.callout),
         ToolbarButton::Smart => e.is_some_and(|e| e.smart != SmartUi::Off),
+        ToolbarButton::Pin => e.is_some_and(|e| e.ui.pinned),
+        ToolbarButton::Original => e.is_some_and(|e| e.ui.original),
+        ToolbarButton::SystemAudio => e.is_some_and(|e| e.ui.system_audio),
+        ToolbarButton::Microphone => e.is_some_and(|e| e.ui.microphone),
+        ToolbarButton::WidthValue(w) => e.is_some_and(|e| e.width == w),
+        ToolbarButton::Censor(level) => {
+            e.is_some_and(|e| matches!(e.smart, SmartUi::On(c, _) | SmartUi::Scanning(c) if c == level))
+        }
+        ToolbarButton::Menu(BarMenu::Shapes) => {
+            e.is_some_and(|e| matches!(e.tool, Tool::Line | Tool::Rectangle | Tool::Ellipse))
+        }
+        ToolbarButton::Menu(BarMenu::Blur) => {
+            e.is_some_and(|e| matches!(e.tool, Tool::Blur | Tool::BlurEllipse | Tool::BlurBrush))
+        }
+        ToolbarButton::Menu(BarMenu::More) => {
+            e.is_some_and(|e| matches!(e.tool, Tool::Eraser | Tool::Lens | Tool::Spotlight | Tool::Redact))
+        }
         _ => false,
     }
 }
 /// Ids follow the order of the target layout; a second occurrence of a button gets its own id.
 fn ids(target: &ToolbarLayout) -> Vec<usize> {
-    let mut occurrences = [0usize; 64];
+    let mut occurrences = [0usize; 4096];
     target
         .buttons
         .iter()
         .map(|(b, _, _)| {
             let base = code(*b);
             occurrences[base] += 1;
-            base + (occurrences[base] - 1) * 64
+            base + (occurrences[base] - 1) * 4096
         })
         .collect()
 }
@@ -264,8 +295,13 @@ impl State {
         }
         let ids = ids(target);
         let poses: Vec<_> =
-            target.buttons.iter().zip(&ids).map(|((b, r, _), id)| (*b, *r, property(*b, id / 64))).collect();
-        let tool_goal = slot(&poses, |b, p| !p && matches!(b, ToolbarButton::Tool(_)) && selected(b, p, e));
+            target.buttons.iter().zip(&ids).map(|((b, r, _), id)| (*b, *r, property(*b, id / 4096))).collect();
+        let tool_goal = slot(&poses, |b, p| {
+            !p && matches!(
+                b,
+                ToolbarButton::Tool(_) | ToolbarButton::Menu(BarMenu::Shapes | BarMenu::Blur | BarMenu::More)
+            ) && selected(b, p, e)
+        });
         let swatch_goal = slot(&poses, |b, p| matches!(b, ToolbarButton::Color(_)) && selected(b, p, e));
         let (anchor_point, direction) = anchor(target.panel, target.sel);
         if !animate {
@@ -293,11 +329,11 @@ impl State {
                         label: t.clone(),
                         opacity: 1.0,
                         hover: f32::from(self.hovered == Some(*b)),
-                        selected: f32::from(selected(*b, property(*b, id / 64), e)),
+                        selected: f32::from(selected(*b, property(*b, id / 4096), e)),
                         press: 0.0,
                         live: true,
                         enabled: enabled(*b, e),
-                        property: property(*b, id / 64),
+                        property: property(*b, id / 4096),
                     })
                     .collect(),
             };
@@ -323,7 +359,7 @@ impl State {
         let mut entering = 0;
         for ((b, r, label), &id) in target.buttons.iter().zip(&ids) {
             let index = self.controls.iter().position(|c| c.id == id).unwrap_or_else(|| {
-                let is_property = property(*b, id / 64);
+                let is_property = property(*b, id / 4096);
                 let mut control = Control {
                     id,
                     button: *b,

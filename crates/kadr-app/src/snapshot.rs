@@ -23,7 +23,7 @@ use kadr_render::theme::Theme;
 const BANDS: [u32; 5] = [0xffffff, 0xd4d4d8, 0x777777, 0x5e6ad2, 0x000000];
 
 pub fn run(path: &str, scale: f32, editor: bool, exit: Option<f32>) -> Result<(), Box<dyn Error>> {
-    run_tool(path, scale, editor, kadr_doc::annotation::Tool::Arrow, exit)
+    run_tool(path, scale, editor, kadr_doc::annotation::Tool::Arrow, exit, None)
 }
 fn run_tool(
     path: &str,
@@ -31,6 +31,7 @@ fn run_tool(
     editor: bool,
     tool: kadr_doc::annotation::Tool,
     exit: Option<f32>,
+    dock: Option<&DockPreview>,
 ) -> Result<(), Box<dyn Error>> {
     if !(0.5..=3.0).contains(&scale) {
         return Err("масштаб должен быть от 0.5 до 3".into());
@@ -78,8 +79,10 @@ fn run_tool(
                 handles: !editor,
                 magnifier: if editor { None } else { Some(&magnifier) },
                 toolbar: Some(Toolbar {
-                    hovered: Some(ToolbarButton::Save),
+                    recent: dock.map_or(&[], |d| d.items.as_slice()),
+                    hovered: if dock.is_some() { None } else { Some(ToolbarButton::Save) },
                     editor: editor.then_some(scene::EditorBar {
+                        ui: dock.map_or_else(Default::default, |d| d.ui),
                         text_style: Default::default(),
                         callout: false,
                         tool,
@@ -88,7 +91,7 @@ fn run_tool(
                         strength: 1,
                         undo: true,
                         redo: false,
-                        smart: scene::SmartUi::On(scene::Censor::Hard, 12),
+                        smart: dock.map_or(scene::SmartUi::On(scene::Censor::Hard, 12), |d| d.smart),
                     }),
                 }),
                 hud: if editor { None } else { Some(&hud) },
@@ -181,6 +184,7 @@ pub fn design_set(dir: &str) -> Result<(), Box<dyn Error>> {
                 true,
                 tool,
                 None,
+                None,
             )?;
         }
         let thumb =
@@ -227,6 +231,7 @@ pub fn design_set(dir: &str) -> Result<(), Box<dyn Error>> {
                     id: format!("fixture-{i}"),
                     created_ms: 1793300000000 - i as u64 * 300000,
                     open: true,
+                    pinned: false,
                     preview: Some(kadr_doc::Image::new(kadr_doc::Rect::new(0, 0, 320, 180), background(320, 180))),
                 })
                 .collect();
@@ -234,6 +239,55 @@ pub fn design_set(dir: &str) -> Result<(), Box<dyn Error>> {
             std::fs::write(
                 dir.join(format!("{name}-{}.png", (scale * 100.0) as i32)),
                 kadr_doc::pixels::encode_png(&image)?,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+struct DockPreview {
+    ui: scene::BarState,
+    smart: scene::SmartUi,
+    items: Vec<scene::RecentItem>,
+}
+/// Render the production dock and every menu, without opening windows or capturing the desktop.
+pub fn dock_set(dir: &str) -> Result<(), Box<dyn Error>> {
+    let dir = std::path::Path::new(dir);
+    std::fs::create_dir_all(dir)?;
+    for scale in [1.0, 1.5, 2.0] {
+        for (name, menu, smart, tool) in [
+            ("compact", None, scene::SmartUi::Off, kadr_doc::annotation::Tool::Select),
+            ("censor", None, scene::SmartUi::On(scene::Censor::Hard, 6), kadr_doc::annotation::Tool::Select),
+            ("figures", Some(scene::BarMenu::Shapes), scene::SmartUi::Off, kadr_doc::annotation::Tool::Rectangle),
+            ("blur", Some(scene::BarMenu::Blur), scene::SmartUi::Off, kadr_doc::annotation::Tool::Blur),
+            ("more", Some(scene::BarMenu::More), scene::SmartUi::Off, kadr_doc::annotation::Tool::Select),
+            ("properties", Some(scene::BarMenu::Properties), scene::SmartUi::Off, kadr_doc::annotation::Tool::Text),
+            ("recent", Some(scene::BarMenu::Recent), scene::SmartUi::Off, kadr_doc::annotation::Tool::Select),
+            ("record", Some(scene::BarMenu::Record), scene::SmartUi::Off, kadr_doc::annotation::Tool::Select),
+        ] {
+            let items = (0..6)
+                .map(|i| scene::RecentItem {
+                    preview: Some(std::sync::Arc::new(kadr_doc::Image::new(
+                        kadr_doc::Rect::new(0, 0, 320, 160),
+                        background(320, 160),
+                    ))),
+                    title: format!("Снимок {}", i + 1),
+                    caption: "Сегодня, 14:38".into(),
+                    pinned: i < 2,
+                })
+                .collect();
+            let preview = DockPreview {
+                ui: scene::BarState { menu, pinned: true, recent_count: 6, ..Default::default() },
+                smart,
+                items,
+            };
+            run_tool(
+                dir.join(format!("{name}-{}.png", (scale * 100.0) as u32)).to_str().unwrap(),
+                scale,
+                true,
+                tool,
+                None,
+                Some(&preview),
             )?;
         }
     }
