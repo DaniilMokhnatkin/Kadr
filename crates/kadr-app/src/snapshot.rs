@@ -189,6 +189,12 @@ pub fn design_set(dir: &str) -> Result<(), Box<dyn Error>> {
             dir.join(format!("settings-{}.png", (scale * 100.0) as i32)),
             kadr_doc::pixels::encode_png(&crate::settings_window::preview(scale)?)?,
         )?;
+        for (name, report) in [("about", false), ("about-report", true)] {
+            std::fs::write(
+                dir.join(format!("{name}-{}.png", (scale * 100.0) as i32)),
+                kadr_doc::pixels::encode_png(&crate::about_window::preview(scale, report)?)?,
+            )?;
+        }
         std::fs::write(
             dir.join(format!("thumbnail-{}.png", (scale * 100.0) as i32)),
             kadr_doc::pixels::encode_png(&crate::thumbnail::preview(thumb.clone(), scale)?)?,

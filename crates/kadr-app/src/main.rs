@@ -9,6 +9,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod about_window;
 mod app;
 mod bubble;
 mod capture_audit;

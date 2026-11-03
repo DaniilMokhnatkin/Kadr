@@ -2,6 +2,10 @@
 # Visual C++ Redistributable.
 [env]
 KADR_REPO = { value = "DaniilMokhnatkin/Kadr", force = false }
+# «Нашли ошибку?» in «О программе»: the relay that forwards a report to the author's Telegram.
+# The key is not a secret (it ships inside kadr.exe); it only turns away bots that scan addresses.
+KADR_REPORT_URL = { value = "https://kadr-bug-relay.starkoff.workers.dev/report", force = false }
+KADR_REPORT_KEY = { value = "fbe573dd344a4b849acac2ac6c822c4e", force = false }
 
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]

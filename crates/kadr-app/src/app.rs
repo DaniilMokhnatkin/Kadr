@@ -107,6 +107,7 @@ const CMD_CONFIG: usize = 17;
 const CMD_RECENT: usize = 18;
 const CMD_UPDATE: usize = 19;
 const CMD_CLIPBOARD: usize = 20;
+const CMD_ABOUT: usize = 21;
 
 const HOST_CLASS: PCWSTR = w!("KadrHost");
 
@@ -522,6 +523,7 @@ impl App {
             }
         }
         crate::settings_window::restyle();
+        crate::about_window::restyle();
         let mut data = self.tray_data();
         data.uFlags = NIF_ICON;
         data.hIcon = self.icons.tray();
@@ -607,6 +609,7 @@ impl App {
             let _ = AppendMenuW(menu, MF_STRING | check(self.hook.is_some()), CMD_HOOK, w!("Наблюдатель LL-хука"));
             let _ = AppendMenuW(menu, MF_STRING, CMD_LOG, w!("Открыть лог"));
             let _ = AppendMenuW(menu, MF_STRING, CMD_UPDATE, w!("Проверить обновления"));
+            let _ = AppendMenuW(menu, MF_STRING, CMD_ABOUT, w!("О программе…"));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(menu, MF_STRING, CMD_EXIT, w!("Выход"));
             let cursor = cursor_pos();
@@ -624,6 +627,7 @@ impl App {
             CMD_LAST_REGION => self.capture_mode(Mode::LastRegion, 0, "трей"),
             CMD_CONFIG => crate::settings_window::show(self.instance, self.hwnd, WM_APP_SETTINGS, &self.config),
             CMD_UPDATE => crate::update::check_now(),
+            CMD_ABOUT => crate::about_window::show(self.instance),
             CMD_CLIPBOARD => self.show_clipboard(),
             CMD_WARM => {
                 self.set_warm(!self.warm);
@@ -1195,6 +1199,15 @@ impl App {
     fn on_update(&mut self) {
         use crate::bubble::Content;
         for event in crate::update::take_events() {
+            // «О программе» shows what came of its own «Проверить»; a bubble is left for an update to install.
+            let (line, found) = match &event {
+                crate::update::Event::Found(release) => (format!("Доступна версия {}", release.version), true),
+                crate::update::Event::Current => ("Установлена последняя версия".to_string(), false),
+                crate::update::Event::Failed(e) => (format!("Не удалось проверить: {e}"), false),
+            };
+            if crate::about_window::update_result(line) && !found {
+                continue;
+            }
             let content = match event {
                 crate::update::Event::Found(release) => {
                     log_info!("обновления: доступна {}", release.version);

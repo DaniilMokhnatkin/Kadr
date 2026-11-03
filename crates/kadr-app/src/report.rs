@@ -8,22 +8,11 @@ use windows::core::{HSTRING, PCWSTR, w};
 const LOG_LINES: usize = 80;
 
 pub fn build(config: &Config) -> String {
-    let build = registry_text("CurrentBuild").unwrap_or_default();
-    let mut product = registry_text("ProductName").unwrap_or_else(|| "Windows".into());
-    // Windows 11 still calls itself «Windows 10» there; its builds start at 22000.
-    if build.parse::<u32>().is_ok_and(|b| b >= 22000) {
-        product = product.replace("Windows 10", "Windows 11");
-    }
-    let windows = format!(
-        "{product} {} (сборка {build}.{})",
-        registry_text("DisplayVersion").unwrap_or_default(),
-        registry_number("UBR").unwrap_or(0),
-    );
     let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default();
     let log = kadr_win::log::tail(LOG_LINES);
     compose(&Facts {
         version: env!("CARGO_PKG_VERSION"),
-        windows,
+        windows: windows(),
         exe,
         recognition: config.recognition.engine.name(),
         paddle: crate::ocr_paddle::available(),
@@ -31,6 +20,21 @@ pub fn build(config: &Config) -> String {
         offline: crate::translate_local::available(),
         log,
     })
+}
+
+/// «Windows 11 Pro 24H2 (сборка 26100.4061)»: also sent with a bug report.
+pub fn windows() -> String {
+    let build = registry_text("CurrentBuild").unwrap_or_default();
+    let mut product = registry_text("ProductName").unwrap_or_else(|| "Windows".into());
+    // Windows 11 still calls itself «Windows 10» there; its builds start at 22000.
+    if build.parse::<u32>().is_ok_and(|b| b >= 22000) {
+        product = product.replace("Windows 10", "Windows 11");
+    }
+    format!(
+        "{product} {} (сборка {build}.{})",
+        registry_text("DisplayVersion").unwrap_or_default(),
+        registry_number("UBR").unwrap_or(0),
+    )
 }
 
 struct Facts {
