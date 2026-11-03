@@ -31,6 +31,27 @@ fn document() -> Document {
     }
 }
 #[test]
+fn pinned_captures_survive_export_clear_limits_and_restart_until_explicitly_deleted() {
+    let mut store = setup("pinned-v4");
+    store.create("aa", 1, &frames(), &document()).unwrap();
+    store.set_pinned("aa", true).unwrap();
+    store.create("bb", 2, &frames(), &document()).unwrap();
+    assert_eq!(store.list().unwrap()[0].id, "aa", "pinned captures come first");
+    assert!(!store.remove_if_revision("aa", 1).unwrap(), "export keeps a pinned capture");
+    store.set_max(1).unwrap();
+    assert_eq!(store.list().unwrap().len(), 2, "the ordinary limit excludes pins");
+    store.clear().unwrap();
+    let root = store.root.clone();
+    drop(store);
+    let store = Store::new(root.clone(), TestCrypto, 1).unwrap();
+    let entries = store.list().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].pinned);
+    store.remove("aa").unwrap();
+    assert!(store.list().unwrap().is_empty());
+    fs::remove_dir(root).unwrap();
+}
+#[test]
 fn annotations_roundtrip_and_old_drafts_default_to_empty() {
     use kadr_doc::annotation::{Annotation, Tool};
     let mut doc = document();

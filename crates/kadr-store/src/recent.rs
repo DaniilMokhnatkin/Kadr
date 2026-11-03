@@ -50,11 +50,15 @@ struct Meta {
     version: u32,
     created_ms: u64,
     open: bool,
+    #[serde(default)]
+    pinned: bool,
 }
+#[derive(Clone)]
 pub struct Entry {
     pub id: String,
     pub created_ms: u64,
     pub open: bool,
+    pub pinned: bool,
     pub preview: Option<Image>,
 }
 pub struct Draft {
@@ -100,7 +104,7 @@ impl<C: Crypto> Store<C> {
                 &pending.join("state.enc"),
                 &self.crypto.seal(toml::to_string(doc).map_err(io::Error::other)?.as_bytes())?,
             )?;
-            let meta = Meta { version: 1, created_ms, open: true };
+            let meta = Meta { version: 1, created_ms, open: true, pinned: false };
             write_meta(&pending, &meta)?;
             fs::rename(&pending, &dir)
         })();
@@ -182,9 +186,9 @@ impl<C: Crypto> Store<C> {
                 pixels::decode_png(&bytes[8..], Rect::new(0, 0, w as i32, h as i32))
             })()
             .ok();
-            entries.push(Entry { id, created_ms: meta.created_ms, open: meta.open, preview });
+            entries.push(Entry { id, created_ms: meta.created_ms, open: meta.open, pinned: meta.pinned, preview });
         }
-        entries.sort_by(|a, b| b.created_ms.cmp(&a.created_ms).then(b.id.cmp(&a.id)));
+        entries.sort_by(|a, b| b.pinned.cmp(&a.pinned).then(b.created_ms.cmp(&a.created_ms)).then(b.id.cmp(&a.id)));
         Ok(entries)
     }
     /// Незавершённые сессии прежнего процесса остаются доступными, уведомление показывается один раз.
@@ -223,17 +227,17 @@ impl<C: Crypto> Store<C> {
         if !dir.exists() {
             return Ok(false);
         }
-        if self.document(&dir)?.revision != revision {
+        if read_meta(&dir)?.pinned || self.document(&dir)?.revision != revision {
             return Ok(false);
         }
         self.remove(id)?;
         Ok(true)
     }
-    fn remove(&self, id: &str) -> io::Result<()> {
+    pub fn remove(&self, id: &str) -> io::Result<()> {
         remove_files(&self.dir(id)?)
     }
     pub fn clear(&self) -> io::Result<()> {
-        for entry in self.list()? {
+        for entry in self.list()?.into_iter().filter(|e| !e.pinned) {
             self.remove(&entry.id)?;
         }
         Ok(())
@@ -242,10 +246,17 @@ impl<C: Crypto> Store<C> {
         self.max = max.clamp(1, 10);
         self.prune()
     }
+    pub fn set_pinned(&self, id: &str, pinned: bool) -> io::Result<()> {
+        let dir = self.dir(id)?;
+        let mut meta = read_meta(&dir)?;
+        meta.pinned = pinned;
+        write_meta(&dir, &meta)?;
+        self.prune()
+    }
     fn prune(&self) -> io::Result<()> {
         let mut entries = self.list()?;
         entries.sort_by(|a, b| b.open.cmp(&a.open).then(b.created_ms.cmp(&a.created_ms)).then(b.id.cmp(&a.id)));
-        for entry in entries.into_iter().skip(self.max) {
+        for entry in entries.into_iter().filter(|e| !e.pinned).skip(self.max) {
             self.remove(&entry.id)?;
         }
         Ok(())
