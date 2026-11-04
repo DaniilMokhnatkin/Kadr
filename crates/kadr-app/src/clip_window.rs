@@ -264,6 +264,10 @@ impl State {
             if let Some(c) = new.and_then(|i| self.cards.get_mut(i)) {
                 c.hover.target_with(1.0, Curve::HOVER_IN, now);
             }
+            // The card under the pointer is the one Enter pastes; it is not scrolled, the hand is on it.
+            if let Some(i) = new {
+                self.mark_focus(i);
+            }
         }
         if let Some(old) = self.hover {
             self.glow(old).target_with(0.0, Curve::HOVER_OUT, now);
@@ -273,12 +277,16 @@ impl State {
         }
         self.hover = h;
     }
-    fn set_focus(&mut self, i: usize) {
+    fn mark_focus(&mut self, i: usize) {
         let now = self.now();
         for (k, c) in self.cards.iter_mut().enumerate() {
             c.focus.target_with(f32::from(k == i), Curve::GLIDE, now);
         }
         self.focus = i;
+    }
+    fn set_focus(&mut self, i: usize) {
+        self.mark_focus(i);
+        let now = self.now();
         // Keep the focused card in view.
         let s = self.scale;
         let (_, h) = self.size();

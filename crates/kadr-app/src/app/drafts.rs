@@ -106,6 +106,13 @@ impl App {
         }
     }
     pub(super) fn show_recent(&mut self) {
+        self.open_recent(false);
+    }
+    /// «Снимки» from the clipboard history: a click pastes the snapshot, as a text card does.
+    pub(super) fn show_recent_to_paste(&mut self) {
+        self.open_recent(true);
+    }
+    fn open_recent(&mut self, paste: bool) {
         if self.loading_recent {
             return;
         }
@@ -120,7 +127,7 @@ impl App {
             }
         }
         self.pause_capture();
-        self.recent_window.as_ref().unwrap().show(self.config.recent.enabled, self.paused.is_some());
+        self.recent_window.as_ref().unwrap().show(self.config.recent.enabled, self.paused.is_some(), paste);
         if !self.recent.send(Command::List) {
             self.recent_window.as_ref().unwrap().error("Хранилище недоступно");
         }
@@ -141,6 +148,14 @@ impl App {
                     self.loading_recent = false;
                 }
             }
+            Some(Request::Paste(id)) => {
+                self.loading_recent = true;
+                self.pasting_recent = true;
+                if !self.recent.send(Command::Load(id)) {
+                    self.loading_recent = false;
+                    self.pasting_recent = false;
+                }
+            }
             Some(Request::Clear) => {
                 self.finish_paused();
                 self.close_session();
@@ -154,6 +169,7 @@ impl App {
             }
             Some(Request::Close) => {
                 self.loading_recent = false;
+                self.pasting_recent = false;
                 self.resume_capture();
             }
             Some(Request::Refresh) => {
@@ -182,6 +198,18 @@ impl App {
                     }
                 }
                 Event::Loaded { id, draft } => {
+                    if self.pasting_recent {
+                        self.pasting_recent = false;
+                        self.loading_recent = false;
+                        if let Some(window) = &self.recent_window {
+                            window.hide();
+                        }
+                        self.resume_capture();
+                        self.paste_draft(&draft);
+                        let token = Token { id, revision: draft.document.revision };
+                        self.recent.send(Command::State { token, document: draft.document, open: false });
+                        continue;
+                    }
                     if !self.loading_recent {
                         let token = Token { id, revision: draft.document.revision };
                         self.recent.send(Command::State { token, document: draft.document, open: false });
@@ -200,6 +228,7 @@ impl App {
                 Event::Error(error) => {
                     let was_loading = self.loading_recent;
                     self.loading_recent = false;
+                    self.pasting_recent = false;
                     if was_loading {
                         self.resume_capture();
                     }

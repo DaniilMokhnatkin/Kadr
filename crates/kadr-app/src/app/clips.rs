@@ -109,7 +109,7 @@ impl App {
                 crate::clip_window::Request::Pin(id, on) => history.pin(id, on),
                 crate::clip_window::Request::Remove(id) => history.remove(id),
                 crate::clip_window::Request::Clear => history.clear(),
-                crate::clip_window::Request::Recent => self.show_recent(),
+                crate::clip_window::Request::Recent => self.show_recent_to_paste(),
             }
         }
     }
@@ -143,6 +143,35 @@ impl App {
             log_warn!("история буфера: в буфер не положилось: {e}");
             return;
         }
+        self.paste_into_target();
+    }
+
+    /// A snapshot from «Недавние», opened from the history: the selection with its drawings goes
+    /// onto the clipboard and into the window that was in front, as a text card would.
+    pub(super) fn paste_draft(&mut self, draft: &kadr_store::recent::Draft) {
+        let crop = draft
+            .document
+            .selection_rect()
+            .unwrap_or_else(|| draft.frames.iter().map(|f| f.rect).reduce(|a, b| a.union(&b)).unwrap_or_default());
+        let image = match kadr_render::annotations::flatten_background(&draft.frames, crop, &draft.document.annotations)
+        {
+            Ok(image) => Arc::new(image),
+            Err(e) => {
+                log_warn!("Недавние: снимок не собрался для вставки: {e}");
+                self.notify("Не удалось вставить снимок", &e.message());
+                return;
+            }
+        };
+        if let Err(e) = clipboard::put_image(self.hwnd, &image) {
+            log_warn!("Недавние: в буфер не положилось: {e}");
+            self.notify("Не удалось скопировать снимок", &e.message());
+            return;
+        }
+        self.clipboard = Some(image);
+        self.paste_into_target();
+    }
+
+    fn paste_into_target(&mut self) {
         let Some(target) = self.clip_target.take() else { return };
         unsafe {
             let _ = SetForegroundWindow(target);

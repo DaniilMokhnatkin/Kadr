@@ -188,6 +188,8 @@ pub struct App {
     recent_entries: Vec<kadr_store::recent::Entry>,
     recent_items: Vec<kadr_render::scene::RecentItem>,
     loading_recent: bool,
+    /// The snapshot being loaded goes onto the clipboard and is pasted, not opened.
+    pasting_recent: bool,
     recovery_notice: bool,
     bench_mode: bool,
     pins: Vec<crate::pin_window::Window>,
@@ -301,6 +303,7 @@ pub fn run(warm_override: Option<bool>, perf_hud: bool, bench: Option<u32>) -> R
             recent_entries: Vec::new(),
             recent_items: Vec::new(),
             loading_recent: false,
+            pasting_recent: false,
             recovery_notice: false,
             bench_mode: bench.is_some(),
             icons,

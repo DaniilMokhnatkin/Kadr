@@ -33,6 +33,8 @@ use windows_numerics::{Matrix3x2, Vector2};
 
 pub enum Request {
     Load(String),
+    /// Opened from the clipboard history: put the snapshot on the clipboard and paste it.
+    Paste(String),
     Pin(String, bool),
     Delete(String),
     Clear,
@@ -292,6 +294,8 @@ struct State {
     enabled: bool,
     error: Option<String>,
     returning: bool,
+    /// Opened from the clipboard history: a card pastes instead of opening the editor.
+    paste: bool,
     scale: f32,
     epoch: Instant,
     hover: Option<Hit>,
@@ -328,9 +332,18 @@ impl State {
         let over = (desired_height(w, self.scale, self.cards.len()) - h).max(0.0);
         self.scroll = (self.scroll.min(over) + dy).clamp(0.0, over);
     }
+    /// What a click or Enter on a card does: paste it when opened from the clipboard history.
+    fn open(&self, id: String) -> Request {
+        if self.paste { Request::Paste(id) } else { Request::Load(id) }
+    }
     fn set_hover(&mut self, h: Option<Hit>) {
         if self.hover == h {
             return;
+        }
+        // The card under the pointer is the one Enter opens.
+        if let Some(Hit::Card(i) | Hit::Pin(i) | Hit::Delete(i)) = h {
+            self.focus = i;
+            self.focus_visible = false;
         }
         let now = self.now();
         for (which, value) in [(self.hover, 0.0), (h, 1.0)] {
@@ -396,6 +409,7 @@ fn new_state(hwnd: HWND, host: HWND, message: u32, scale: f32) -> State {
         enabled: true,
         error: None,
         returning: false,
+        paste: false,
         scale,
         epoch: Instant::now(),
         hover: None,
@@ -468,7 +482,7 @@ impl Window {
         }
     }
 
-    pub fn show(&self, enabled: bool, returning: bool) {
+    pub fn show(&self, enabled: bool, returning: bool, paste: bool) {
         DATA.with(|d| {
             if let Ok(mut guard) = d.try_borrow_mut()
                 && let Some(d) = guard.as_mut()
@@ -477,6 +491,7 @@ impl Window {
                 d.enabled = enabled;
                 d.error = None;
                 d.returning = returning;
+                d.paste = paste;
                 d.focus_visible = false;
                 d.scroll = 0.0;
                 d.set_hover(None);
@@ -699,6 +714,7 @@ fn paint(ui: &Ui, st: &State, size: (f32, f32), now: f64, opaque: bool) -> bool 
         (None, true, 0) => ("Загрузка…".into(), theme.text_muted),
         (None, _, 0) => ("Несохранённых снимков нет".into(), theme.text_muted),
         (None, _, n) if !st.enabled => (format!("{} · новые снимки не сохраняются", count_label(n)), theme.text_muted),
+        (None, _, n) if st.paste => (format!("{} · нажмите, чтобы вставить", count_label(n)), theme.text_muted),
         (None, _, n) => (format!("{} · нажмите, чтобы продолжить редактирование", count_label(n)), theme.text_muted),
     };
     text(gpu, &ui.fonts.small, &subtitle, rect(PAD * s, 52.0 * s, size.0 * 0.6, 72.0 * s), tone);
@@ -1012,7 +1028,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                         st.set_confirm(false);
                         Some(Request::Clear)
                     }
-                    Hit::Card(i) => st.cards.get(i).map(|c| Request::Load(c.id.clone())),
+                    Hit::Card(i) => st.cards.get(i).map(|c| st.open(c.id.clone())),
                     Hit::Pin(i) => st.cards.get(i).map(|c| Request::Pin(c.id.clone(), !c.pinned)),
                     Hit::Delete(i) => st.cards.get(i).map(|c| Request::Delete(c.id.clone())),
                     Hit::More => {
@@ -1074,7 +1090,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 let cols = columns(width(), st.scale, st.cards.len());
                 let f = st.focus;
                 if key == VK_RETURN.0 || key == VK_SPACE.0 {
-                    return st.cards.get(f).map(|c| c.id.clone());
+                    return st.cards.get(f).map(|c| st.open(c.id.clone()));
                 }
                 st.focus = match key {
                     k if k == VK_LEFT.0 => f.saturating_sub(1),
@@ -1087,8 +1103,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 focus_ring_target(st, size());
                 None
             });
-            if let Some(id) = load {
-                request(Request::Load(id));
+            if let Some(r) = load {
+                request(r);
             }
             redraw();
             return LRESULT(0);
@@ -1155,7 +1171,8 @@ pub fn preview(
     }
     let w = (WIDTH * scale).round();
     // No taller than a 1080p screen at 150 % leaves for it, so a long list shows how it scrolls.
-    let h = desired_height(w, scale, st.cards.len().max(if loading { 4 } else { 0 })).min(PREVIEW_HEIGHT * scale).round();
+    let h =
+        desired_height(w, scale, st.cards.len().max(if loading { 4 } else { 0 })).min(PREVIEW_HEIGHT * scale).round();
     glass::render_offscreen(&ui.device, w as u32, h as u32, || {
         paint(&ui, &st, (w, h), 10.0, true);
     })
