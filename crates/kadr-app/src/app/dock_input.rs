@@ -66,11 +66,15 @@ impl App {
             ToolbarButton::Menu(menu) => {
                 if let Some(a) = &mut self.active {
                     a.drawing.finish_text();
-                    a.bar.toggle(menu);
-                    // «Фигуры» takes its shape at once (a rectangle until another is picked): one
-                    // click and you draw; the menu that opens only offers to change it.
-                    if menu == BarMenu::Shapes && a.bar.menu == Some(menu) && a.drawing.tool != a.bar.shape {
-                        a.drawing.set_tool(a.bar.shape);
+                    // «Фигуры» and «Размытие»: the first click takes the group's tool (a rectangle,
+                    // an area blur, or whichever was picked last) without covering the picture with
+                    // a menu; once it is on, a click (or coming back with the mouse) opens the choice.
+                    match group_tool(&a.bar, menu) {
+                        Some(tool) if !in_group(menu, a.drawing.tool) => {
+                            a.drawing.set_tool(tool);
+                            a.bar.select_tool(tool);
+                        }
+                        _ => a.bar.toggle(menu),
                     }
                 }
             }
@@ -243,4 +247,41 @@ fn own_window(hwnd: HWND) -> bool {
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
     }
     pid == std::process::id()
+}
+
+/// The tool a group button stands for: its last pick, a rectangle and an area blur at first.
+pub(super) fn group_tool(bar: &BarState, menu: BarMenu) -> Option<kadr_doc::annotation::Tool> {
+    match menu {
+        BarMenu::Shapes => Some(bar.shape),
+        BarMenu::Blur => Some(bar.blur),
+        _ => None,
+    }
+}
+
+/// `tool` belongs to the group behind `menu`.
+pub(super) fn in_group(menu: BarMenu, tool: kadr_doc::annotation::Tool) -> bool {
+    use kadr_doc::annotation::Tool;
+    match menu {
+        BarMenu::Shapes => matches!(tool, Tool::Line | Tool::Rectangle | Tool::Ellipse),
+        BarMenu::Blur => matches!(tool, Tool::Blur | Tool::BlurEllipse | Tool::BlurBrush),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kadr_doc::annotation::Tool;
+
+    #[test]
+    fn group_buttons_stand_for_their_last_pick_and_know_their_tools() {
+        let mut bar = BarState::default();
+        assert_eq!(group_tool(&bar, BarMenu::Shapes), Some(Tool::Rectangle));
+        assert_eq!(group_tool(&bar, BarMenu::Blur), Some(Tool::Blur));
+        bar.select_tool(Tool::BlurBrush);
+        assert_eq!(group_tool(&bar, BarMenu::Blur), Some(Tool::BlurBrush));
+        assert_eq!(group_tool(&bar, BarMenu::More), None);
+        assert!(in_group(BarMenu::Shapes, Tool::Ellipse) && !in_group(BarMenu::Shapes, Tool::Pen));
+        assert!(in_group(BarMenu::Blur, Tool::BlurBrush) && !in_group(BarMenu::Blur, Tool::Rectangle));
+    }
 }

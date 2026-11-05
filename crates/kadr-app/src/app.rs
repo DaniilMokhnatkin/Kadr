@@ -1023,6 +1023,17 @@ impl App {
         // Кнопки панели перехватывают мышь раньше выделения: нажатие сразу выполняет действие.
         if active.hovered != hit {
             active.hovered = hit;
+            // Coming back to «Фигуры» or «Размытие» while its tool is already on opens the choice;
+            // the first click only took the tool, so passing over the dock does not pop menus.
+            if msg == WM_MOUSEMOVE
+                && let Some(ToolbarButton::Menu(menu)) = hit
+                && active.bar.menu.is_none()
+                && !active.drawing.busy()
+                && dock_input::in_group(menu, active.drawing.tool)
+            {
+                active.drawing.finish_text();
+                active.bar.toggle(menu);
+            }
             self.request_redraw();
         }
         if msg == WM_MOUSEMOVE {
