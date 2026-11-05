@@ -353,7 +353,10 @@ fn value(c: &mut std::iter::Peekable<std::str::Chars>) -> Option<Json> {
                             if (0xD800..0xDC00).contains(&code) && c.next() == Some('\\') && c.next() == Some('u') {
                                 let low: String = (0..4).filter_map(|_| c.next()).collect();
                                 let low = u32::from_str_radix(&low, 16).ok()?;
-                                code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+                                code = match low.checked_sub(0xDC00) {
+                                    Some(low) if low < 0x400 => 0x10000 + ((code - 0xD800) << 10) + low,
+                                    _ => 0xFFFD,
+                                };
                             }
                             s.push(char::from_u32(code).unwrap_or('\u{fffd}'));
                         }
@@ -376,10 +379,14 @@ fn value(c: &mut std::iter::Peekable<std::str::Chars>) -> Option<Json> {
             Some(Json::Bool)
         }
         _ => {
+            let mut read = 0;
             while c.peek().is_some_and(|ch| ch.is_ascii_digit() || "+-.eE".contains(*ch)) {
                 c.next();
+                read += 1;
             }
-            Some(Json::Number)
+            // Anything else (a stray «:», a bare word) would leave the list loop spinning on the same
+            // character forever, piling up numbers: an answer we cannot read is no answer.
+            (read > 0).then_some(Json::Number)
         }
     }
 }
@@ -403,6 +410,14 @@ mod tests {
         assert_eq!(parse_short(r#"["Привет"]"#).unwrap().text, "Привет");
         assert!(parse_short("<html>429</html>").is_none());
         assert!(parse_short("[]").is_none());
+    }
+    /// An answer with a character the reader does not expect inside a list (here «:» of an object
+    /// written without braces) once spun the reader forever; now it is simply unreadable.
+    #[test]
+    fn a_strange_answer_ends_instead_of_spinning() {
+        assert!(parse(r#"[[["Привет","Hello"]],"x":1]"#).is_none());
+        assert!(parse_short(r#"[["Привет", en]]"#).is_none());
+        assert!(parse(r#"[[["\ud83dA","x"]]]"#).is_some());
     }
     /// Stand-in translator: tags each line it got, records calls; Russian lines come back as they are.
     fn fake(

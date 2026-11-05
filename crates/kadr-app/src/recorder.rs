@@ -48,6 +48,7 @@ pub struct Finished {
 pub struct Recording {
     stop: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
+    cursor: Arc<AtomicBool>,
 }
 
 impl Recording {
@@ -60,31 +61,37 @@ impl Recording {
         self.cancel.store(true, Ordering::Relaxed);
         self.stop.store(true, Ordering::Relaxed);
     }
+    /// Whether the mouse pointer is drawn into the frames from now on.
+    pub fn set_cursor(&self, on: bool) {
+        self.cursor.store(on, Ordering::Relaxed);
+    }
 }
 
 /// Starts recording `region` (desktop pixels) into `path`, with the microphone mixed in when
-/// `microphone`; `notify` is called from the worker.
+/// `microphone` and the pointer drawn in when `cursor`; `notify` is called from the worker.
 pub fn start_with_audio(
     region: Rect,
     path: PathBuf,
     system_audio: bool,
     microphone: bool,
+    cursor: bool,
     notify: impl Fn(Event) + Send + 'static,
 ) -> Recording {
     let stop = Arc::new(AtomicBool::new(false));
     let cancel = Arc::new(AtomicBool::new(false));
-    let (s, c) = (stop.clone(), cancel.clone());
+    let cursor = Arc::new(AtomicBool::new(cursor));
+    let (s, c, p) = (stop.clone(), cancel.clone(), cursor.clone());
     std::thread::spawn(move || {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         }
-        let result = record(region, &path, (system_audio, microphone), &s, &c, &notify);
+        let result = record(region, &path, (system_audio, microphone), &s, &c, &p, &notify);
         if c.load(Ordering::Relaxed) {
             let _ = std::fs::remove_file(&path);
         }
         notify(Event::Done(result.map_err(|e| e.message())));
     });
-    Recording { stop, cancel }
+    Recording { stop, cancel, cursor }
 }
 
 /// The area as the encoder needs it: on one monitor, even width and height.
@@ -100,6 +107,7 @@ fn record(
     audio: (bool, bool),
     stop: &AtomicBool,
     cancel: &AtomicBool,
+    cursor: &AtomicBool,
     notify: &dyn Fn(Event),
 ) -> Result<Finished> {
     let (adapters, mut outputs) = kadr_capture::enumerate()?;
@@ -182,7 +190,9 @@ fn record(
             }
             Err(e) => log_warn!("запись, захват: {e}"),
         }
-        canvas.cursor(region);
+        if cursor.load(Ordering::Relaxed) {
+            canvas.cursor(region);
+        }
         // Frames are stamped on a fixed grid; a late turn skips ahead instead of drifting.
         let due = (elapsed.as_nanos() as i64 / (frame * 100)).max(frames);
         match &sink {
@@ -721,7 +731,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("kadr-record-{}-{microphone}.mp4", std::process::id()));
         let (tx, rx) = std::sync::mpsc::channel();
         let ticks = tx.clone();
-        let rec = start_with_audio(Rect::new(0, 0, 320, 240), path.clone(), true, microphone, move |e| match e {
+        let rec = start_with_audio(Rect::new(0, 0, 320, 240), path.clone(), true, microphone, true, move |e| match e {
             Event::Tick(_) => {
                 let _ = ticks.send(None);
             }
@@ -758,7 +768,7 @@ mod tests {
     fn records_a_gif_that_loops_for_about_as_long_as_it_ran() {
         let path = std::env::temp_dir().join(format!("kadr-record-{}.gif", std::process::id()));
         let (tx, rx) = std::sync::mpsc::channel();
-        let rec = start_with_audio(Rect::new(0, 0, 320, 240), path.clone(), false, false, move |e| {
+        let rec = start_with_audio(Rect::new(0, 0, 320, 240), path.clone(), false, false, true, move |e| {
             if let Event::Done(r) = e {
                 let _ = tx.send(r);
             }

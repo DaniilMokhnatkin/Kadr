@@ -333,7 +333,11 @@ impl App {
             draft: Some(DraftState { token, document: draft.document, view }),
             drawing,
             text_surrogate: None,
-            bar: kadr_render::scene::BarState { microphone: self.config.capture.microphone, ..Default::default() },
+            bar: kadr_render::scene::BarState {
+                microphone: self.config.capture.microphone,
+                cursor: self.config.capture.cursor,
+                ..Default::default()
+            },
         });
         self.source = "Недавние";
         self.render_all();

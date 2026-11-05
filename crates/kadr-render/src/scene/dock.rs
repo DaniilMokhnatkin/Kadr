@@ -32,6 +32,8 @@ pub struct BarState {
     pub original: bool,
     pub system_audio: bool,
     pub microphone: bool,
+    /// The pointer is drawn into screen recordings.
+    pub cursor: bool,
     pub recent_count: usize,
     /// How far the «Недавние» grid is scrolled, in quarters of a row (the cards glide between them).
     pub scroll: u32,
@@ -47,6 +49,7 @@ impl Default for BarState {
             original: false,
             system_audio: true,
             microphone: false,
+            cursor: true,
             recent_count: 0,
             scroll: 0,
             focus: None,
@@ -349,7 +352,8 @@ fn popover(
         BarMenu::Record => vec![
             (ToolbarButton::SystemAudio, "Звук компьютера".into()),
             (ToolbarButton::Microphone, "Микрофон".into()),
-            (ToolbarButton::StartRecord, "Начать запись".into()),
+            (ToolbarButton::RecordCursor, "Курсор на видео".into()),
+            (ToolbarButton::StartRecord, "Подготовить запись".into()),
         ],
     };
     let pw = ((if menu == BarMenu::Recent {
@@ -377,7 +381,7 @@ fn popover(
     } else if menu == BarMenu::Shapes || menu == BarMenu::Blur {
         124.8 * s
     } else if menu == BarMenu::Record {
-        188.8 * s
+        232.8 * s
     } else if menu == BarMenu::Properties {
         fields.height * s
     } else {
@@ -449,7 +453,7 @@ fn popover(
         }
     } else if menu == BarMenu::Record {
         for (i, (b, label)) in rows.into_iter().enumerate() {
-            let top = y + (40.8 + i as f32 * 44.0 + if i == 2 { 8.0 } else { 0.0 }) * s;
+            let top = y + (40.8 + i as f32 * 44.0 + if i == 3 { 8.0 } else { 0.0 }) * s;
             push(b, rect(x + 8.0 * s, top, x + pw - 8.0 * s, top + 44.0 * s), &label)?;
         }
     } else if menu == BarMenu::Properties {
@@ -887,6 +891,7 @@ impl Painter<'_> {
                 ToolbarButton::Color(_)
                     | ToolbarButton::SystemAudio
                     | ToolbarButton::Microphone
+                    | ToolbarButton::RecordCursor
                     | ToolbarButton::RecentPin(_)
                     | ToolbarButton::RecentDelete(_)
             )
@@ -969,7 +974,7 @@ impl Painter<'_> {
             return Ok(());
         }
         let ink = fade(if !c.enabled { theme.disabled } else { theme.text }, alpha);
-        if matches!(b, ToolbarButton::SystemAudio | ToolbarButton::Microphone) {
+        if matches!(b, ToolbarButton::SystemAudio | ToolbarButton::Microphone | ToolbarButton::RecordCursor) {
             glyph(gpu, b, rect(r.left + 12.0 * s, r.top, r.left + 32.0 * s, r.bottom), ink, s, e);
             draw_text(gpu, &c.label, r.left + 42.0 * s, (r.top + r.bottom - c.label.h) / 2.0, ink);
             let track = rect(r.right - 52.0 * s, r.top + 10.0 * s, r.right - 12.0 * s, r.bottom - 10.0 * s);
@@ -1286,6 +1291,7 @@ fn glyph(gpu: &Gpu, b: ToolbarButton, r: D2D_RECT_F, ink: D2D1_COLOR_F, s: f32, 
         ToolbarButton::Original => "eye",
         ToolbarButton::SystemAudio => "volume",
         ToolbarButton::Microphone => "mic",
+        ToolbarButton::RecordCursor => "cursor",
         ToolbarButton::StrengthStep(false) => "minus",
         ToolbarButton::StrengthStep(true) => "plus",
         _ => "info",
@@ -1415,7 +1421,7 @@ mod tests {
             let text = TextStyles::new(&shared, s).unwrap();
             for (menu, width, height) in [
                 (BarMenu::Shapes, 280.0, 124.8),
-                (BarMenu::Record, 288.0, 188.8),
+                (BarMenu::Record, 288.0, 232.8),
                 (BarMenu::Recent, 456.0, 372.4),
                 (BarMenu::Properties, 304.0, 240.4),
             ] {

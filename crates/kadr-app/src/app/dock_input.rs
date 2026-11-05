@@ -67,6 +67,11 @@ impl App {
                 if let Some(a) = &mut self.active {
                     a.drawing.finish_text();
                     a.bar.toggle(menu);
+                    // «Фигуры» takes its shape at once (a rectangle until another is picked): one
+                    // click and you draw; the menu that opens only offers to change it.
+                    if menu == BarMenu::Shapes && a.bar.menu == Some(menu) && a.drawing.tool != a.bar.shape {
+                        a.drawing.set_tool(a.bar.shape);
+                    }
                 }
             }
             ToolbarButton::Recent => {
@@ -93,6 +98,11 @@ impl App {
             ToolbarButton::Microphone => {
                 if let Some(a) = &mut self.active {
                     a.bar.microphone = !a.bar.microphone;
+                }
+            }
+            ToolbarButton::RecordCursor => {
+                if let Some(a) = &mut self.active {
+                    a.bar.cursor = !a.bar.cursor;
                 }
             }
             ToolbarButton::StartRecord => self.start_record_from_selection(),
@@ -161,8 +171,20 @@ impl App {
     }
     pub(super) fn dock_key(&mut self, vk: u16) -> bool {
         let Some(a) = &self.active else { return false };
-        if !self.overlays.iter().any(|o|o.hwnd==unsafe {GetForegroundWindow()}) {
-            return true;
+        // Without focus only Esc reaches here, through the global hotkey: over a fullscreen game
+        // Windows refuses to hand focus to the overlay, and Esc must still close the capture.
+        // A Kadr window in front of the overlay (a translation bubble) gets that Esc itself.
+        let foreground = unsafe { GetForegroundWindow() };
+        if !self.overlays.iter().any(|o| o.hwnd == foreground) {
+            if vk != VK_ESCAPE.0 {
+                return true;
+            }
+            if own_window(foreground) && foreground != self.hwnd {
+                unsafe {
+                    let _ = PostMessageW(Some(foreground), WM_KEYDOWN, WPARAM(VK_ESCAPE.0 as usize), LPARAM(0));
+                }
+                return true;
+            }
         }
         if a.drawing.typing() {
             return false;
@@ -209,4 +231,16 @@ impl App {
         self.request_redraw();
         true
     }
+}
+
+/// A window of this very process (a bubble, «Настройки»), not the game or app the capture sits over.
+fn own_window(hwnd: HWND) -> bool {
+    if hwnd.is_invalid() {
+        return false;
+    }
+    let mut pid = 0;
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    }
+    pid == std::process::id()
 }

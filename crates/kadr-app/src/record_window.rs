@@ -1,5 +1,6 @@
-//! Recording in progress: a red frame around the area and a small panel under it with a pulsing
-//! dot, the time so far and «Отмена / Стоп». The area itself is a hole in the window, so clicks
+//! A framed recording: a red frame around the area and a small panel under it. First it waits —
+//! «Готово к записи» with «Курсор · Отмена · Пуск» — so the video to record can be started first;
+//! after «Пуск» the dot pulses, the time runs and «Пуск» becomes «Стоп». The area itself is a hole in the window, so clicks
 //! and the wheel reach whatever is being recorded; only the panel takes clicks. Nothing is drawn
 //! inside the area for small selections. The control window is excluded from capture.
 use crate::glass::{self, Device, Surface, fade, fill, inside, mix, rect, shadow, stroke, text};
@@ -20,15 +21,19 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, w};
 
 pub enum Request {
+    /// Begin recording the framed area.
+    Start,
     /// Keep the video.
     Stop,
-    /// Throw it away.
+    /// Throw it away (or never start).
     Cancel,
+    /// Show the mouse pointer in the video, or hide it.
+    Cursor(bool),
 }
 
 /// Frame margin around the area, panel size and gap, in DIPs.
 const MARGIN: f32 = 6.0;
-const PANEL_W: f32 = 340.0;
+const PANEL_W: f32 = 420.0;
 const PANEL_H: f32 = 48.0;
 const GAP: f32 = 10.0;
 
@@ -44,11 +49,16 @@ struct State {
     area: D2D_RECT_F,
     above: bool,
     panel: D2D_RECT_F,
+    /// Framed, waiting for «Пуск».
+    armed: bool,
+    /// The pointer goes into the video.
+    cursor: bool,
     /// Time recorded so far; none while the encoder is still starting.
     elapsed: Option<Duration>,
     epoch: Instant,
     appear: Spring,
-    hover: [Spring; 2],
+    /// «Курсор», «Отмена», «Пуск»/«Стоп».
+    hover: [Spring; 3],
 }
 
 thread_local! {
@@ -84,13 +94,16 @@ fn placement(area: Rect, work: Rect, scale: f32) -> (Rect, Rect, bool) {
         .union(&Rect::new(panel.left - edge, panel.top - edge, panel.right + edge, panel.bottom + edge));
     (window, panel, on_top)
 }
-fn buttons(p: D2D_RECT_F, s: f32) -> (D2D_RECT_F, D2D_RECT_F) {
+/// «Курсор», «Отмена» and «Пуск»/«Стоп», laid out right to left from the panel's edge.
+fn buttons(p: D2D_RECT_F, s: f32) -> [D2D_RECT_F; 3] {
     let done = rect(p.right - 96.0 * s, p.top + 8.0 * s, p.right - 8.0 * s, p.bottom - 8.0 * s);
     let cancel = rect(done.left - 88.0 * s, done.top, done.left - 6.0 * s, done.bottom);
-    (cancel, done)
+    let cursor = rect(cancel.left - 92.0 * s, done.top, cancel.left - 6.0 * s, done.bottom);
+    [cursor, cancel, done]
 }
 
-pub fn open(instance: HINSTANCE, host: HWND, message: u32, area: Rect) {
+/// Frames `area` and waits for «Пуск»; `cursor` is where the pointer switch starts.
+pub fn open(instance: HINSTANCE, host: HWND, message: u32, area: Rect, cursor: bool) {
     if STATE.with(|s| s.borrow().is_none()) {
         let class = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
@@ -131,10 +144,12 @@ pub fn open(instance: HINSTANCE, host: HWND, message: u32, area: Rect) {
                 area: rect(0.0, 0.0, 1.0, 1.0),
                 above: false,
                 panel: rect(0.0, 0.0, 1.0, 1.0),
+                armed: true,
+                cursor,
                 elapsed: None,
                 epoch: Instant::now(),
                 appear: spring(Curve::POP),
-                hover: [spring(Curve::HOVER_IN), spring(Curve::HOVER_IN)],
+                hover: [spring(Curve::HOVER_IN), spring(Curve::HOVER_IN), spring(Curve::HOVER_IN)],
             })
         });
     }
@@ -167,6 +182,8 @@ pub fn open(instance: HINSTANCE, host: HWND, message: u32, area: Rect) {
             (area.bottom - top) as f32,
         );
         st.elapsed = None;
+        st.armed = true;
+        st.cursor = cursor;
         let now = st.epoch.elapsed().as_secs_f64();
         st.appear.snap(0.0);
         st.appear.target(1.0, now);
@@ -196,6 +213,21 @@ pub fn open(instance: HINSTANCE, host: HWND, message: u32, area: Rect) {
         SetWindowRgn(hwnd, Some(shape), true);
         let _ = InvalidateRect(Some(hwnd), None, false);
     }
+}
+
+/// «Пуск» went through: the panel turns into the running clock with «Стоп».
+pub fn recording() {
+    STATE.with(|s| {
+        if let Ok(mut guard) = s.try_borrow_mut()
+            && let Some(st) = guard.as_mut()
+        {
+            st.armed = false;
+            st.elapsed = None;
+            unsafe {
+                let _ = InvalidateRect(Some(st.hwnd), None, false);
+            }
+        }
+    });
 }
 
 pub fn update(elapsed: Duration) {
@@ -305,11 +337,12 @@ fn paint(device: &Device, st: &State) -> bool {
     shadow(gpu, p, 14.0 * s, s, 10.0, 4.0, 0.25 * a);
     fill(gpu, fade(theme.surface, a), p, 14.0 * s);
     stroke(gpu, fade(theme.hairline, a), p, 14.0 * s, 1.0);
-    let (cancel, stop) = buttons(p, s);
+    let [pointer, cancel, stop] = buttons(p, s);
     let cy = (p.top + p.bottom) / 2.0;
     let dot = 5.0 * s;
     let label_left = p.left + 16.0 * s + dot * 2.0 + 10.0 * s;
     let (label, tone) = match st.elapsed {
+        _ if st.armed => ("Готово к записи".to_string(), theme.text),
         Some(t) => {
             fill(
                 gpu,
@@ -321,14 +354,27 @@ fn paint(device: &Device, st: &State) -> bool {
         }
         None => ("Готовлю запись…".to_string(), theme.text_muted),
     };
-    let left = if st.elapsed.is_some() { label_left } else { p.left + 16.0 * s };
-    text(gpu, label_font, &label, rect(left, p.top, cancel.left - 8.0 * s, p.bottom), fade(tone, a));
-    let hc = st.hover[0].value(now);
+    let left = if st.elapsed.is_some() && !st.armed { label_left } else { p.left + 16.0 * s };
+    text(gpu, label_font, &label, rect(left, p.top, pointer.left - 8.0 * s, p.bottom), fade(tone, a));
+    // «Курсор»: a filled chip while the pointer goes into the video, an outline crossed out when not.
+    let hp = st.hover[0].value(now);
+    if st.cursor {
+        fill(gpu, fade(mix(theme.tint, theme.tint_strong, 0.6 + 0.4 * hp), a), pointer, 9.0 * s);
+        text(gpu, button_font, "Курсор", pointer, fade(theme.text, a));
+    } else {
+        fill(gpu, fade(mix(theme.tint, theme.tint_strong, hp), a * 0.6), pointer, 9.0 * s);
+        stroke(gpu, fade(theme.hairline, a), pointer, 9.0 * s, 1.0);
+        text(gpu, button_font, "Курсор", pointer, fade(theme.text_muted, a));
+        let (mid, half) = ((pointer.top + pointer.bottom) / 2.0, 26.0 * s);
+        let x = (pointer.left + pointer.right) / 2.0;
+        fill(gpu, fade(theme.text_muted, a), rect(x - half, mid - 0.5 * s, x + half, mid + 0.5 * s), 0.0);
+    }
+    let hc = st.hover[1].value(now);
     fill(gpu, fade(mix(theme.tint, theme.tint_strong, hc), a), cancel, 9.0 * s);
     text(gpu, button_font, "Отмена", cancel, fade(theme.text, a));
-    let hs = st.hover[1].value(now);
+    let hs = st.hover[2].value(now);
     fill(gpu, fade(mix(red(), glass::rgb(0xffffff, 1.0), 0.12 * hs), a), stop, 9.0 * s);
-    text(gpu, button_font, "Стоп", stop, fade(glass::rgb(0xffffff, 1.0), a));
+    text(gpu, button_font, if st.armed { "Пуск" } else { "Стоп" }, stop, fade(glass::rgb(0xffffff, 1.0), a));
     true
 }
 
@@ -388,9 +434,9 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 if let Ok(mut guard) = s.try_borrow_mut()
                     && let Some(st) = guard.as_mut()
                 {
-                    let (cancel, done) = buttons(st.panel, st.scale);
+                    let targets = buttons(st.panel, st.scale);
                     let now = st.epoch.elapsed().as_secs_f64();
-                    for (spring, on) in st.hover.iter_mut().zip([inside(cancel, x, y), inside(done, x, y)]) {
+                    for (spring, on) in st.hover.iter_mut().zip(targets.map(|r| inside(r, x, y))) {
                         let curve = if on { Curve::HOVER_IN } else { Curve::HOVER_OUT };
                         spring.target_with(f32::from(on), curve, now);
                     }
@@ -404,11 +450,14 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_LBUTTONUP => {
             let (x, y) = point();
             let r = STATE.with(|s| {
-                let Ok(state) = s.try_borrow() else { return Default::default() };
-                let st = state.as_ref()?;
-                let (cancel, done) = buttons(st.panel, st.scale);
+                let Ok(mut state) = s.try_borrow_mut() else { return Default::default() };
+                let st = state.as_mut()?;
+                let [pointer, cancel, done] = buttons(st.panel, st.scale);
                 if inside(done, x, y) {
-                    Some(Request::Stop)
+                    Some(if st.armed { Request::Start } else { Request::Stop })
+                } else if inside(pointer, x, y) {
+                    st.cursor = !st.cursor;
+                    Some(Request::Cursor(st.cursor))
                 } else if inside(cancel, x, y) {
                     Some(Request::Cancel)
                 } else {
@@ -417,6 +466,9 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             });
             if let Some(r) = r {
                 request(r);
+                unsafe {
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
             }
             return LRESULT(0);
         }
@@ -438,8 +490,9 @@ mod tests {
                     assert!(pane.top >= monitor.top && pane.bottom <= monitor.bottom);
                     assert!(pane.left >= monitor.left && pane.right <= monitor.right);
                     assert!(pane.top >= monitor.top + monitor.height()/2);
-                    let (cancel, stop) = buttons(rect(pane.left as f32, pane.top as f32, pane.right as f32, pane.bottom as f32),scale);
-                    for button in [cancel,stop] {
+                    let row = buttons(rect(pane.left as f32, pane.top as f32, pane.right as f32, pane.bottom as f32),scale);
+                    assert!(row[0].left >= pane.left as f32, "«Курсор» stays on the panel");
+                    for button in row {
                         assert!(button.left >= monitor.left as f32 && button.right <= monitor.right as f32);
                         assert!(button.top >= monitor.top as f32 && button.bottom <= monitor.bottom as f32);
                     }
@@ -461,7 +514,7 @@ mod tests {
     fn the_area_is_a_hole_so_the_wheel_reaches_the_page() {
         let instance: HINSTANCE = unsafe { GetModuleHandleW(None) }.unwrap().into();
         let area = Rect::new(300, 200, 900, 700);
-        open(instance, HWND::default(), 0, area);
+        open(instance, HWND::default(), 0, area, true);
         let hwnd = STATE.with(|s| s.borrow().as_ref().map(|st| st.hwnd)).unwrap();
         let mut affinity = 0;
         unsafe { GetWindowDisplayAffinity(hwnd, &mut affinity) }.unwrap();

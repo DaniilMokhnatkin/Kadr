@@ -373,6 +373,7 @@ fn code(b: ToolbarButton) -> usize {
         ToolbarButton::RecentClear => 93,
         ToolbarButton::SystemAudio => 96,
         ToolbarButton::Microphone => 97,
+        ToolbarButton::RecordCursor => 99,
         ToolbarButton::StartRecord => 98,
         ToolbarButton::RecentOpen(i) => 128 + i * 3,
         ToolbarButton::RecentPin(i) => 129 + i * 3,
@@ -420,6 +421,7 @@ fn selected(b: ToolbarButton, property: bool, e: Option<EditorBar>) -> bool {
         ToolbarButton::Original => e.is_some_and(|e| e.ui.original),
         ToolbarButton::SystemAudio => e.is_some_and(|e| e.ui.system_audio),
         ToolbarButton::Microphone => e.is_some_and(|e| e.ui.microphone),
+        ToolbarButton::RecordCursor => e.is_some_and(|e| e.ui.cursor),
         ToolbarButton::WidthValue(w) => e.is_some_and(|e| e.width == w),
         ToolbarButton::Censor(level) => {
             e.is_some_and(|e| matches!(e.smart, SmartUi::On(c, _) | SmartUi::Scanning(c) if c == level))

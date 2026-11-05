@@ -389,6 +389,14 @@ pub fn escape() -> bool {
     false
 }
 
+/// «Поддержать»: the author's Boosty page in the default browser (from «О программе» and the tray).
+pub fn open_support() {
+    let url = kadr_win::wide(BOOSTY);
+    unsafe {
+        ShellExecuteW(None, w!("open"), PCWSTR(url.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
+    }
+}
+
 /// «Проверить обновления» from the tray: «О программе» opens and checks at once, its button says what came of it.
 pub fn check_updates(instance: HINSTANCE) {
     show(instance);
@@ -1017,12 +1025,7 @@ fn press(st: &mut State, h: Hit) -> (Option<View>, bool) {
         }
         Hit::Report => return (Some(View::Report), false),
         Hit::Back => return (Some(View::About), false),
-        Hit::Support => {
-            let url = kadr_win::wide(BOOSTY);
-            unsafe {
-                ShellExecuteW(None, w!("open"), PCWSTR(url.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
-            }
-        }
+        Hit::Support => open_support(),
         Hit::Field(field) => {
             st.focus = field;
             st.typed = st.now();

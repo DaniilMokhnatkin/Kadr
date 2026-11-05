@@ -217,6 +217,8 @@ pub enum ToolbarButton {
     RecentClear,
     SystemAudio,
     Microphone,
+    /// The pointer drawn into the video.
+    RecordCursor,
     StartRecord,
 }
 
@@ -263,7 +265,8 @@ impl ToolbarButton {
             Self::RecentClear => "Очистить всё",
             Self::SystemAudio => "Звук компьютера",
             Self::Microphone => "Микрофон",
-            Self::StartRecord => "Начать запись",
+            Self::RecordCursor => "Курсор на видео",
+            Self::StartRecord => "Подготовить запись",
         }
     }
 }

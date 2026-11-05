@@ -45,7 +45,7 @@ const ROW: f32 = 46.0;
 const SECTION: f32 = 34.0;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
-const TOGGLES: [&str; 10] = [
+const TOGGLES: [&str; 11] = [
     "Запускать вместе с Windows",
     "Миниатюра после снимка",
     "Миниатюра и после копирования",
@@ -55,9 +55,10 @@ const TOGGLES: [&str; 10] = [
     "Помнить несохранённые снимки",
     "История буфера по Win+V",
     "Микрофон в записи",
+    "Курсор на записи",
     "Мгновенный захват",
 ];
-const TOGGLE_HINTS: [&str; 10] = [
+const TOGGLE_HINTS: [&str; 11] = [
     "",
     "Перетащите её в чат или нажмите, чтобы открыть",
     "Выключите — появится только после «Сохранить»",
@@ -67,6 +68,7 @@ const TOGGLE_HINTS: [&str; 10] = [
     "До 25 снимков, зашифрованно",
     "Закрепление и поиск, остаётся после перезагрузки",
     "Голос подмешивается к звуку компьютера в MP4",
+    "Указатель мыши виден на видео",
     "≈8 мс вместо ≈23 мс, чуть больше памяти",
 ];
 const KEYS: [&str; 5] = ["Выделить область", "Монитор под курсором", "Активное окно", "Последняя область", "Недавние"];
@@ -257,6 +259,7 @@ fn toggle_value(c: &Config, i: usize, auto: bool) -> bool {
         6 => c.recent.enabled,
         7 => c.clipboard.enabled,
         8 => c.capture.microphone,
+        9 => c.capture.cursor,
         _ => c.capture.warm,
     }
 }
@@ -1039,6 +1042,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                             6 => st.config.recent.enabled ^= true,
                             7 => st.config.clipboard.enabled ^= true,
                             8 => st.config.capture.microphone ^= true,
+                            9 => st.config.capture.cursor ^= true,
                             _ => st.config.capture.warm ^= true,
                         }
                         st.sync_knobs(false);
@@ -1236,6 +1240,7 @@ pub fn preview(scale: f32) -> windows::core::Result<kadr_doc::Image> {
             knob(true),
             knob(false),
             knob(true),
+            knob(false),
         ],
         slides: [
             Spring::with(0.0, Curve::GLIDE),

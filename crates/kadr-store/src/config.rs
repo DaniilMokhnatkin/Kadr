@@ -129,6 +129,8 @@ pub struct Capture {
     pub auto_censor: bool,
     /// Screen recordings (MP4) mix the default microphone in with the computer's sound.
     pub microphone: bool,
+    /// Screen recordings show the mouse pointer.
+    pub cursor: bool,
     pub video: VideoFormat,
 }
 
@@ -229,7 +231,14 @@ impl Default for Hotkeys {
 
 impl Default for Capture {
     fn default() -> Self {
-        Self { warm: true, magnifier: true, auto_censor: false, microphone: false, video: VideoFormat::Mp4 }
+        Self {
+            warm: true,
+            magnifier: true,
+            auto_censor: false,
+            microphone: false,
+            cursor: true,
+            video: VideoFormat::Mp4,
+        }
     }
 }
 
@@ -256,6 +265,7 @@ magnifier = true  # лупа с цветом пикселя у курсора, �
 auto_censor = false # перед копированием размывать почты, телефоны и номера карт
 video = "mp4"   # запись экрана: mp4 — со звуком, gif — без звука, для чатов
 microphone = false # в запись MP4 подмешивать микрофон к звуку компьютера
+cursor = true  # курсор мыши виден на записи экрана
 
 [save]
 folder = ""     # пусто — «Изображения\Screenshots»
@@ -306,12 +316,13 @@ pub fn render(c: &Config) -> String {
     out.push_str(&key("last_region", &h.last_region, "та же область, что в прошлый раз"));
     out.push_str(&key("recent", &h.recent, "вернуть несохранённый снимок"));
     out.push_str(&format!(
-        "\n[capture]\nwarm = {:<7}# держать захват наготове: ~8 мс вместо ~23 мс\nmagnifier = {:<6}# лупа с цветом пикселя у курсора, пока выбираете область\nauto_censor = {:<6}# перед копированием размывать почты, телефоны и номера карт\nvideo = {:<8}# запись экрана: mp4 — со звуком, gif — без звука, для чатов\nmicrophone = {:<6}# в запись MP4 подмешивать микрофон к звуку компьютера\n",
+        "\n[capture]\nwarm = {:<7}# держать захват наготове: ~8 мс вместо ~23 мс\nmagnifier = {:<6}# лупа с цветом пикселя у курсора, пока выбираете область\nauto_censor = {:<6}# перед копированием размывать почты, телефоны и номера карт\nvideo = {:<8}# запись экрана: mp4 — со звуком, gif — без звука, для чатов\nmicrophone = {:<6}# в запись MP4 подмешивать микрофон к звуку компьютера\ncursor = {:<6}# курсор мыши виден на записи экрана\n",
         c.capture.warm,
         c.capture.magnifier,
         c.capture.auto_censor,
         basic(c.capture.video.name()),
-        c.capture.microphone
+        c.capture.microphone,
+        c.capture.cursor
     ));
     out.push_str(&format!(
         "\n[save]\nfolder = {:<7}# пусто — «Изображения\\Screenshots»\nnotify = {:<7}# уведомление после сохранения\nthumbnail = {:<6}# миниатюра в углу: перетащите в чат, клик — открыть\nthumbnail_on_copy = {:<5}# миниатюра и после копирования в буфер; false — только после сохранения\n",

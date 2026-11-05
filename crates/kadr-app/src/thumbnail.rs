@@ -440,7 +440,8 @@ fn file_for_drag(shot: &Shot) -> Option<PathBuf> {
     }
     let dir = std::env::temp_dir().join("Kadr");
     let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join(kadr_export::file::timestamp_name());
+    // `timestamp_name` is a bare stem: without «.png» chats and Explorer get a file they cannot open.
+    let path = kadr_export::file::unique_path(&dir, &kadr_export::file::timestamp_name());
     kadr_export::file::write_png(&path, &shot.image).ok().map(|()| path)
 }
 

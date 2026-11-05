@@ -98,8 +98,7 @@ const TIMER_HOOK_CHECK: usize = 1;
 const TIMER_DRAFT: usize = 2;
 
 const CMD_CAPTURE: usize = 10;
-const CMD_WARM: usize = 11;
-const CMD_HOOK: usize = 12;
+const CMD_SUPPORT: usize = 11;
 const CMD_LOG: usize = 13;
 const CMD_EXIT: usize = 14;
 const CMD_FULLSCREEN: usize = 15;
@@ -602,7 +601,6 @@ impl App {
     }
 
     fn show_menu(&mut self) {
-        let check = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
         let command = unsafe {
             let Ok(menu) = CreatePopupMenu() else { return };
             let label = wide(&format!("Выделить область\t{}", self.config.hotkeys.region));
@@ -619,11 +617,10 @@ impl App {
             let label = wide(&format!("Недавние…\t{}", self.config.hotkeys.recent));
             let _ = AppendMenuW(menu, MF_STRING, CMD_RECENT, PCWSTR(label.as_ptr()));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-            let _ = AppendMenuW(menu, MF_STRING | check(self.warm), CMD_WARM, w!("Прогретый дубликатор"));
-            let _ = AppendMenuW(menu, MF_STRING | check(self.hook.is_some()), CMD_HOOK, w!("Наблюдатель LL-хука"));
-            let _ = AppendMenuW(menu, MF_STRING, CMD_LOG, w!("Открыть лог"));
+            let _ = AppendMenuW(menu, MF_STRING, CMD_SUPPORT, w!("Поддержать Kadr ♥"));
             let _ = AppendMenuW(menu, MF_STRING, CMD_UPDATE, w!("Проверить обновления"));
             let _ = AppendMenuW(menu, MF_STRING, CMD_ABOUT, w!("О программе…"));
+            let _ = AppendMenuW(menu, MF_STRING, CMD_LOG, w!("Открыть лог"));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(menu, MF_STRING, CMD_EXIT, w!("Выход"));
             let cursor = cursor_pos();
@@ -644,14 +641,7 @@ impl App {
             CMD_UPDATE => crate::about_window::check_updates(self.instance),
             CMD_ABOUT => crate::about_window::show(self.instance),
             CMD_CLIPBOARD => self.show_clipboard(),
-            CMD_WARM => {
-                self.set_warm(!self.warm);
-                log_info!("дубликатор: {}", self.mode());
-            }
-            CMD_HOOK => {
-                self.set_hook(self.hook.is_none());
-                log_info!("наблюдатель LL-хука: {}", if self.hook.is_some() { "включён" } else { "выключен" });
-            }
+            CMD_SUPPORT => crate::about_window::open_support(),
             CMD_LOG => {
                 if let Some(path) = log::path() {
                     let path = wide(&path.to_string_lossy());
@@ -765,7 +755,11 @@ impl App {
             draft: None,
             drawing: Drawing::default(),
             text_surrogate: None,
-            bar: kadr_render::scene::BarState { microphone: self.config.capture.microphone, ..Default::default() },
+            bar: kadr_render::scene::BarState {
+                microphone: self.config.capture.microphone,
+                cursor: self.config.capture.cursor,
+                ..Default::default()
+            },
         });
         self.source = source;
         self.render_all();
